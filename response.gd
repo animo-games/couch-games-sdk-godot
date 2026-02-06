@@ -9,5 +9,10 @@ static func from_dict(response: Dictionary) -> CouchGamesSDKResponse:
 	var res = new()
 	res.success = response.get("success", false)
 	res.error = response.get("error", "Unknown error")
-	res.payload = response.get("payload", {})
+	var payload = response.get('payload', {})
+	if payload is String:
+		res.payload = JSON.parse_string(payload)
+	elif payload is Dictionary:
+		res.payload = payload
+
 	return res
