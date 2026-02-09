@@ -30,9 +30,9 @@ func _setup_message_listener() -> void:
   # Set up the JavaScript listener and pass the callback
 
 func mock_load() -> Dictionary:
-	await get_tree().create_timer(3).timeout
 	print("Mock load")
-	return { "1": { "character_idx": 0.0, "inventory.enabled_items": [1.0, 2.0], "spawn_scene_path": "res://scenes/confluence/PlatformTypes.tscn", "spawner_path": "Level/InteractableProps/SpawnPoint2" }, "2": { "character_idx": 1.0, "inventory.enabled_items": [1.0, 2.0], "spawn_scene_path": "", "spawner_path": "" }, "4783139376069951111": { "is_on": true } }
+	await get_tree().process_frame
+	return { "1": { "character_idx": 0.0, "inventory.enabled_items": [1.0, 2.0], "spawn_scene_path": "", "spawner_path": "Level/InteractableProps/SpawnPoint" }, "2": { "character_idx": 1.0, "inventory.enabled_items": [1.0, 2.0], "spawn_scene_path": "", "spawner_path": "Level/InteractableProps/SpawnPoint" }, "4783139376069951111": { "is_on": true } }
 
 func _on_received_message(args: Array):
 	var event = args[0]
