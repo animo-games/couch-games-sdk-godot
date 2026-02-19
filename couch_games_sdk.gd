@@ -8,7 +8,7 @@ extends Node
 # Private
 # ────────────────────────────────────────────────
 
-var _request_callbacks: Dictionary = {}  # request_id -> Callable
+var _request_callbacks: Dictionary = {} # request_id -> Callable
 var _is_web: bool = OS.has_feature("web")
 var window: JavaScriptObject
 
@@ -32,7 +32,7 @@ func _setup_message_listener() -> void:
 func mock_load() -> Dictionary:
 	print("Mock load")
 	await get_tree().process_frame
-	return { "1": { "character_idx": 0.0, "inventory.enabled_items": [1.0, 2.0], "spawn_scene_path": "", "spawner_path": "Level/InteractableProps/SpawnPoint" }, "2": { "character_idx": 1.0, "inventory.enabled_items": [1.0, 2.0], "spawn_scene_path": "", "spawner_path": "Level/InteractableProps/SpawnPoint" }, "4783139376069951111": { "is_on": true } }
+	return {1: {"character_idx": 0.0, "inventory.enabled_items": [1.0, 2.0], "spawn_scene_path": "", "spawner_path": "Level/InteractableProps/SpawnPoint"}, 2: {"character_idx": 1.0, "inventory.enabled_items": [1.0, 2.0], "spawn_scene_path": "", "spawner_path": "Level/InteractableProps/SpawnPoint"}, 4783139376069951111: {"is_on": true}}
 
 func _on_received_message(args: Array):
 	var event = args[0]
@@ -93,7 +93,7 @@ func _send(type: String, payload: Dictionary = {}) -> String:
 
 func save_game(save_data: Dictionary) -> CouchGamesSDKResponse:
 	var request_id = _send("saveGame", {
-		"saveData": JSON.stringify(save_data)
+		"saveData": save_data
 	})
 
 	var response := await _wait_for_response(request_id)
@@ -128,7 +128,7 @@ func gameplay_end():
 func _wait_for_response(request_id: String) -> CouchGamesSDKResponse:
 	var start_time = Time.get_ticks_msec()
 	while true:
-		await get_tree().process_frame  # wait one frame
+		await get_tree().process_frame # wait one frame
 		if _request_callbacks.has(request_id):
 			var response = _request_callbacks[request_id]
 			_request_callbacks.erase(request_id)
