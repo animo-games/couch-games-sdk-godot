@@ -20,6 +20,7 @@ var _callback_ref = JavaScriptBridge.create_callback(_on_received_message)
 
 func init() -> void:
 	if _is_web:
+		var result = ProjectSettings.load_resource_pack("/tmp/level.pck")
 		window = JavaScriptBridge.get_interface("window");
 		_setup_message_listener()
 
@@ -118,11 +119,20 @@ func gameplay_start():
 func gameplay_end():
 	var request_id = _send("gameplayEnd")
 
-	_request_callbacks[request_id] = func(response: Dictionary):
-		if response.get("success", false):
-			print("Gameplay ended")
-		else:
-			printerr("Gameplay end failed: ", response.get("error", "Unknown error"))
+	var response := await _wait_for_response(request_id)
+	if response.success:
+		print("Gameplay ended")
+	else:
+		printerr("Gameplay end failed: ", response.error)
+
+func gameplay_completed():
+	var request_id = _send("gameplayCompleted")
+
+	var response := await _wait_for_response(request_id)
+	if response.success:
+		print("Gameplay completed")
+	else:
+		printerr("Gameplay completed failed: ", response.error)
 
 # Helper to wait for a specific request ID
 func _wait_for_response(request_id: String) -> CouchGamesSDKResponse:
