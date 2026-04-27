@@ -1,6 +1,6 @@
-# couchgames.gd
+# couch_games_sdk.gd
 # Autoload singleton for CouchGames SDK
-# Communicates with parent window via postMessage (Web export only)
+# Communicates with parent window via direct calls to window.CouchGames (Web export only)
 
 extends Node
 
@@ -8,11 +8,9 @@ extends Node
 # Private
 # ────────────────────────────────────────────────
 
-var _request_callbacks: Dictionary = {} # request_id -> Callable
 var _is_web: bool = OS.has_feature("web")
-var window: JavaScriptObject
-
-var _callback_ref = JavaScriptBridge.create_callback(_on_received_message)
+var _window: JavaScriptObject
+var _sdk: JavaScriptObject
 
 # ────────────────────────────────────────────────
 # Setup
@@ -20,132 +18,184 @@ var _callback_ref = JavaScriptBridge.create_callback(_on_received_message)
 
 func init() -> void:
 	if _is_web:
-		var result = ProjectSettings.load_resource_pack("/tmp/level.pck")
-		window = JavaScriptBridge.get_interface("window");
-		_setup_message_listener()
+		# Note: This might be used by the platform to load external assets
+		ProjectSettings.load_resource_pack("/tmp/level.pck")
+		_window = JavaScriptBridge.get_interface("window")
+		if _window:
+			_sdk = _window.CouchGames
 
-func _setup_message_listener() -> void:
-	# Create a callback that JavaScript can call
-	# var godot_callback = JavaScriptBridge.create_callback(self._on_parent_response.bind())
-	window.addEventListener("message", _callback_ref);
-  # Set up the JavaScript listener and pass the callback
+		var data := await get_experience_data()
+		if data.success and data.payload:
+			var files = data.payload.get("files", [])
+			for file_name in files.keys():
+				ProjectSettings.load_resource_pack("/tmp/" + file_name)
 
-func mock_load() -> Dictionary:
-	print("Mock load")
-	await get_tree().process_frame
-	return {1: {"character_idx": 0.0, "inventory.enabled_items": [1.0, 2.0], "spawn_scene_path": "", "spawner_path": "Level/InteractableProps/SpawnPoint"}, 2: {"character_idx": 1.0, "inventory.enabled_items": [1.0, 2.0], "spawn_scene_path": "", "spawner_path": "Level/InteractableProps/SpawnPoint"}, 4783139376069951111: {"is_on": true}}
-
-func _on_received_message(args: Array):
-	var event = args[0]
-	if event.origin != window.location.origin:
-		return
-
-	if not event.data.couchgamesResponse:
-		return
-
-	var request_id = event.data.requestId
-	var response = event.data.response
-	var response_dict: Dictionary = {
-		"success": response.success,
-		"message": response.message,
-		"payload": response.payload,
-		"error": response.error if response.error else ""
-	}
-	_request_callbacks[request_id] = response_dict
-	# _on_parent_response(request_id, response_dict)
-
-
-# func _on_parent_response(request_id: String, response: Dictionary) -> void:
-# 	if _request_callbacks.has(request_id):
-# 		var callback = _request_callbacks[request_id]
-# 		callback.call(response)
-# 		_request_callbacks.erase(request_id)
-
-
-# ────────────────────────────────────────────────
-# Core send function
-# ────────────────────────────────────────────────
-
-func _send(type: String, payload: Dictionary = {}) -> String:
+func _get_sdk() -> JavaScriptObject:
 	if not _is_web:
-		push_error("CouchGames SDK: postMessage only works in Web export")
-		return ""
+		return null
+	if not _sdk:
+		if _window:
+			_sdk = _window.CouchGames
+	return _sdk
 
-	var request_id = str(randi()) + "_" + str(Time.get_ticks_msec())
+# ────────────────────────────────────────────────
+# Helper to await JS Promises
+# ────────────────────────────────────────────────
 
-	var message = {
-		"couchgames": true,
-		"type": type,
-		"payload": payload,
-		"requestId": request_id
-	}
-
-	var json = JSON.stringify(message)
-
-	JavaScriptBridge.eval("window.parent.postMessage(%s, '*');" % json, true)
-	_request_callbacks
-
-	return request_id
-
+func _await_promise(promise: JavaScriptObject) -> Variant:
+	if not promise:
+		return null
+		
+	var result = {"completed": false, "data": null}
+	
+	var on_success = JavaScriptBridge.create_callback(func(args):
+		result.data = args[0]
+		result.completed = true
+	)
+	var on_error = JavaScriptBridge.create_callback(func(args):
+		result.data = args[0]
+		result.completed = true
+	)
+	
+	promise.then(on_success).catch(on_error)
+	
+	while not result.completed:
+		await get_tree().process_frame
+		
+	return result.data
 
 # ────────────────────────────────────────────────
 # Public API
 # ────────────────────────────────────────────────
 
-func save_game(save_data: Dictionary) -> CouchGamesSDKResponse:
-	var request_id = _send("saveGame", {
-		"saveData": save_data
-	})
+func save_game(save_data: Dictionary, progress: float = 0.0) -> CouchGamesSDKResponse:
+	var sdk = _get_sdk()
+	if not sdk:
+		push_error("CouchGames SDK: Not available")
+		return CouchGamesSDKResponse.from_dict({"success": false, "error": "SDK not available"})
 
-	var response := await _wait_for_response(request_id)
-	return response
+	var js_save_data = _dict_to_js(save_data)
+	var promise = sdk.saveGame(js_save_data, progress)
+	
+	var response_data = await _await_promise(promise)
+	return CouchGamesSDKResponse.from_dict(_js_to_dict(response_data))
 
 func load_latest_save() -> CouchGamesSDKResponse:
-	var request_id = _send("loadLatestSave")
+	var sdk = _get_sdk()
+	if not sdk:
+		return CouchGamesSDKResponse.from_dict({"success": false, "error": "SDK not available"})
 
-	var response := await _wait_for_response(request_id)
-	return response
+	var data = sdk.loadLatestSave()
+	if data == null:
+		return CouchGamesSDKResponse.from_dict({"success": true, "payload": {}})
+	
+	# The SDK returns the save data string or null
+	return CouchGamesSDKResponse.from_dict({"success": true, "payload": data})
 
+func gameplay_start() -> void:
+	var sdk = _get_sdk()
+	if sdk:
+		await _await_promise(sdk.gameplayStart())
 
-func gameplay_start():
-	var request_id = _send("gameplayStart")
+func gameplay_end() -> void:
+	var sdk = _get_sdk()
+	if sdk:
+		await _await_promise(sdk.gameplayEnd())
 
-	var response := await _wait_for_response(request_id)
-	if response.success:
-		print("Gameplay started")
-	else:
-		printerr("Gameplay start failed: ", response.error)
+func gameplay_completed() -> void:
+	var sdk = _get_sdk()
+	if sdk:
+		await _await_promise(sdk.gameplayComplete())
 
-func gameplay_end():
-	var request_id = _send("gameplayEnd")
+func get_experience_date() -> Variant:
+	var sdk = _get_sdk()
+	if sdk:
+		return sdk.getExperienceDate()
+	return null
 
-	var response := await _wait_for_response(request_id)
-	if response.success:
-		print("Gameplay ended")
-	else:
-		printerr("Gameplay end failed: ", response.error)
+func get_experience_data() -> CouchGamesSDKResponse:
+	var sdk = _get_sdk()
+	if not sdk:
+		return CouchGamesSDKResponse.from_dict({"success": false, "error": "SDK not available"})
+	
+	var promise = sdk.getExperienceData()
+	var response_data = await _await_promise(promise)
+	return CouchGamesSDKResponse.from_dict(_js_to_dict(response_data))
 
-func gameplay_completed():
-	var request_id = _send("gameplayCompleted")
+func get_game_metadata() -> CouchGamesSDKResponse:
+	var sdk = _get_sdk()
+	if not sdk:
+		return CouchGamesSDKResponse.from_dict({"success": false, "error": "SDK not available"})
+	
+	var response_data = sdk.getGameMetadata()
+	return CouchGamesSDKResponse.from_dict(_js_to_dict(response_data))
 
-	var response := await _wait_for_response(request_id)
-	if response.success:
-		print("Gameplay completed")
-	else:
-		printerr("Gameplay completed failed: ", response.error)
+func set_game_metadata(category: String, key: String, value: String) -> CouchGamesSDKResponse:
+	var sdk = _get_sdk()
+	if not sdk:
+		return CouchGamesSDKResponse.from_dict({"success": false, "error": "SDK not available"})
+	
+	var promise = sdk.setGameMetadata(category, key, value)
+	var response_data = await _await_promise(promise)
+	return CouchGamesSDKResponse.from_dict(_js_to_dict(response_data))
 
-# Helper to wait for a specific request ID
-func _wait_for_response(request_id: String) -> CouchGamesSDKResponse:
-	var start_time = Time.get_ticks_msec()
-	while true:
-		await get_tree().process_frame # wait one frame
-		if _request_callbacks.has(request_id):
-			var response = _request_callbacks[request_id]
-			_request_callbacks.erase(request_id)
-			return CouchGamesSDKResponse.from_dict(response)
+func unlock_achievement(key: String) -> CouchGamesSDKResponse:
+	var sdk = _get_sdk()
+	if not sdk:
+		return CouchGamesSDKResponse.from_dict({"success": false, "error": "SDK not available"})
+	
+	var promise = sdk.unlockAchievement(key)
+	var response_data = await _await_promise(promise)
+	return CouchGamesSDKResponse.from_dict(_js_to_dict(response_data))
 
-		if Time.get_ticks_msec() - start_time > 10000:
-			push_error("Load timeout")
-			return CouchGamesSDKResponse.from_dict({"success": false, "error": "Timeout"})
+func get_achievements() -> CouchGamesSDKResponse:
+	var sdk = _get_sdk()
+	if not sdk:
+		return CouchGamesSDKResponse.from_dict({"success": false, "error": "SDK not available"})
+	
+	var promise = sdk.getAchievements()
+	var response_data = await _await_promise(promise)
+	return CouchGamesSDKResponse.from_dict(_js_to_dict(response_data))
 
-	return CouchGamesSDKResponse.from_dict({"success": false, "error": "Unknown error"})
+# ────────────────────────────────────────────────
+# Data Conversion Helpers
+# ────────────────────────────────────────────────
+
+func _dict_to_js(dict: Dictionary) -> JavaScriptObject:
+	var js_obj = JavaScriptBridge.create_object("Object")
+	for key in dict.keys():
+		var value = dict[key]
+		if value is Dictionary:
+			js_obj[key] = _dict_to_js(value)
+		elif value is Array:
+			js_obj[key] = _array_to_js(value)
+		else:
+			js_obj[key] = value
+	return js_obj
+
+func _array_to_js(arr: Array) -> JavaScriptObject:
+	var js_arr = JavaScriptBridge.create_object("Array")
+	for i in range(arr.size()):
+		var value = arr[i]
+		if value is Dictionary:
+			js_arr[i] = _dict_to_js(value)
+		elif value is Array:
+			js_arr[i] = _array_to_js(value)
+		else:
+			js_arr[i] = value
+	return js_arr
+
+func _js_to_dict(js_obj: Variant) -> Dictionary:
+	if typeof(js_obj) != TYPE_OBJECT or js_obj == null:
+		return {}
+	
+	var json = JavaScriptBridge.get_interface("JSON")
+	var stringified = json.stringify(js_obj)
+	var parsed = JSON.parse_string(stringified)
+	return parsed if parsed is Dictionary else {}
+
+# Legacy mock
+func mock_load() -> Dictionary:
+	print("Mock load")
+	await get_tree().process_frame
+	return {1: {"character_idx": 0.0, "inventory.enabled_items": [1.0, 2.0], "spawn_scene_path": "", "spawner_path": "Level/InteractableProps/SpawnPoint"}, 2: {"character_idx": 1.0, "inventory.enabled_items": [1.0, 2.0], "spawn_scene_path": "", "spawner_path": "Level/InteractableProps/SpawnPoint"}, 4783139376069951111: {"is_on": true}}
