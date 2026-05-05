@@ -45,9 +45,9 @@ func _get_sdk() -> JavaScriptObject:
 func _await_promise(promise: JavaScriptObject) -> Variant:
 	if not promise:
 		return null
-		
+
 	var result = {"completed": false, "data": null}
-	
+
 	var on_success = JavaScriptBridge.create_callback(func(args):
 		result.data = args[0]
 		result.completed = true
@@ -56,12 +56,12 @@ func _await_promise(promise: JavaScriptObject) -> Variant:
 		result.data = args[0]
 		result.completed = true
 	)
-	
+
 	promise.then(on_success).catch(on_error)
-	
+
 	while not result.completed:
 		await get_tree().process_frame
-		
+
 	return result.data
 
 # ────────────────────────────────────────────────
@@ -76,7 +76,7 @@ func save_game(save_data: Dictionary, progress: float = 0.0) -> CouchGamesSDKRes
 
 	var js_save_data = _dict_to_js(save_data)
 	var promise = sdk.saveGame(js_save_data, progress)
-	
+
 	var response_data = await _await_promise(promise)
 	return CouchGamesSDKResponse.from_dict(_js_to_dict(response_data))
 
@@ -88,7 +88,7 @@ func load_latest_save() -> CouchGamesSDKResponse:
 	var data = sdk.loadLatestSave()
 	if data == null:
 		return CouchGamesSDKResponse.from_dict({"success": true, "payload": {}})
-	
+
 	# The SDK returns the save data string or null
 	return CouchGamesSDKResponse.from_dict({"success": true, "payload": data})
 
@@ -117,7 +117,7 @@ func get_experience_data() -> CouchGamesSDKResponse:
 	var sdk = _get_sdk()
 	if not sdk:
 		return CouchGamesSDKResponse.from_dict({"success": false, "error": "SDK not available"})
-	
+
 	var promise = sdk.getExperienceData()
 	var response_data = await _await_promise(promise)
 	return CouchGamesSDKResponse.from_dict(_js_to_dict(response_data))
@@ -126,15 +126,15 @@ func get_game_metadata() -> CouchGamesSDKResponse:
 	var sdk = _get_sdk()
 	if not sdk:
 		return CouchGamesSDKResponse.from_dict({"success": false, "error": "SDK not available"})
-	
+
 	var response_data = sdk.getGameMetadata()
 	return CouchGamesSDKResponse.from_dict(_js_to_dict(response_data))
 
-func set_game_metadata(category: String, key: String, value: String) -> CouchGamesSDKResponse:
+func set_game_metadata(category: String, key: String, value: Variant) -> CouchGamesSDKResponse:
 	var sdk = _get_sdk()
 	if not sdk:
 		return CouchGamesSDKResponse.from_dict({"success": false, "error": "SDK not available"})
-	
+
 	var promise = sdk.setGameMetadata(category, key, value)
 	var response_data = await _await_promise(promise)
 	return CouchGamesSDKResponse.from_dict(_js_to_dict(response_data))
@@ -143,7 +143,7 @@ func unlock_achievement(key: String) -> CouchGamesSDKResponse:
 	var sdk = _get_sdk()
 	if not sdk:
 		return CouchGamesSDKResponse.from_dict({"success": false, "error": "SDK not available"})
-	
+
 	var promise = sdk.unlockAchievement(key)
 	var response_data = await _await_promise(promise)
 	return CouchGamesSDKResponse.from_dict(_js_to_dict(response_data))
@@ -152,7 +152,7 @@ func get_achievements() -> CouchGamesSDKResponse:
 	var sdk = _get_sdk()
 	if not sdk:
 		return CouchGamesSDKResponse.from_dict({"success": false, "error": "SDK not available"})
-	
+
 	var promise = sdk.getAchievements()
 	var response_data = await _await_promise(promise)
 	return CouchGamesSDKResponse.from_dict(_js_to_dict(response_data))
@@ -188,7 +188,7 @@ func _array_to_js(arr: Array) -> JavaScriptObject:
 func _js_to_dict(js_obj: Variant) -> Dictionary:
 	if typeof(js_obj) != TYPE_OBJECT or js_obj == null:
 		return {}
-	
+
 	var json = JavaScriptBridge.get_interface("JSON")
 	var stringified = json.stringify(js_obj)
 	var parsed = JSON.parse_string(stringified)
