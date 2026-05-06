@@ -18,17 +18,16 @@ var _sdk: JavaScriptObject
 
 func init() -> void:
 	if _is_web:
-		# Note: This might be used by the platform to load external assets
-		ProjectSettings.load_resource_pack("/tmp/level.pck")
+		# SDK must be set up first
 		_window = JavaScriptBridge.get_interface("window")
 		if _window:
 			_sdk = _window.CouchGames
 
-		var data := await get_experience_data()
-		if data.success and data.payload:
-			var files = data.payload.get("files", [])
-			for file_name in files.keys():
-				ProjectSettings.load_resource_pack("/tmp/" + file_name)
+		# The platform writes the main level PCK to /tmp/level.pck before firing
+		# couch-games-levels-loaded, so this should always succeed
+		var pck_ok := ProjectSettings.load_resource_pack("/tmp/level.pck")
+		print("[SDK] load_resource_pack(/tmp/level.pck): ", pck_ok)
+
 
 func _get_sdk() -> JavaScriptObject:
 	if not _is_web:
@@ -156,6 +155,24 @@ func get_achievements() -> CouchGamesSDKResponse:
 	var promise = sdk.getAchievements()
 	var response_data = await _await_promise(promise)
 	return CouchGamesSDKResponse.from_dict(_js_to_dict(response_data))
+
+# ────────────────────────────────────────────────
+# Debug Helpers
+# ────────────────────────────────────────────────
+
+func _list_res_root() -> void:
+	print("[SDK] --- res:// contents ---")
+	var dir := DirAccess.open("res://")
+	if dir:
+		dir.list_dir_begin()
+		var name := dir.get_next()
+		while name != "":
+			print("[SDK]   ", name)
+			name = dir.get_next()
+		dir.list_dir_end()
+	else:
+		print("[SDK] Could not open res://")
+	print("[SDK] ----------------------------")
 
 # ────────────────────────────────────────────────
 # Data Conversion Helpers
