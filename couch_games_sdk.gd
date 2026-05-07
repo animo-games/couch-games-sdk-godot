@@ -168,7 +168,7 @@ func get_session_stats() -> CouchGamesSDKResponse:
 
 func get_url(experienceId: String = "") -> String:
 	if OS.has_feature("web"):
-		var url = _window.parent.location.origin + _window.location.pathname
+		var url = _window.parent.location.origin + _window.parent.location.pathname
 		if experienceId and not experienceId.is_empty():
 			var experienceId_param = "?experienceId=" + experienceId
 			url += experienceId_param
