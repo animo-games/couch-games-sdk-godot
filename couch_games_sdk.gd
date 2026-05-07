@@ -18,16 +18,17 @@ var _sdk: JavaScriptObject
 
 func init() -> void:
 	if _is_web:
-		# SDK must be set up first
+		# Note: This might be used by the platform to load external assets
+		ProjectSettings.load_resource_pack("/tmp/level.pck")
 		_window = JavaScriptBridge.get_interface("window")
 		if _window:
 			_sdk = _window.CouchGames
 
-		# The platform writes the main level PCK to /tmp/level.pck before firing
-		# couch-games-levels-loaded, so this should always succeed
-		var pck_ok := ProjectSettings.load_resource_pack("/tmp/level.pck")
-		print("[SDK] load_resource_pack(/tmp/level.pck): ", pck_ok)
-
+		var data := await get_experience_data()
+		if data.success and data.payload:
+			var files = data.payload.get("files", [])
+			for file_name in files.keys():
+				ProjectSettings.load_resource_pack("/tmp/" + file_name)
 
 func _get_sdk() -> JavaScriptObject:
 	if not _is_web:
@@ -156,23 +157,24 @@ func get_achievements() -> CouchGamesSDKResponse:
 	var response_data = await _await_promise(promise)
 	return CouchGamesSDKResponse.from_dict(_js_to_dict(response_data))
 
-# ────────────────────────────────────────────────
-# Debug Helpers
-# ────────────────────────────────────────────────
+func get_session_stats() -> CouchGamesSDKResponse:
+	var sdk = _get_sdk()
+	if not sdk:
+		return CouchGamesSDKResponse.from_dict({"success": false, "error": "SDK not available"})
 
-func _list_res_root() -> void:
-	print("[SDK] --- res:// contents ---")
-	var dir := DirAccess.open("res://")
-	if dir:
-		dir.list_dir_begin()
-		var name := dir.get_next()
-		while name != "":
-			print("[SDK]   ", name)
-			name = dir.get_next()
-		dir.list_dir_end()
+	var promise = sdk.getSessionStats()
+	var response_data = await _await_promise(promise)
+	return CouchGamesSDKResponse.from_dict(_js_to_dict(response_data))
+
+func get_url(experienceId: String = "") -> String:
+	if OS.has_feature("web"):
+		var url = _window.parent.location.origin + _window.location.pathname
+		if experienceId and not experienceId.is_empty():
+			var experienceId_param = "?experienceId=" + experienceId
+			url += experienceId_param
+		return url
 	else:
-		print("[SDK] Could not open res://")
-	print("[SDK] ----------------------------")
+		return ""
 
 # ────────────────────────────────────────────────
 # Data Conversion Helpers
