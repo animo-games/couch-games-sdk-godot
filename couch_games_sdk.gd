@@ -12,6 +12,15 @@ var _is_web: bool = OS.has_feature("web")
 var _window: JavaScriptObject
 var _sdk: JavaScriptObject
 
+# ------------------------------------------------
+# Public
+# ------------------------------------------------
+
+var is_available: bool:
+	get:
+		return _is_web and _get_sdk() != null
+
+var experience_data: Dictionary
 # ────────────────────────────────────────────────
 # Setup
 # ────────────────────────────────────────────────
@@ -26,6 +35,7 @@ func init() -> void:
 
 		var data := await get_experience_data()
 		if data.success and data.payload:
+			experience_data = data.payload
 			var files = data.payload.get("files", [])
 			for file_name in files.keys():
 				ProjectSettings.load_resource_pack("/tmp/" + file_name)
