@@ -174,17 +174,31 @@
         console.log('[couch-games] canvas:', canvas.width, 'x', canvas.height, '| css:', cssW, 'x', cssH, '| dpr:', dpr);
       }
 
+      // This shell is the single source of truth for canvas size. Godot's
+      // canvas_resize_policy is set to 0 (None) for this preset so the engine
+      // never resizes the canvas itself — that removes the dual-owner race that
+      // left the game zoomed-in after exiting fullscreen.
       window.addEventListener('resize', resizeCanvas);
-      resizeCanvas();
 
-      function enforceCanvasCap() {
-        if (canvas.width > MAX_WIDTH || canvas.height > MAX_HEIGHT) {
-          console.warn('[couch-games] canvas exceeded cap, forcing resize. was', canvas.width, 'x', canvas.height);
-          resizeCanvas();
-        }
-        requestAnimationFrame(enforceCanvasCap);
+      // A ResizeObserver fires after layout has settled, so it reliably catches
+      // the reflow on fullscreen exit in both Chrome and Firefox. The plain
+      // 'resize' event is unreliable across fullscreen transitions (Chrome
+      // often doesn't fire it, or fires it before innerWidth has updated),
+      // which is what caused the intermittent zoomed-in view.
+      if (window.ResizeObserver) {
+        new ResizeObserver(resizeCanvas).observe(document.documentElement);
       }
-      requestAnimationFrame(enforceCanvasCap);
+
+      // fullscreenchange is the semantic event for the transition; the extra
+      // rAF pass covers the frame where window.innerWidth may not be updated yet.
+      function handleFullscreenChange() {
+        resizeCanvas();
+        requestAnimationFrame(resizeCanvas);
+      }
+      document.addEventListener('fullscreenchange', handleFullscreenChange);
+      document.addEventListener('webkitfullscreenchange', handleFullscreenChange);
+
+      resizeCanvas();
 
       function setStatusMode(mode) {
         if (statusMode === mode || !initializing) {
