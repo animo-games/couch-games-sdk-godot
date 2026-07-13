@@ -25,12 +25,15 @@ const _JOIN_TIMEOUT_MS := 3000
 # How long the host tolerates an accepted socket that never sends local-join.
 const _REGISTER_TIMEOUT_MS := 5000
 
+const WEBRTC_LOCAL_ROOM := "local-room"
+
 var _port: int = DEFAULT_PORT
 var _server: TCPServer  # host role
 var _guest_ws: WebSocketPeer  # guest role: the connection to the host
 var _peers: Dictionary = {}  # host role: user_id -> WebSocketPeer (real guests)
 var _pending: Array = []  # host role: accepted sockets awaiting local-join
 var _joined := false  # guest role: first lobby-update received
+var _webrtc_members: Dictionary = {}  # host role: user_id -> true (joined the signaling room)
 
 
 func initialize() -> void:
@@ -164,6 +167,8 @@ func _process_host() -> void:
 					_handle_host_message(user_id, _read_ws_json(ws))
 			WebSocketPeer.STATE_CLOSED:
 				_peers.erase(user_id)
+				if _webrtc_members.erase(user_id):
+					_webrtc_broadcast({"type": "webrtc-peer-left", "peerId": user_id}, user_id)
 				super.remove_player(user_id)
 
 
@@ -177,6 +182,10 @@ func _process_guest() -> void:
 			push_warning("CouchGames SDK: local lobby host disconnected")
 			_guest_ws = null
 			_seed_local_player()  # keep running with a roster of just ourselves
+			if webrtc_joined:
+				# The relay is gone, so the signaling room is too.
+				webrtc_joined = false
+				webrtc_signaling_closed.emit(WEBRTC_LOCAL_ROOM)
 
 
 # ────────────────────────────────────────────────
@@ -202,11 +211,40 @@ func _register_guest(ws: WebSocketPeer, msg: Dictionary) -> void:
 
 
 func _handle_host_message(sender_id: String, msg: Variant) -> void:
-	if msg is Dictionary and msg.get("type") == "lobby-tunnel-event":
-		var target: Dictionary = msg.get("target") if msg.get("target") is Dictionary else {}
-		# senderUserId is stamped from the connection, like the real server —
-		# a guest can't impersonate anyone.
-		_route_event(str(msg.get("event", "")), msg.get("payload"), sender_id, target)
+	if not (msg is Dictionary):
+		return
+	match str(msg.get("type", "")):
+		"lobby-tunnel-event":
+			var target: Dictionary = msg.get("target") if msg.get("target") is Dictionary else {}
+			# senderUserId is stamped from the connection, like the real server —
+			# a guest can't impersonate anyone.
+			_route_event(str(msg.get("event", "")), msg.get("payload"), sender_id, target)
+		"webrtc-join":
+			# Reply with the existing member roster, then announce the newcomer —
+			# same ordering as the real signaling room (peer-exists, peer-joined).
+			var existing: Array = _webrtc_members.keys()
+			_webrtc_members[sender_id] = true
+			if _peers.has(sender_id):
+				_send(_peers[sender_id], {"type": "webrtc-roster", "peers": existing})
+			_webrtc_broadcast({"type": "webrtc-peer-joined", "peerId": sender_id}, sender_id)
+		"webrtc-leave":
+			if _webrtc_members.erase(sender_id):
+				_webrtc_broadcast({"type": "webrtc-peer-left", "peerId": sender_id}, sender_id)
+		"webrtc-signal":
+			# senderPeerId is stamped from the connection; unknown targets are
+			# silently dropped, like the real signaling room.
+			var target_peer := str(msg.get("targetPeerId", ""))
+			if target_peer == sender_id or not _webrtc_members.has(target_peer):
+				return
+			var out := {
+				"type": "webrtc-signal",
+				"senderPeerId": sender_id,
+				"payload": msg.get("payload"),
+			}
+			if target_peer == local_user_id:
+				_deliver_webrtc_local(out)
+			elif _peers.has(target_peer):
+				_send(_peers[target_peer], out)
 
 
 ## Host-side router with server semantics: the sender is excluded, target
@@ -262,6 +300,13 @@ func _handle_guest_message(msg: Variant) -> void:
 			var sender := str(msg.get("senderUserId", ""))
 			_log_event("in", event, msg.get("payload"), sender, {}, [local_user_id])
 			_deliver_local(event, msg.get("payload"), sender)
+		"webrtc-roster":
+			var roster = msg.get("peers")
+			if webrtc_joined and roster is Array:
+				for uid in roster:
+					webrtc_peer_exists.emit(str(uid))
+		"webrtc-peer-joined", "webrtc-peer-left", "webrtc-signal":
+			_deliver_webrtc_local(msg)
 
 
 # ────────────────────────────────────────────────
@@ -316,6 +361,100 @@ func set_player_status(user_id: String, status: String) -> void:
 		push_warning("CouchGames mock: only the host instance can modify the roster")
 		return
 	super.set_player_status(user_id, status)
+
+
+# ────────────────────────────────────────────────
+# WebRTC signaling (relayed over the loopback socket)
+# ────────────────────────────────────────────────
+
+func webrtc_connect_signaling(_room_id: String) -> Dictionary:
+	if not _server and not (_guest_ws and _guest_ws.get_ready_state() == WebSocketPeer.STATE_OPEN):
+		# Solo instance: behave like the offline mock.
+		return await super.webrtc_connect_signaling(_room_id)
+	await _tick()
+	webrtc_joined = true
+	if _server:
+		var existing: Array = _webrtc_members.keys()
+		_webrtc_members[local_user_id] = true
+		_webrtc_broadcast({"type": "webrtc-peer-joined", "peerId": local_user_id}, local_user_id)
+		# Report already-joined members after this call returns, matching the
+		# real bridge (connect resolves first, then peer-exists events arrive).
+		for uid in existing:
+			_emit_webrtc_peer_exists.call_deferred(uid)
+	else:
+		# The host replies with webrtc-roster (-> peer_exists emissions).
+		_send(_guest_ws, {"type": "webrtc-join"})
+	return {"success": true, "payload": {
+		"peerId": local_user_id,
+		"roomId": WEBRTC_LOCAL_ROOM,
+		"iceServers": [],
+	}}
+
+
+func webrtc_send_signal(target_peer_id: String, data: Variant) -> void:
+	if not webrtc_joined or target_peer_id == local_user_id:
+		return
+	var payload: Variant = _round_trip(data)
+	if _server:
+		if not _webrtc_members.has(target_peer_id):
+			return
+		var out := {
+			"type": "webrtc-signal",
+			"senderPeerId": local_user_id,
+			"payload": payload,
+		}
+		if _peers.has(target_peer_id):
+			_send(_peers[target_peer_id], out)
+	elif _guest_ws and _guest_ws.get_ready_state() == WebSocketPeer.STATE_OPEN:
+		_send(_guest_ws, {
+			"type": "webrtc-signal",
+			"targetPeerId": target_peer_id,
+			"payload": payload,
+		})
+	else:
+		super.webrtc_send_signal(target_peer_id, data)
+
+
+func webrtc_disconnect() -> void:
+	if not webrtc_joined:
+		return
+	if _server:
+		_webrtc_members.erase(local_user_id)
+		_webrtc_broadcast({"type": "webrtc-peer-left", "peerId": local_user_id}, local_user_id)
+	elif _guest_ws and _guest_ws.get_ready_state() == WebSocketPeer.STATE_OPEN:
+		_send(_guest_ws, {"type": "webrtc-leave"})
+	webrtc_joined = false
+	webrtc_signaling_closed.emit(WEBRTC_LOCAL_ROOM)
+
+
+## Host: deliver a webrtc room message to every joined member except `exclude`,
+## locally when the host itself is a member, over the wire for real guests.
+func _webrtc_broadcast(msg: Dictionary, exclude: String) -> void:
+	for uid in _webrtc_members.keys():
+		if uid == exclude:
+			continue
+		if uid == local_user_id:
+			_deliver_webrtc_local(msg)
+		elif _peers.has(uid):
+			_send(_peers[uid], msg)
+
+
+## Emit the matching local signal for an incoming webrtc room message.
+func _deliver_webrtc_local(msg: Dictionary) -> void:
+	if not webrtc_joined:
+		return
+	match str(msg.get("type", "")):
+		"webrtc-peer-joined":
+			webrtc_peer_joined.emit(str(msg.get("peerId", "")))
+		"webrtc-peer-left":
+			webrtc_peer_left.emit(str(msg.get("peerId", "")))
+		"webrtc-signal":
+			webrtc_signal_received.emit(str(msg.get("senderPeerId", "")), msg.get("payload"))
+
+
+func _emit_webrtc_peer_exists(peer_id: String) -> void:
+	if webrtc_joined:
+		webrtc_peer_exists.emit(peer_id)
 
 
 # ────────────────────────────────────────────────
