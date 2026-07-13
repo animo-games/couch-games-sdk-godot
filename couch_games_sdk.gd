@@ -18,6 +18,7 @@ const _WebBackend := preload("res://addons/couch-games-sdk/backends/web_backend.
 const _MockBackend := preload("res://addons/couch-games-sdk/backends/mock_backend.gd")
 const _LocalBackend := preload("res://addons/couch-games-sdk/backends/local_backend.gd")
 const _Lobby := preload("res://addons/couch-games-sdk/lobby/couch_lobby.gd")
+const _WebRTC := preload("res://addons/couch-games-sdk/webrtc/couch_webrtc.gd")
 const _Overlay := preload("res://addons/couch-games-sdk/debug/debug_overlay.gd")
 
 # ------------------------------------------------
@@ -39,6 +40,9 @@ var experience_data: Dictionary = {}
 
 ## Multiplayer lobby abstraction: players roster + event tunnel.
 var lobby: CouchLobby
+
+## WebRTC signaling: handshake relay, peer presence, ICE/TURN configuration.
+var webrtc: CouchWebRTC
 
 ## The mock backend, for tests and debug tooling. Null when the real platform
 ## backend is active.
@@ -62,6 +66,10 @@ func _ready() -> void:
 	lobby.name = "Lobby"
 	lobby.setup(_backend)
 	add_child(lobby)
+	webrtc = _WebRTC.new()
+	webrtc.name = "WebRTC"
+	webrtc.setup(_backend)
+	add_child(webrtc)
 	if _backend.is_mock():
 		print("CouchGames SDK: using mock backend (persistence at %s)" % _MockBackend.SAVE_DIR)
 		if _overlay_enabled():
