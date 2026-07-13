@@ -11,6 +11,7 @@ extends CouchGamesBackend
 var _window: JavaScriptObject
 var _sdk: JavaScriptObject
 var _lobby: JavaScriptObject
+var _webrtc: JavaScriptObject
 
 # Persistent JS callbacks MUST be held in member vars — a JavaScriptBridge
 # callback is garbage-collected as soon as its Godot-side reference dies.
@@ -18,6 +19,12 @@ var _lobby: JavaScriptObject
 # `result.completed` keeps them alive for the promise's lifetime.)
 var _on_any_event_cb: JavaScriptObject
 var _on_players_changed_cb: JavaScriptObject
+var _on_webrtc_signal_cb: JavaScriptObject
+var _on_webrtc_peer_joined_cb: JavaScriptObject
+var _on_webrtc_peer_left_cb: JavaScriptObject
+var _on_webrtc_peer_exists_cb: JavaScriptObject
+var _on_webrtc_closed_cb: JavaScriptObject
+var _on_webrtc_ice_servers_cb: JavaScriptObject
 
 
 ## True when this export can reach the platform SDK. False for web exports
@@ -57,6 +64,37 @@ func initialize() -> void:
 	_lobby.onAnyEvent(_on_any_event_cb)
 	# Fires immediately with the current roster on registration.
 	_lobby.onPlayersChanged(_on_players_changed_cb)
+	_setup_webrtc_bridge()
+
+
+func _setup_webrtc_bridge() -> void:
+	if _sdk:
+		_webrtc = _sdk.webrtc
+	if _webrtc == null:
+		push_warning("CouchGames SDK: platform webrtc bridge not available")
+		return
+	# onSignalingClosed marks the bridge revision that also made connectSignaling
+	# default to the lobby room and use the userId as peerId — the semantics the
+	# game relies on for peer<->player correlation.
+	if _webrtc.onSignalingClosed == null:
+		push_error(
+			"CouchGames SDK: platform webrtc bridge is outdated — deploy a platform "
+			+ "build with webrtc.onSignalingClosed/userId-peerIds before this game build."
+		)
+		_webrtc = null
+		return
+	_on_webrtc_signal_cb = JavaScriptBridge.create_callback(_on_webrtc_signal)
+	_on_webrtc_peer_joined_cb = JavaScriptBridge.create_callback(_on_webrtc_peer_joined)
+	_on_webrtc_peer_left_cb = JavaScriptBridge.create_callback(_on_webrtc_peer_left)
+	_on_webrtc_peer_exists_cb = JavaScriptBridge.create_callback(_on_webrtc_peer_exists)
+	_on_webrtc_closed_cb = JavaScriptBridge.create_callback(_on_webrtc_closed)
+	_on_webrtc_ice_servers_cb = JavaScriptBridge.create_callback(_on_webrtc_ice_servers)
+	_webrtc.onSignal(_on_webrtc_signal_cb)
+	_webrtc.onPeerJoined(_on_webrtc_peer_joined_cb)
+	_webrtc.onPeerLeft(_on_webrtc_peer_left_cb)
+	_webrtc.onPeerExists(_on_webrtc_peer_exists_cb)
+	_webrtc.onSignalingClosed(_on_webrtc_closed_cb)
+	_webrtc.onIceServers(_on_webrtc_ice_servers_cb)
 
 
 func load_resource_packs(experience_payload: Dictionary) -> void:
@@ -228,6 +266,80 @@ func _on_players_changed(args: Array) -> void:
 	var players = _js_to_variant(args[0])
 	if players is Array:
 		lobby_players_updated.emit(players)
+
+
+# ────────────────────────────────────────────────
+# WebRTC signaling
+# ────────────────────────────────────────────────
+
+func webrtc_is_available() -> bool:
+	return _webrtc != null
+
+
+func webrtc_connect_signaling(room_id: String) -> Dictionary:
+	if _webrtc == null:
+		return {"success": false, "error": "WebRTC bridge not available"}
+	var promise: JavaScriptObject
+	if room_id.is_empty():
+		# No argument: the platform defaults to the active lobby's room.
+		promise = _webrtc.connectSignaling()
+	else:
+		promise = _webrtc.connectSignaling(room_id)
+	return _js_to_dict(await _await_promise(promise))
+
+
+func webrtc_send_signal(target_peer_id: String, data: Variant) -> void:
+	if _webrtc == null:
+		push_warning("CouchGames SDK: webrtc bridge not available; signal dropped")
+		return
+	_webrtc.sendSignal(target_peer_id, _variant_to_js(data))
+
+
+func webrtc_request_ice_servers() -> void:
+	if _webrtc != null:
+		_webrtc.requestIceServers()
+
+
+func webrtc_disconnect() -> void:
+	# disconnectSignaling, not disconnect: a JS method named "disconnect" is
+	# unreachable through JavaScriptObject (shadowed by Object.disconnect).
+	if _webrtc != null:
+		_webrtc.disconnectSignaling()
+
+
+func _on_webrtc_signal(args: Array) -> void:
+	# args: [senderPeerId: String, data: String (JSON)]
+	if args.size() < 2:
+		return
+	webrtc_signal_received.emit(str(args[0]), JSON.parse_string(str(args[1])))
+
+
+func _on_webrtc_peer_joined(args: Array) -> void:
+	if not args.is_empty():
+		webrtc_peer_joined.emit(str(args[0]))
+
+
+func _on_webrtc_peer_left(args: Array) -> void:
+	if not args.is_empty():
+		webrtc_peer_left.emit(str(args[0]))
+
+
+func _on_webrtc_peer_exists(args: Array) -> void:
+	if not args.is_empty():
+		webrtc_peer_exists.emit(str(args[0]))
+
+
+func _on_webrtc_closed(args: Array) -> void:
+	var room := str(args[0]) if not args.is_empty() else ""
+	webrtc_signaling_closed.emit(room)
+
+
+func _on_webrtc_ice_servers(args: Array) -> void:
+	if args.is_empty():
+		return
+	var servers = _js_to_variant(args[0])
+	if servers is Array:
+		webrtc_ice_servers_updated.emit(servers)
 
 
 # ────────────────────────────────────────────────

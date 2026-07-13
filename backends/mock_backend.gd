@@ -296,6 +296,44 @@ func lobby_send_event(event: String, data: Variant, target: Dictionary) -> void:
 
 
 # ────────────────────────────────────────────────
+# WebRTC signaling (offline mock: a room with only the local peer)
+# ────────────────────────────────────────────────
+
+const WEBRTC_MOCK_ROOM := "mock-room"
+
+## True after webrtc_connect_signaling, until webrtc_disconnect.
+var webrtc_joined := false
+
+
+func webrtc_is_available() -> bool:
+	return true
+
+
+func webrtc_connect_signaling(_room_id: String) -> Dictionary:
+	await _tick()
+	webrtc_joined = true
+	# Overlay-faked guests are roster-only — they can't do WebRTC, so the mock
+	# room never reports other peers.
+	return {"success": true, "payload": {
+		"peerId": local_user_id,
+		"roomId": WEBRTC_MOCK_ROOM,
+		"iceServers": [],
+	}}
+
+
+func webrtc_send_signal(target_peer_id: String, data: Variant) -> void:
+	# No real peers exist offline; log the attempt for the overlay and drop.
+	_log_event("out", "[webrtc] signal", _round_trip(data), local_user_id,
+		{"userId": target_peer_id}, [])
+
+
+func webrtc_disconnect() -> void:
+	if webrtc_joined:
+		webrtc_joined = false
+		webrtc_signaling_closed.emit(WEBRTC_MOCK_ROOM)
+
+
+# ────────────────────────────────────────────────
 # Internals
 # ────────────────────────────────────────────────
 
