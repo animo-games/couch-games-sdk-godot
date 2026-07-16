@@ -10,6 +10,10 @@
 
 extends Node
 
+## Play-mode selection made on the parent platform page ("1-device",
+## "2-devices"); empty when none has been made (or not on the platform).
+signal play_mode_selected(mode: String, code: String)
+
 const _FORCE_MOCK_SETTING := "couch_games/mock/force_mock"
 const _OVERLAY_ENABLED_SETTING := "couch_games/mock/enable_debug_overlay"
 const _LOCAL_ENABLED_SETTING := "couch_games/local/enabled"
@@ -62,6 +66,7 @@ func _ready() -> void:
 	_backend = _create_backend()
 	_backend.name = "Backend"
 	add_child(_backend)
+	_backend.play_mode_selected.connect(play_mode_selected.emit)
 	lobby = _Lobby.new()
 	lobby.name = "Lobby"
 	lobby.setup(_backend)
@@ -167,3 +172,15 @@ func get_session_stats() -> CouchGamesSDKResponse:
 
 func get_url(_experience_id: String = "") -> String:
 	return str(experience_data.get("experienceUrl", ""))
+
+
+func get_play_mode() -> String:
+	return _backend.multiplayer_get_play_mode() if _backend != null else ""
+
+
+func get_share_code() -> String:
+	return _backend.multiplayer_get_share_code() if _backend != null else ""
+
+
+func is_joining() -> bool:
+	return _backend != null and _backend.multiplayer_is_joining()

@@ -25,6 +25,7 @@ var _on_webrtc_peer_left_cb: JavaScriptObject
 var _on_webrtc_peer_exists_cb: JavaScriptObject
 var _on_webrtc_closed_cb: JavaScriptObject
 var _on_webrtc_ice_servers_cb: JavaScriptObject
+var _on_play_mode_selected_cb: JavaScriptObject
 
 
 ## True when this export can reach the platform SDK. False for web exports
@@ -65,6 +66,7 @@ func initialize() -> void:
 	# Fires immediately with the current roster on registration.
 	_lobby.onPlayersChanged(_on_players_changed_cb)
 	_setup_webrtc_bridge()
+	_setup_play_mode_bridge()
 
 
 func _setup_webrtc_bridge() -> void:
@@ -95,6 +97,13 @@ func _setup_webrtc_bridge() -> void:
 	_webrtc.onPeerExists(_on_webrtc_peer_exists_cb)
 	_webrtc.onSignalingClosed(_on_webrtc_closed_cb)
 	_webrtc.onIceServers(_on_webrtc_ice_servers_cb)
+
+
+func _setup_play_mode_bridge() -> void:
+	if _sdk == null or _sdk.onPlayModeSelected == null:
+		return
+	_on_play_mode_selected_cb = JavaScriptBridge.create_callback(_on_play_mode_selected)
+	_sdk.onPlayModeSelected(_on_play_mode_selected_cb)
 
 
 func load_resource_packs(experience_payload: Dictionary) -> void:
@@ -340,6 +349,39 @@ func _on_webrtc_ice_servers(args: Array) -> void:
 	var servers = _js_to_variant(args[0])
 	if servers is Array:
 		webrtc_ice_servers_updated.emit(servers)
+
+
+# ────────────────────────────────────────────────
+# Play mode
+# ────────────────────────────────────────────────
+
+func multiplayer_get_play_mode() -> String:
+	var sdk = _get_sdk()
+	if sdk == null or sdk.getPlayMode == null:
+		return ""
+	var mode = sdk.getPlayMode()
+	return str(mode) if mode != null else ""
+
+
+func multiplayer_get_share_code() -> String:
+	var sdk = _get_sdk()
+	if sdk == null or sdk.getShareCode == null:
+		return ""
+	var code = sdk.getShareCode()
+	return str(code) if code != null else ""
+
+
+func multiplayer_is_joining() -> bool:
+	var sdk = _get_sdk()
+	if sdk == null or sdk.isJoining == null:
+		return false
+	return bool(sdk.isJoining())
+
+
+func _on_play_mode_selected(args: Array) -> void:
+	var mode := str(args[0]) if args.size() > 0 and args[0] != null else ""
+	var code := str(args[1]) if args.size() > 1 and args[1] != null else ""
+	play_mode_selected.emit(mode, code)
 
 
 # ────────────────────────────────────────────────

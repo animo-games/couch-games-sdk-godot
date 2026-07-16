@@ -29,6 +29,10 @@ signal webrtc_signaling_closed(room_id: String)
 ## Fresh ICE servers after a webrtc_request_ice_servers refresh.
 signal webrtc_ice_servers_updated(ice_servers: Array)
 
+## Play-mode selection made on the parent platform page ("1-device",
+## "2-devices"); empty when none has been made (or not on the platform).
+signal play_mode_selected(mode: String, code: String)
+
 
 func is_available() -> bool:
 	return false
@@ -149,6 +153,22 @@ func webrtc_request_ice_servers() -> void:
 
 func webrtc_disconnect() -> void:
 	pass
+
+
+# ────────────────────────────────────────────────
+# Play mode
+# ────────────────────────────────────────────────
+
+func multiplayer_get_play_mode() -> String:
+	return ""
+
+
+func multiplayer_get_share_code() -> String:
+	return ""
+
+
+func multiplayer_is_joining() -> bool:
+	return false
 
 
 func _not_implemented() -> Dictionary:
