@@ -52,6 +52,25 @@ var ice_servers: Array = []
 var _backend: CouchGamesBackend
 
 
+## Normalize a platform-issued room code: uppercase and strip all whitespace.
+## The platform owns code generation and its alphabet, so this must not
+## filter characters the way a locally-generated code's alphabet would.
+static func normalize_room_code(code: String) -> String:
+	var normalized := ""
+	for c in code.to_upper():
+		if c.strip_edges() != "":
+			normalized += c
+	return normalized
+
+
+## Build the signaling room id for a room code. Pass the result to
+## connect_signaling() so host and joiner land in the same signaling room —
+## the "code-" namespace keeps short codes from colliding with platform
+## lobby room ids.
+static func room_id_for_code(code: String) -> String:
+	return "code-" + normalize_room_code(code)
+
+
 ## Called by the CouchGames autoload during setup.
 func setup(backend: CouchGamesBackend) -> void:
 	_backend = backend

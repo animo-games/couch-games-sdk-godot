@@ -55,6 +55,10 @@ func initialize() -> void:
 	latency_ms = int(ProjectSettings.get_setting(_LATENCY_SETTING, 0))
 	_load_persisted()
 	_seed_local_player()
+	# Deferred so a subscriber connected right after CouchGames.init() still
+	# receives it, mirroring the platform's fire-on-registration semantics.
+	if not multiplayer_get_play_mode().is_empty():
+		_emit_play_mode_selected.call_deferred()
 
 
 ## Resets the roster to just the local player. Reused by the local-relay
@@ -331,6 +335,26 @@ func webrtc_disconnect() -> void:
 	if webrtc_joined:
 		webrtc_joined = false
 		webrtc_signaling_closed.emit(WEBRTC_MOCK_ROOM)
+
+
+# ────────────────────────────────────────────────
+# Play mode (native dev/testing: emulated via env vars, no platform page)
+# ────────────────────────────────────────────────
+
+func multiplayer_get_play_mode() -> String:
+	return OS.get_environment("COUCH_PLAY_MODE")
+
+
+func multiplayer_get_share_code() -> String:
+	return OS.get_environment("COUCH_SHARE_CODE")
+
+
+func multiplayer_is_joining() -> bool:
+	return OS.get_environment("COUCH_JOINING") == "1"
+
+
+func _emit_play_mode_selected() -> void:
+	play_mode_selected.emit(multiplayer_get_play_mode(), multiplayer_get_share_code())
 
 
 # ────────────────────────────────────────────────
