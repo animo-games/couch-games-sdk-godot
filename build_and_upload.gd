@@ -148,25 +148,20 @@ func _human_size(n: int) -> String:
 	return "%dB" % n
 
 
-# POST the zip as multipart/form-data (field "gameFile") to the versions endpoint.
+# POST the zip as the raw application/zip request body to the versions endpoint
+# (the portal streams it to R2); older portals expected multipart — this
+# requires the streaming endpoint from platform-dev commit aaee04b.
 # Uses HTTPRequest so TLS, redirects, and chunked responses are handled for us.
 func _upload(portal: String, slug: String, api_key: String, zip_bytes: PackedByteArray) -> int:
 	var url := "%s/api/games/%s/versions" % [portal, slug]
-	var boundary := "----CouchGamesBoundary" + str(Time.get_ticks_usec())
-	var head := "--%s\r\nContent-Disposition: form-data; name=\"gameFile\"; filename=\"build.zip\"\r\nContent-Type: application/zip\r\n\r\n" % boundary
-	var tail := "\r\n--%s--\r\n" % boundary
-	var body := PackedByteArray()
-	body.append_array(head.to_utf8_buffer())
-	body.append_array(zip_bytes)
-	body.append_array(tail.to_utf8_buffer())
 	var headers := PackedStringArray([
 		"X-API-Key: " + api_key,
-		"Content-Type: multipart/form-data; boundary=" + boundary,
+		"Content-Type: application/zip",
 	])
 
 	var req := HTTPRequest.new()
 	root.add_child(req)
-	var err := req.request_raw(url, headers, HTTPClient.METHOD_POST, body)
+	var err := req.request_raw(url, headers, HTTPClient.METHOD_POST, zip_bytes)
 	if err != OK:
 		printerr("Upload request failed to start (error %d)" % err)
 		req.queue_free()
