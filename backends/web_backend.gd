@@ -317,10 +317,13 @@ func webrtc_disconnect() -> void:
 
 
 func _on_webrtc_signal(args: Array) -> void:
-	# args: [senderPeerId: String, data: String (JSON)]
+	# args: [senderPeerId: String, data: Variant (object; JSON string on older platform builds)]
 	if args.size() < 2:
 		return
-	webrtc_signal_received.emit(str(args[0]), JSON.parse_string(str(args[1])))
+	var data: Variant = _js_to_variant(args[1])
+	if data is String:
+		data = JSON.parse_string(data)
+	webrtc_signal_received.emit(str(args[0]), data)
 
 
 func _on_webrtc_peer_joined(args: Array) -> void:
