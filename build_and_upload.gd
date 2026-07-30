@@ -19,6 +19,7 @@ extends SceneTree
 
 const PRESET := "Web"
 const DEFAULT_PORTAL := "https://developer.couchgames.com"
+const PRESENT_PATH_PATCH_MARKER := "/*present-path-patch*/"
 
 func _init() -> void:
 	# Defer to the first idle frame: doing TLS/network I/O straight from _init()
@@ -62,6 +63,9 @@ func _run() -> int:
 		for chunk in out:
 			printerr(chunk)
 		return 1
+	var index_js_path := index_path.get_basename() + ".js"
+	if not _has_present_path_patch(index_js_path):
+		return 1
 
 	# 2. Zip the *contents* of build/web (index.html lands at the archive root,
 	#    matching what the upload endpoint extracts to games/<slug>/v<n>/<path>).
@@ -83,6 +87,24 @@ func _run() -> int:
 	var zip_bytes := FileAccess.get_file_as_bytes(zip_path)
 	print("Uploading %s build to %s ..." % [_human_size(zip_bytes.size()), portal])
 	return await _upload(portal, slug, api_key, zip_bytes)
+
+
+static func _has_present_path_patch(js_path: String) -> bool:
+	if not FileAccess.file_exists(js_path):
+		printerr("Export is missing generated JavaScript: %s" % js_path)
+		return false
+	var file := FileAccess.open(js_path, FileAccess.READ)
+	if file == null:
+		printerr("Could not read generated JavaScript %s (error %d)" % [
+			js_path, FileAccess.get_open_error()])
+		return false
+	if PRESENT_PATH_PATCH_MARKER not in file.get_as_text():
+		printerr(
+			"Refusing to package or upload unpatched Web export: %s does not contain %s"
+			% [js_path, PRESENT_PATH_PATCH_MARKER]
+		)
+		return false
+	return true
 
 
 # Resolve a config value: real environment wins, then .env, then the fallback.
