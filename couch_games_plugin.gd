@@ -4,6 +4,9 @@ extends EditorPlugin
 const _MENU_ITEM := "Couch Games: Build & Upload Web…"
 const _SLUG_SETTING := "couch_games/deploy/slug"
 const _UPLOAD_SCRIPT := "res://addons/couch-games-sdk/build_and_upload.gd"
+const _PresentPathExportPlugin := preload(
+	"res://addons/couch-games-sdk/present_path_export_plugin.gd"
+)
 
 # name, default, type, hint, hint_string
 const _SETTINGS := [
@@ -24,11 +27,14 @@ var _slug_edit: LineEdit
 var _result_dialog: AcceptDialog
 var _thread: Thread
 var _running := false
+var _present_path_export_plugin: EditorExportPlugin
 
 
 func _enter_tree():
 	for setting in _SETTINGS:
 		_define_setting(setting[0], setting[1], setting[2], setting[3], setting[4])
+	_present_path_export_plugin = _PresentPathExportPlugin.new()
+	add_export_plugin(_present_path_export_plugin)
 	add_autoload_singleton("CouchGames", "./couch_games_sdk.gd")
 	_build_dialogs()
 	add_tool_menu_item(_MENU_ITEM, _open_upload_dialog)
@@ -36,6 +42,9 @@ func _enter_tree():
 
 func _exit_tree():
 	remove_tool_menu_item(_MENU_ITEM)
+	if _present_path_export_plugin:
+		remove_export_plugin(_present_path_export_plugin)
+		_present_path_export_plugin = null
 	if _thread and _thread.is_started():
 		_thread.wait_to_finish()
 	if is_instance_valid(_dialog):
