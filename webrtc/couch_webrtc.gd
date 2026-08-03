@@ -20,6 +20,8 @@
 class_name CouchWebRTC
 extends Node
 
+const _PathProbe := preload("res://addons/couch-games-sdk/webrtc/path_probe.gd")
+
 ## A handshake blob from another peer. `data` is whatever they passed to
 ## send_signal, after a JSON round-trip.
 signal signal_received(sender_peer_id: String, data: Variant)
@@ -128,6 +130,31 @@ func request_ice_servers() -> void:
 func disconnect_signaling() -> void:
 	if _backend != null:
 		_backend.webrtc_disconnect()
+
+
+## True when WebRTC path stats are observable — a web export with the SDK
+## probe installed. False in the editor and in native builds, where
+## get_connection_paths() always returns [].
+func is_path_probe_available() -> bool:
+	return _PathProbe.is_available()
+
+
+## Snapshot of every live peer connection's selected candidate pair. Each
+## entry:
+##   ufrag          String  local ICE ufrag — the peer-correlation key
+##   state          String  RTCPeerConnection.connectionState
+##   selected       bool    a succeeded+nominated candidate pair exists
+##   protocol       String  "udp" | "tcp" | ""
+##   relay_protocol String  "udp" | "tcp" | "tls" | "" (relay candidates only)
+##   local_type     String  "host"|"srflx"|"prflx"|"relay"|""
+##   remote_type    String  same, for the remote candidate
+##   is_datagram    bool    protocol=="udp" and relay_protocol in ["","udp"] —
+##                          i.e. safe for rollback netcode (a TCP path reports
+##                          "connected" but head-of-line-blocks GGPO)
+## Values are up to ~1s stale (a JS-side cache; candidate pairs only change on
+## ICE restart). Diagnostics-rate reads only — do not call per frame.
+func get_connection_paths() -> Array:
+	return _PathProbe.paths()
 
 
 func _on_signaling_closed(closed_room_id: String) -> void:
