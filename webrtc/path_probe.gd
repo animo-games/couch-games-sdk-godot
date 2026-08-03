@@ -21,15 +21,22 @@ const _PROBE_JS := """
   if (!Native) { return "no-rtcpeerconnection"; }
   var refs = [];
   var cache = [];
+  var generation = 0;
 
+  // Reflect.construct with new.target keeps derived-class semantics intact
+  // (`class Foo extends RTCPeerConnection {}` -> `new Foo() instanceof Foo`);
+  // setPrototypeOf inherits static members. Plain `new RTCPeerConnection()`
+  // still lands on Native.prototype because Wrapped.prototype IS it.
   function Wrapped(config, constraints) {
-    var pc = new Native(config, constraints);
+    var pc = Reflect.construct(Native, arguments, new.target || Wrapped);
     refs.push(new WeakRef(pc));
     return pc;
   }
   Wrapped.prototype = Native.prototype;
-  Wrapped.generateCertificate = Native.generateCertificate
-    ? Native.generateCertificate.bind(Native) : undefined;
+  Object.setPrototypeOf(Wrapped, Native);
+  if (Native.generateCertificate) {
+    Wrapped.generateCertificate = Native.generateCertificate.bind(Native);
+  }
   window.RTCPeerConnection = Wrapped;
   window.webkitRTCPeerConnection = Wrapped;
 
@@ -50,24 +57,38 @@ const _PROBE_JS := """
     return found;
   }
 
-  function entryFor(pc, stats) {
-    var e = {
-      ufrag: ufragOf(pc, stats), state: pc.connectionState || "",
-      selected: false, protocol: "", relay_protocol: "",
-      local_type: "", remote_type: "", is_datagram: false
-    };
+  // transport.selectedCandidatePairId is authoritative per the stats spec and
+  // wins outright. The succeeded+nominated scan is only a fallback for reports
+  // that have no transport record (or a dangling id): after ICE renomination
+  // several pairs can still read succeeded+nominated, and the first one found
+  // may be the obsolete one.
+  function selectedPair(stats) {
     var transportSel = null;
     stats.forEach(function (r) {
       if (r.type === "transport" && r.selectedCandidatePairId) {
         transportSel = r.selectedCandidatePairId;
       }
     });
+    if (transportSel) {
+      var sel = null;
+      try { sel = stats.get(transportSel); } catch (e) { sel = null; }
+      if (sel && sel.type === "candidate-pair") { return sel; }
+    }
     var pair = null;
     stats.forEach(function (r) {
-      if (r.type !== "candidate-pair" || pair) { return; }
-      if ((transportSel && r.id === transportSel) ||
-          (r.state === "succeeded" && (r.nominated || r.selected))) { pair = r; }
+      if (pair || r.type !== "candidate-pair") { return; }
+      if (r.state === "succeeded" && (r.nominated || r.selected)) { pair = r; }
     });
+    return pair;
+  }
+
+  function entryFor(pc, stats) {
+    var e = {
+      ufrag: ufragOf(pc, stats), state: pc.connectionState || "",
+      selected: false, protocol: "", relay_protocol: "",
+      local_type: "", remote_type: "", is_datagram: false
+    };
+    var pair = selectedPair(stats);
     if (pair) {
       e.selected = true;
       var lc = stats.get(pair.localCandidateId);
@@ -86,6 +107,10 @@ const _PROBE_JS := """
   }
 
   function refresh() {
+    // Generation guard: getStats() batches can resolve out of order, so only
+    // the newest refresh may publish. The cache is still swapped exactly once
+    // per generation, never partially.
+    var gen = ++generation;
     var live = [];
     for (var i = 0; i < refs.length; i++) {
       if (refs[i].deref()) { live.push(refs[i]); }
@@ -102,6 +127,7 @@ const _PROBE_JS := """
       if (p.localDescription == null && p.remoteDescription == null) { continue; }
       next.push(p);
     }
+    // Synchronous publish, so this generation is still the newest.
     if (next.length === 0) { cache = []; return; }
     var acc = [];
     var pending = next.length;
@@ -110,7 +136,7 @@ const _PROBE_JS := """
         acc.push(entryFor(pc, stats));
       }).catch(function () {}).then(function () {
         pending -= 1;
-        if (pending === 0) { cache = acc; }
+        if (pending === 0 && gen === generation) { cache = acc; }
       });
     });
   }
