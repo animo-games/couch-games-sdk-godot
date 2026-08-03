@@ -22,6 +22,7 @@ const _PROBE_JS := """
   var refs = [];
   var cache = [];
   var generation = 0;
+  var publishedGen = 0;
 
   // Reflect.construct with new.target keeps derived-class semantics intact
   // (`class Foo extends RTCPeerConnection {}` -> `new Foo() instanceof Foo`);
@@ -107,9 +108,14 @@ const _PROBE_JS := """
   }
 
   function refresh() {
-    // Generation guard: getStats() batches can resolve out of order, so only
-    // the newest refresh may publish. The cache is still swapped exactly once
-    // per generation, never partially.
+    // Generation guard: getStats() batches can resolve out of order, and a
+    // batch can outlive the refreshes that follow it, so a batch publishes
+    // only when its generation is newer than the last PUBLISHED one.
+    // Comparing against the newest STARTED generation instead would starve
+    // the cache whenever batches outlive the interval: each batch would find
+    // a newer refresh already begun and drop its result, forever. The cache
+    // is still swapped whole, exactly once per publishing generation, never
+    // partially.
     var gen = ++generation;
     var live = [];
     for (var i = 0; i < refs.length; i++) {
@@ -127,8 +133,10 @@ const _PROBE_JS := """
       if (p.localDescription == null && p.remoteDescription == null) { continue; }
       next.push(p);
     }
-    // Synchronous publish, so this generation is still the newest.
-    if (next.length === 0) { cache = []; return; }
+    // Synchronous, so gen outranks every generation published so far and this
+    // publish is unconditional. Recording it is what stops an older in-flight
+    // batch from resurrecting stale entries over the empty cache.
+    if (next.length === 0) { publishedGen = gen; cache = []; return; }
     var acc = [];
     var pending = next.length;
     next.forEach(function (pc) {
@@ -136,7 +144,10 @@ const _PROBE_JS := """
         acc.push(entryFor(pc, stats));
       }).catch(function () {}).then(function () {
         pending -= 1;
-        if (pending === 0 && gen === generation) { cache = acc; }
+        if (pending === 0 && gen > publishedGen) {
+          publishedGen = gen;
+          cache = acc;
+        }
       });
     });
   }
