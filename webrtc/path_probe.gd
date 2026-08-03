@@ -1,0 +1,146 @@
+# Iframe-realm probe for WebRTC candidate-pair state. Web exports only.
+#
+# Godot's WebRTCPeerConnection has no get_stats(), and the platform has no
+# handle on the game's peer connections (they're created by the engine's web
+# glue inside the game iframe). This installs a JS wrapper around
+# window.RTCPeerConnection BEFORE any connection is created, keeps a WeakRef
+# registry, and refreshes a plain-object cache from getStats() on a 1s timer
+# so GDScript can read path state synchronously.
+#
+# Read via JavaScriptBridge.eval returning a JSON string — deliberately NOT
+# via get_interface()/JavaScriptObject, which shadows Godot Object members
+# (disconnect/connect/free/call).
+extends RefCounted
+
+static var _installed := false
+
+const _PROBE_JS := """
+(function () {
+  if (window.__couchPathProbe) { return "already"; }
+  var Native = window.RTCPeerConnection;
+  if (!Native) { return "no-rtcpeerconnection"; }
+  var refs = [];
+  var cache = [];
+
+  function Wrapped(config, constraints) {
+    var pc = new Native(config, constraints);
+    refs.push(new WeakRef(pc));
+    return pc;
+  }
+  Wrapped.prototype = Native.prototype;
+  Wrapped.generateCertificate = Native.generateCertificate
+    ? Native.generateCertificate.bind(Native) : undefined;
+  window.RTCPeerConnection = Wrapped;
+  window.webkitRTCPeerConnection = Wrapped;
+
+  function ufragOf(pc, stats) {
+    try {
+      var d = pc.localDescription;
+      if (d && d.sdp) {
+        var m = /^a=ice-ufrag:(\\S+)/m.exec(d.sdp);
+        if (m) { return m[1]; }
+      }
+    } catch (e) {}
+    var found = "";
+    stats.forEach(function (r) {
+      if (!found && r.type === "transport" && r.iceLocalUsernameFragment) {
+        found = r.iceLocalUsernameFragment;
+      }
+    });
+    return found;
+  }
+
+  function entryFor(pc, stats) {
+    var e = {
+      ufrag: ufragOf(pc, stats), state: pc.connectionState || "",
+      selected: false, protocol: "", relay_protocol: "",
+      local_type: "", remote_type: "", is_datagram: false
+    };
+    var transportSel = null;
+    stats.forEach(function (r) {
+      if (r.type === "transport" && r.selectedCandidatePairId) {
+        transportSel = r.selectedCandidatePairId;
+      }
+    });
+    var pair = null;
+    stats.forEach(function (r) {
+      if (r.type !== "candidate-pair" || pair) { return; }
+      if ((transportSel && r.id === transportSel) ||
+          (r.state === "succeeded" && (r.nominated || r.selected))) { pair = r; }
+    });
+    if (pair) {
+      e.selected = true;
+      var lc = stats.get(pair.localCandidateId);
+      var rc = stats.get(pair.remoteCandidateId);
+      if (lc) {
+        e.protocol = lc.protocol || "";
+        e.relay_protocol = lc.relayProtocol || "";
+        e.local_type = lc.candidateType || "";
+        if (!e.ufrag && lc.usernameFragment) { e.ufrag = lc.usernameFragment; }
+      }
+      if (rc) { e.remote_type = rc.candidateType || ""; }
+      e.is_datagram = (e.protocol === "udp") &&
+        (e.relay_protocol === "" || e.relay_protocol === "udp");
+    }
+    return e;
+  }
+
+  function refresh() {
+    var live = [];
+    for (var i = 0; i < refs.length; i++) {
+      if (refs[i].deref()) { live.push(refs[i]); }
+    }
+    refs = live;
+    // Godot's web glue creates TWO native RTCPeerConnections per Godot
+    // WebRTCPeerConnection (one at .new(), one at .initialize()); the
+    // abandoned shell stays connectionState "new" with a null
+    // localDescription forever and is never GC'd. Drop those and closed ones.
+    var next = [];
+    for (var j = 0; j < refs.length; j++) {
+      var p = refs[j].deref();
+      if (!p || p.connectionState === "closed") { continue; }
+      if (p.localDescription == null && p.remoteDescription == null) { continue; }
+      next.push(p);
+    }
+    if (next.length === 0) { cache = []; return; }
+    var acc = [];
+    var pending = next.length;
+    next.forEach(function (pc) {
+      pc.getStats().then(function (stats) {
+        acc.push(entryFor(pc, stats));
+      }).catch(function () {}).then(function () {
+        pending -= 1;
+        if (pending === 0) { cache = acc; }
+      });
+    });
+  }
+
+  window.__couchPathProbe = { pathsJson: function () { return JSON.stringify(cache); } };
+  setInterval(refresh, 1000);
+  refresh();
+  return "installed";
+})();
+"""
+
+## Install the wrapper. Called once from the CouchGames autoload's _ready(),
+## before any game code can create a peer connection. No-op off web.
+static func install() -> void:
+	if _installed or not OS.has_feature("web"):
+		return
+	var r: Variant = JavaScriptBridge.eval(_PROBE_JS, true)
+	_installed = str(r) in ["installed", "already"]
+
+static func is_available() -> bool:
+	return _installed
+
+## Snapshot of live peer connections. Reads a ~1s-stale JS cache; cheap but
+## not free (a JSON round-trip) — call at diagnostics rate, never per frame.
+static func paths() -> Array:
+	if not _installed:
+		return []
+	var raw: Variant = JavaScriptBridge.eval(
+		"window.__couchPathProbe ? window.__couchPathProbe.pathsJson() : \"[]\"", true)
+	if raw == null:
+		return []
+	var parsed: Variant = JSON.parse_string(str(raw))
+	return parsed if parsed is Array else []

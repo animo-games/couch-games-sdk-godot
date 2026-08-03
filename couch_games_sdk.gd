@@ -24,6 +24,7 @@ const _LocalBackend := preload("res://addons/couch-games-sdk/backends/local_back
 const _Lobby := preload("res://addons/couch-games-sdk/lobby/couch_lobby.gd")
 const _WebRTC := preload("res://addons/couch-games-sdk/webrtc/couch_webrtc.gd")
 const _Overlay := preload("res://addons/couch-games-sdk/debug/debug_overlay.gd")
+const _PathProbe := preload("res://addons/couch-games-sdk/webrtc/path_probe.gd")
 
 # ------------------------------------------------
 # Public
@@ -63,6 +64,11 @@ var _initializing := false
 # ────────────────────────────────────────────────
 
 func _ready() -> void:
+	# Install the WebRTC path probe before anything can create a peer
+	# connection. Autoload _ready() runs before the main scene; if a game
+	# creates peer connections from an earlier autoload, move CouchGames up
+	# that project's autoload list.
+	_PathProbe.install()
 	_backend = _create_backend()
 	_backend.name = "Backend"
 	add_child(_backend)
