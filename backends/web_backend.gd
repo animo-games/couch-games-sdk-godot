@@ -1,9 +1,9 @@
-# Web backend: bridges to the platform's window.CouchGames global via
-# JavaScriptBridge. Active only in web exports running inside the Couch Games
+# Web backend: bridges to the platform's window.CouchGames global over
+# JavaScriptBridge. Only active in web exports running inside the Couch Games
 # platform page.
 #
 # The lobby connection is the PLATFORM's WebSocket, owned by the parent page.
-# This backend must never open its own — the server allows one connection per
+# This backend must never open its own: the server allows one connection per
 # userId and would kick the platform's socket (close code 1008).
 class_name CouchGamesWebBackend
 extends CouchGamesBackend
@@ -13,9 +13,9 @@ var _sdk: JavaScriptObject
 var _lobby: JavaScriptObject
 var _webrtc: JavaScriptObject
 
-# Persistent JS callbacks MUST be held in member vars — a JavaScriptBridge
+# Persistent JS callbacks MUST be held in member vars: a JavaScriptBridge
 # callback is garbage-collected as soon as its Godot-side reference dies.
-# (_await_promise's local callbacks are fine: the coroutine frame that polls
+# (_await_promise's local callbacks are fine, since the coroutine frame polling
 # `result.completed` keeps them alive for the promise's lifetime.)
 var _on_any_event_cb: JavaScriptObject
 var _on_players_changed_cb: JavaScriptObject
@@ -29,8 +29,8 @@ var _on_play_mode_selected_cb: JavaScriptObject
 
 
 ## True when this export can reach the platform SDK. False for web exports
-## hosted outside the platform (itch.io, local http server) — the facade then
-## falls back to the mock backend.
+## hosted outside the platform (itch.io, a local http server), in which case
+## the autoload falls back to the mock backend.
 static func detect() -> bool:
 	if not OS.has_feature("web"):
 		return false
@@ -55,7 +55,7 @@ func initialize() -> void:
 		return
 	if _lobby.onAnyEvent == null or _lobby.onPlayersChanged == null:
 		push_error(
-			"CouchGames SDK: platform lobby bridge is outdated — deploy a platform "
+			"CouchGames SDK: platform lobby bridge is outdated. Deploy a platform "
 			+ "build with lobby.onAnyEvent/onPlayersChanged before this game build."
 		)
 		_lobby = null
@@ -76,11 +76,11 @@ func _setup_webrtc_bridge() -> void:
 		push_warning("CouchGames SDK: platform webrtc bridge not available")
 		return
 	# onSignalingClosed marks the bridge revision that also made connectSignaling
-	# default to the lobby room and use the userId as peerId — the semantics the
+	# default to the lobby room and use the userId as peerId, which is what the
 	# game relies on for peer<->player correlation.
 	if _webrtc.onSignalingClosed == null:
 		push_error(
-			"CouchGames SDK: platform webrtc bridge is outdated — deploy a platform "
+			"CouchGames SDK: platform webrtc bridge is outdated. Deploy a platform "
 			+ "build with webrtc.onSignalingClosed/userId-peerIds before this game build."
 		)
 		_webrtc = null
@@ -126,9 +126,7 @@ func _get_sdk() -> JavaScriptObject:
 	return _sdk
 
 
-# ────────────────────────────────────────────────
-# Classic SDK verbs
-# ────────────────────────────────────────────────
+# --- Classic SDK verbs ---
 
 func save_game(save_data: Dictionary, progress: float) -> Dictionary:
 	var sdk = _get_sdk()
@@ -220,9 +218,7 @@ func get_session_stats() -> Dictionary:
 	return _js_to_dict(await _await_promise(sdk.getSessionStats()))
 
 
-# ────────────────────────────────────────────────
-# Lobby
-# ────────────────────────────────────────────────
+# --- Lobby ---
 
 func lobby_is_available() -> bool:
 	return _lobby != null
@@ -277,9 +273,7 @@ func _on_players_changed(args: Array) -> void:
 		lobby_players_updated.emit(players)
 
 
-# ────────────────────────────────────────────────
-# WebRTC signaling
-# ────────────────────────────────────────────────
+# --- WebRTC signaling ---
 
 func webrtc_is_available() -> bool:
 	return _webrtc != null
@@ -354,9 +348,7 @@ func _on_webrtc_ice_servers(args: Array) -> void:
 		webrtc_ice_servers_updated.emit(servers)
 
 
-# ────────────────────────────────────────────────
-# Play mode
-# ────────────────────────────────────────────────
+# --- Play mode ---
 
 func multiplayer_get_play_mode() -> String:
 	var sdk = _get_sdk()
@@ -387,9 +379,7 @@ func _on_play_mode_selected(args: Array) -> void:
 	play_mode_selected.emit(mode, code)
 
 
-# ────────────────────────────────────────────────
-# Helper to await JS Promises
-# ────────────────────────────────────────────────
+# --- Awaiting JS promises ---
 
 func _await_promise(promise: JavaScriptObject) -> Variant:
 	if not promise:
@@ -414,9 +404,7 @@ func _await_promise(promise: JavaScriptObject) -> Variant:
 	return result.data
 
 
-# ────────────────────────────────────────────────
-# Data Conversion Helpers
-# ────────────────────────────────────────────────
+# --- Data conversion helpers ---
 
 func _dict_to_js(dict: Dictionary) -> JavaScriptObject:
 	var js_obj = JavaScriptBridge.create_object("Object")
@@ -453,9 +441,9 @@ func _variant_to_js(value: Variant) -> Variant:
 
 
 func _js_to_variant(js_value: Variant) -> Variant:
-	# Scalars cross the bridge as native Variants; only JS objects/arrays need
-	# the JSON round-trip (which also makes JSON's usual type degradation —
-	# ints arriving as floats — consistent everywhere).
+	# Scalars cross the bridge as native Variants; only JS objects and arrays
+	# need the JSON round-trip. That round-trip is also what makes JSON's usual
+	# type degradation (ints arriving as floats) consistent everywhere.
 	if typeof(js_value) != TYPE_OBJECT:
 		return js_value
 	var json = JavaScriptBridge.get_interface("JSON")

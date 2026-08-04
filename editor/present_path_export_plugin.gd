@@ -72,7 +72,7 @@ static func patch_source(source: String) -> Dictionary:
 			"ok": false,
 			"changed": false,
 			"source": source,
-			"error": "commit_frame shape changed — patch would not be safe",
+			"error": "commit_frame shape changed, patch would not be safe",
 		}
 
 	return {
@@ -104,7 +104,7 @@ func _patch_js_file(js_path: String) -> void:
 
 	if not result.ok:
 		_report_error(
-			"%s in %s — glue layout changed, re-inspect before patching"
+			"%s in %s. Glue layout changed, re-inspect before patching"
 			% [result.error, js_path]
 		)
 		return

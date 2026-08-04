@@ -52,7 +52,7 @@ func roster_equals(other: CouchLobbyPlayer) -> bool:
 		and controller_slot == other.controller_slot
 
 
-# JSON payloads carry nulls and float-typed numbers — coerce defensively.
+# JSON payloads carry nulls and float-typed numbers, so coerce defensively.
 static func _as_string(value: Variant, fallback: String) -> String:
 	if value is String or value is StringName:
 		return str(value)

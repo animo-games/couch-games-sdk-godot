@@ -1,13 +1,13 @@
-# Thin Windows launcher for build_and_upload.gd.
-# All the real work (export, zip, upload) happens in the .gd so the logic stays
-# identical across platforms and needs no external zip/curl/jq. This wrapper only
-# locates the Godot binary and hands off; see build_and_upload.sh for macOS/Linux.
-# Usage: .\addons\couch-games-sdk\build_and_upload.ps1 <game-slug>
+# Windows launcher for build_and_upload.gd. The export, zip and upload all
+# happen in the .gd, so the logic stays the same across platforms and needs no
+# external zip/curl/jq. This only locates the Godot binary and hands off; see
+# build_and_upload.sh for the macOS/Linux equivalent.
+# Usage: .\addons\couch-games-sdk\tools\build_and_upload.ps1 <game-slug>
 param([Parameter(Mandatory = $true)][string]$Slug)
 $ErrorActionPreference = "Stop"
 
 $Dir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$Project = (Resolve-Path (Join-Path $Dir "..\..")).Path
+$Project = (Resolve-Path (Join-Path $Dir "..\..\..")).Path
 
 # Load .env so a GODOT override (and COUCHGAMES_API_KEY) reach both this
 # launcher and the child Godot process.
@@ -25,5 +25,5 @@ if (Test-Path $EnvFile) {
 $Godot = if ($env:GODOT) { $env:GODOT } else { "godot" }
 
 & $Godot --headless --path $Project `
-    --script "res://addons/couch-games-sdk/build_and_upload.gd" -- $Slug
+    --script "res://addons/couch-games-sdk/tools/build_and_upload.gd" -- $Slug
 exit $LASTEXITCODE

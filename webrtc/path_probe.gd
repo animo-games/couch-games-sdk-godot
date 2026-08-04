@@ -1,14 +1,14 @@
 # Iframe-realm probe for WebRTC candidate-pair state. Web exports only.
 #
 # Godot's WebRTCPeerConnection has no get_stats(), and the platform has no
-# handle on the game's peer connections (they're created by the engine's web
-# glue inside the game iframe). This installs a JS wrapper around
-# window.RTCPeerConnection BEFORE any connection is created, keeps a WeakRef
-# registry, and refreshes a plain-object cache from getStats() on a 1s timer
-# so GDScript can read path state synchronously.
+# handle on the game's peer connections, which the engine's web glue creates
+# inside the game iframe. So this installs a JS wrapper around
+# window.RTCPeerConnection BEFORE any connection exists, keeps a WeakRef
+# registry, and refreshes a plain-object cache from getStats() on a 1s timer so
+# GDScript can read path state synchronously.
 #
-# Read via JavaScriptBridge.eval returning a JSON string — deliberately NOT
-# via get_interface()/JavaScriptObject, which shadows Godot Object members
+# Reads go through JavaScriptBridge.eval returning a JSON string, not through
+# get_interface()/JavaScriptObject, which shadows Godot Object members
 # (disconnect/connect/free/call).
 extends RefCounted
 
@@ -27,7 +27,7 @@ const _PROBE_JS := """
   // Reflect.construct with new.target keeps derived-class semantics intact
   // (`class Foo extends RTCPeerConnection {}` -> `new Foo() instanceof Foo`);
   // setPrototypeOf inherits static members. Plain `new RTCPeerConnection()`
-  // still lands on Native.prototype because Wrapped.prototype IS it.
+  // still lands on Native.prototype, because Wrapped.prototype IS it.
   function Wrapped(config, constraints) {
     var pc = Reflect.construct(Native, arguments, new.target || Wrapped);
     refs.push(new WeakRef(pc));
@@ -108,14 +108,13 @@ const _PROBE_JS := """
   }
 
   function refresh() {
-    // Generation guard: getStats() batches can resolve out of order, and a
+    // Generation guard: getStats() batches can resolve out of order, and one
     // batch can outlive the refreshes that follow it, so a batch publishes
-    // only when its generation is newer than the last PUBLISHED one.
-    // Comparing against the newest STARTED generation instead would starve
-    // the cache whenever batches outlive the interval: each batch would find
-    // a newer refresh already begun and drop its result, forever. The cache
-    // is still swapped whole, exactly once per publishing generation, never
-    // partially.
+    // only if its generation beats the last PUBLISHED one. Comparing against
+    // the newest STARTED generation would starve the cache whenever batches
+    // outlive the interval, since every batch would find a newer refresh
+    // already begun and drop its result. Either way the cache is swapped
+    // whole, once per publishing generation, never partially.
     var gen = ++generation;
     var live = [];
     for (var i = 0; i < refs.length; i++) {
@@ -170,8 +169,8 @@ static func install() -> void:
 static func is_available() -> bool:
 	return _installed
 
-## Snapshot of live peer connections. Reads a ~1s-stale JS cache; cheap but
-## not free (a JSON round-trip) — call at diagnostics rate, never per frame.
+## Snapshot of live peer connections. Reads a ~1s-stale JS cache; cheap but not
+## free (a JSON round-trip), so call at diagnostics rate, never per frame.
 static func paths() -> Array:
 	if not _installed:
 		return []

@@ -1,15 +1,14 @@
 # WebRTC signaling bridge, exposed as `CouchGames.webrtc`.
 #
-# Provides everything a game needs to establish WebRTC peer connections with
-# other session members: a relay for opaque handshake blobs (SDP offers/
-# answers, ICE candidates), peer presence for the signaling room, and ICE
-# server configuration (STUN + server-minted TURN credentials on the real
-# platform).
+# Handles the signaling side of setting up WebRTC peer connections with other
+# session members: a relay for opaque handshake blobs (SDP offers/answers, ICE
+# candidates), peer presence for the signaling room, and ICE server config
+# (STUN, plus server-minted TURN credentials on the real platform).
 #
 # A peer id IS the lobby userId, so signaling peers correlate 1:1 with
 # CouchGames.lobby players (role, controller slot). This node is transport
-# plumbing only — assembling WebRTCPeerConnection / WebRTCMultiplayerPeer from
-# it is the game's (or a netcode addon's) job.
+# plumbing only. Assembling WebRTCPeerConnection / WebRTCMultiplayerPeer out of
+# it is the game's job, or a netcode addon's.
 #
 # Typical flow:
 #   var res := await CouchGames.webrtc.connect_signaling()
@@ -31,7 +30,7 @@ signal peer_left(peer_id: String)
 ## A peer that was already in the room when we connected (reported right
 ## after connect_signaling resolves).
 signal peer_exists(peer_id: String)
-## The signaling socket closed — including after disconnect_signaling().
+## The signaling socket closed, including after disconnect_signaling().
 ## Reconnect with connect_signaling() if the session is still live.
 signal signaling_closed(room_id: String)
 ## Fresh ICE servers after a request_ice_servers() refresh.
@@ -66,9 +65,8 @@ static func normalize_room_code(code: String) -> String:
 
 
 ## Build the signaling room id for a room code. Pass the result to
-## connect_signaling() so host and joiner land in the same signaling room —
-## the "code-" namespace keeps short codes from colliding with platform
-## lobby room ids.
+## connect_signaling() so host and joiner land in the same room. The "code-"
+## namespace keeps short codes from colliding with platform lobby room ids.
 static func room_id_for_code(code: String) -> String:
 	return "code-" + normalize_room_code(code)
 
@@ -125,14 +123,14 @@ func request_ice_servers() -> void:
 		_backend.webrtc_request_ice_servers()
 
 
-## Leave the signaling room. Existing WebRTC peer connections stay up — this
-## only tears down the handshake channel.
+## Leave the signaling room. Existing WebRTC peer connections stay up; this only
+## tears down the handshake channel.
 func disconnect_signaling() -> void:
 	if _backend != null:
 		_backend.webrtc_disconnect()
 
 
-## True when WebRTC path stats are observable — a web export with the SDK
+## True when WebRTC path stats are observable, i.e. a web export with the SDK
 ## probe installed. False in the editor and in native builds, where
 ## get_connection_paths() always returns [].
 func is_path_probe_available() -> bool:
@@ -141,18 +139,18 @@ func is_path_probe_available() -> bool:
 
 ## Snapshot of every live peer connection's selected candidate pair. Each
 ## entry:
-##   ufrag          String  local ICE ufrag — the peer-correlation key
+##   ufrag          String  local ICE ufrag, the peer-correlation key
 ##   state          String  RTCPeerConnection.connectionState
 ##   selected       bool    a succeeded+nominated candidate pair exists
 ##   protocol       String  "udp" | "tcp" | ""
 ##   relay_protocol String  "udp" | "tcp" | "tls" | "" (relay candidates only)
 ##   local_type     String  "host"|"srflx"|"prflx"|"relay"|""
 ##   remote_type    String  same, for the remote candidate
-##   is_datagram    bool    protocol=="udp" and relay_protocol in ["","udp"] —
+##   is_datagram    bool    protocol=="udp" and relay_protocol in ["","udp"],
 ##                          i.e. safe for rollback netcode (a TCP path reports
 ##                          "connected" but head-of-line-blocks GGPO)
 ## Values are up to ~1s stale (a JS-side cache; candidate pairs only change on
-## ICE restart). Diagnostics-rate reads only — do not call per frame.
+## ICE restart). Read at diagnostics rate, never per frame.
 func get_connection_paths() -> Array:
 	return _PathProbe.paths()
 

@@ -3,9 +3,10 @@ extends EditorPlugin
 
 const _MENU_ITEM := "Couch Games: Build & Upload Web…"
 const _SLUG_SETTING := "couch_games/deploy/slug"
-const _UPLOAD_SCRIPT := "res://addons/couch-games-sdk/build_and_upload.gd"
+const _UPLOAD_SCRIPT := "res://addons/couch-games-sdk/tools/build_and_upload.gd"
+const _AUTOLOAD_SCRIPT := "res://addons/couch-games-sdk/core/couch_games_sdk.gd"
 const _PresentPathExportPlugin := preload(
-	"res://addons/couch-games-sdk/present_path_export_plugin.gd"
+	"res://addons/couch-games-sdk/editor/present_path_export_plugin.gd"
 )
 
 # name, default, type, hint, hint_string
@@ -35,7 +36,7 @@ func _enter_tree():
 		_define_setting(setting[0], setting[1], setting[2], setting[3], setting[4])
 	_present_path_export_plugin = _PresentPathExportPlugin.new()
 	add_export_plugin(_present_path_export_plugin)
-	add_autoload_singleton("CouchGames", "./couch_games_sdk.gd")
+	add_autoload_singleton("CouchGames", _AUTOLOAD_SCRIPT)
 	_build_dialogs()
 	add_tool_menu_item(_MENU_ITEM, _open_upload_dialog)
 
@@ -54,13 +55,13 @@ func _exit_tree():
 	remove_autoload_singleton("CouchGames")
 
 
-# --- Build & Upload button -------------------------------------------------
+# --- Build & Upload button ---
 
 func _build_dialogs() -> void:
 	var base := EditorInterface.get_base_control()
 
 	_dialog = ConfirmationDialog.new()
-	_dialog.title = "Couch Games — Build & Upload"
+	_dialog.title = "Couch Games: Build & Upload"
 	_dialog.ok_button_text = "Build & Upload"
 	var box := VBoxContainer.new()
 	var label := Label.new()
@@ -103,8 +104,8 @@ func _on_confirmed() -> void:
 	_thread.start(_run_upload.bind(slug))
 
 
-# Runs on a background thread so the editor stays responsive. Reuses the exact
-# same headless pipeline as the CLI launchers.
+# Runs on a background thread so the editor stays responsive. Same headless
+# pipeline the CLI launchers use.
 func _run_upload(slug: String) -> void:
 	var args := [
 		"--headless",
@@ -124,9 +125,9 @@ func _on_upload_finished(rc: int, text: String) -> void:
 	_running = false
 	print(text)
 	if rc == 0:
-		_show_result("Couch Games — Success", "Upload complete. See the Output panel for details.")
+		_show_result("Couch Games: Success", "Upload complete. See the Output panel for details.")
 	else:
-		_show_result("Couch Games — Failed", "Build/upload failed (exit %d).\nSee the Output panel for details." % rc)
+		_show_result("Couch Games: Failed", "Build/upload failed (exit %d).\nSee the Output panel for details." % rc)
 
 
 func _show_result(title: String, message: String) -> void:
@@ -135,8 +136,8 @@ func _show_result(title: String, message: String) -> void:
 	_result_dialog.popup_centered()
 
 
-# Registers a project setting with its default, without overwriting a value
-# the user already changed. The runtime reads these with the same defaults, so
+# Registers a project setting with its default without clobbering a value the
+# user already changed. The runtime reads these with the same defaults, so
 # exports work even if the plugin never ran.
 func _define_setting(name: String, default_value: Variant, type: int, hint: int, hint_string: String) -> void:
 	if not ProjectSettings.has_setting(name):

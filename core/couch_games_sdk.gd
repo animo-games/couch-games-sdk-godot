@@ -1,12 +1,11 @@
-# couch_games_sdk.gd
 # Autoload singleton for the CouchGames SDK.
 #
-# Thin facade: every verb delegates to a backend. Inside the Couch Games
-# platform (web export) that's CouchGamesWebBackend, which talks to the parent
-# page's window.CouchGames via JavaScriptBridge. Everywhere else (editor,
-# standalone builds) it's CouchGamesMockBackend — a full local simulation with
-# persistence under user://couch_games_mock/ and a debug overlay (F10) for
-# faking lobby players and events.
+# Every verb delegates to a backend. In a web export running inside the Couch
+# Games platform that backend is CouchGamesWebBackend, which talks to the parent
+# page's window.CouchGames over JavaScriptBridge. Everywhere else (editor,
+# standalone builds) it's CouchGamesMockBackend, which simulates the platform
+# locally: persistence under user://couch_games_mock/ plus a debug overlay (F10)
+# for faking lobby players and events.
 
 extends Node
 
@@ -25,10 +24,6 @@ const _Lobby := preload("res://addons/couch-games-sdk/lobby/couch_lobby.gd")
 const _WebRTC := preload("res://addons/couch-games-sdk/webrtc/couch_webrtc.gd")
 const _Overlay := preload("res://addons/couch-games-sdk/debug/debug_overlay.gd")
 const _PathProbe := preload("res://addons/couch-games-sdk/webrtc/path_probe.gd")
-
-# ------------------------------------------------
-# Public
-# ------------------------------------------------
 
 var is_available: bool:
 	get:
@@ -59,15 +54,14 @@ var _backend: CouchGamesBackend
 var _initialized := false
 var _initializing := false
 
-# ────────────────────────────────────────────────
-# Setup
-# ────────────────────────────────────────────────
+
+# --- Setup ---
 
 func _ready() -> void:
-	# Install the WebRTC path probe before anything can create a peer
-	# connection. Autoload _ready() runs before the main scene; if a game
-	# creates peer connections from an earlier autoload, move CouchGames up
-	# that project's autoload list.
+	# The path probe has to go in before anything can create a peer connection.
+	# Autoload _ready() runs before the main scene; if a game creates peer
+	# connections from an earlier autoload, move CouchGames up that project's
+	# autoload list.
 	_PathProbe.install()
 	_backend = _create_backend()
 	_backend.name = "Backend"
@@ -91,8 +85,8 @@ func init() -> void:
 	if _initialized:
 		return
 	if _initializing:
-		# A concurrent caller is already initializing — park until it finishes
-		# so every `await CouchGames.init()` resolves after setup completed.
+		# Another caller got here first. Park until it finishes so that every
+		# `await CouchGames.init()` resolves after setup completed.
 		while _initializing:
 			await get_tree().process_frame
 		return
@@ -111,8 +105,9 @@ func _create_backend() -> CouchGamesBackend:
 		or OS.get_cmdline_user_args().has("--couch-mock")
 	if not force_mock and _WebBackend.detect():
 		return _WebBackend.new()
-	# Local relay: real lobby between multiple local instances over a loopback
-	# WebSocket. Debug builds only — a release build must never open a socket.
+	# Local relay: a real lobby between several local instances over a loopback
+	# WebSocket. Debug builds only, since a release build must never open a
+	# socket.
 	if not force_mock and OS.is_debug_build() \
 			and ProjectSettings.get_setting(_LOCAL_ENABLED_SETTING, true):
 		return _LocalBackend.new()
@@ -124,9 +119,8 @@ func _overlay_enabled() -> bool:
 		return false
 	return ProjectSettings.get_setting(_OVERLAY_ENABLED_SETTING, true)
 
-# ────────────────────────────────────────────────
-# Public API
-# ────────────────────────────────────────────────
+
+# --- Public API ---
 
 func save_game(save_data: Dictionary, progress: float = 0.0) -> CouchGamesSDKResponse:
 	return CouchGamesSDKResponse.from_dict(await _backend.save_game(save_data, progress))

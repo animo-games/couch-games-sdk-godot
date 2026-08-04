@@ -3,20 +3,20 @@
 ## gets from CouchGames.webrtc and hands it to RollbackTransport.start() /
 ## RollbackSessionController.begin().
 ##
-## Deliberately does NOT `extends RollbackSignalingAdapter`. This addon ships in
-## games that do not install the rollback addon, where that base class does not
-## exist and naming it would be an unresolvable-base parse error in every one of
-## them. The rollback addon's contract is duck-typed for exactly this reason:
-## connect_room()/send()/close() plus sig_received/peer_joined/peer_left, checked
-## at runtime by RollbackSignalingAdapter.implements(). Keep this file in sync
-## with that contract; nothing here may reference the rollback addon.
+## It does not `extends RollbackSignalingAdapter`, on purpose. This addon ships
+## in games that never install the rollback addon, where that base class doesn't
+## exist and naming it would be an unresolvable-base parse error. That's why the
+## rollback addon duck-types the contract: connect_room()/send()/close() plus
+## sig_received/peer_joined/peer_left, checked at runtime by
+## RollbackSignalingAdapter.implements(). Keep this file in sync with that
+## contract; nothing here may reference the rollback addon.
 ##
-## peer_exists and peer_joined both surface as peer_joined here: the transport
-## treats a peer that was already in the room and one that joins after us
-## identically (build a connection either way).
+## peer_exists and peer_joined both surface as peer_joined here, because the
+## transport treats a peer that was already in the room the same as one that
+## joins after us: build a connection either way.
 ##
-## `explicit_room_id` picks the signaling room connect_room() joins: empty =
-## the platform's default lobby room; non-empty = an explicit room (menu
+## `explicit_room_id` picks the signaling room connect_room() joins. Empty means
+## the platform's default lobby room; non-empty means an explicit room (the menu
 ## host/join-code flow, e.g. CouchWebRTC.room_id_for_code). Reconnecting to a
 ## room the peer is already in is safe: the signaling server dedups by peerId (a
 ## new socket with the same peerId replaces the old one) and re-announces peer
@@ -25,7 +25,7 @@ class_name CouchRollbackSignalingAdapter
 extends RefCounted
 
 ## A handshake blob from another peer, after a JSON round-trip. Ints arrive as
-## floats — cast with int() before using a numeric field.
+## floats, so cast with int() before using a numeric field.
 signal sig_received(peer_id: String, data: Variant)
 ## A peer is present in the signaling room (already there or just joined).
 signal peer_joined(peer_id: String)
@@ -46,7 +46,7 @@ func _init(webrtc: CouchWebRTC, explicit_room_id: String = "") -> void:
 	_webrtc.peer_left.connect(_on_peer_left)
 
 
-## Join the signaling room. Async — await the result. Returns
+## Join the signaling room. Async, so await the result. Returns
 ## {success, error?, peer_id?, room_id?, ice_servers?}.
 func connect_room() -> Dictionary:
 	return await _webrtc.connect_signaling(_explicit_room_id)
@@ -91,10 +91,10 @@ func _on_peer_left(peer_id: String) -> void:
 	peer_left.emit(peer_id)
 
 
-# The rollback transport relays each peer's LOCAL session description
-# through send() (rollback_transport.gd _on_session_description_created).
-# Its ICE ufrag is the key that ties a peer id to a probe entry. Read-only
-# sniff — the blob is still forwarded unchanged.
+# The rollback transport relays each peer's LOCAL session description through
+# send() (rollback_transport.gd _on_session_description_created). Its ICE ufrag
+# is the key that ties a peer id to a probe entry. Read-only sniff: the blob is
+# still forwarded unchanged.
 func _note_local_ufrag(peer_id: String, data: Variant) -> void:
 	if not (data is Dictionary):
 		return

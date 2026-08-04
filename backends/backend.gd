@@ -1,13 +1,13 @@
-# Abstract base for CouchGames SDK backends. The facade autoload
-# (couch_games_sdk.gd) delegates every SDK verb here; concrete implementations
-# are CouchGamesWebBackend (the real platform bridge, web exports only) and
-# CouchGamesMockBackend (local simulation for the editor and standalone runs).
+# Abstract base for CouchGames SDK backends. The CouchGames autoload delegates
+# every SDK verb here. The implementations are CouchGamesWebBackend (the
+# platform bridge, web exports only) and CouchGamesMockBackend (local simulation
+# for the editor and standalone runs).
 #
 # Classic verbs return raw response Dictionaries in the platform's shape
-# ({success, error?, payload?, metadata?}); the facade wraps them into
-# CouchGamesSDKResponse. Lobby data uses the platform's key style (userId,
-# username, role, status, experienceId, controllerSlot, ping) — CouchLobby
-# converts to typed CouchLobbyPlayer objects.
+# ({success, error?, payload?, metadata?}); the autoload wraps them into
+# CouchGamesSDKResponse. Lobby data keeps the platform's key style (userId,
+# username, role, status, experienceId, controllerSlot, ping); converting it to
+# typed CouchLobbyPlayer objects is CouchLobby's job.
 class_name CouchGamesBackend
 extends Node
 
@@ -50,9 +50,7 @@ func load_resource_packs(_experience_payload: Dictionary) -> void:
 	pass
 
 
-# ────────────────────────────────────────────────
-# Classic SDK verbs
-# ────────────────────────────────────────────────
+# --- Classic SDK verbs ---
 
 func save_game(_save_data: Dictionary, _progress: float) -> Dictionary:
 	return _not_implemented()
@@ -102,9 +100,7 @@ func get_session_stats() -> Dictionary:
 	return _not_implemented()
 
 
-# ────────────────────────────────────────────────
-# Lobby
-# ────────────────────────────────────────────────
+# --- Lobby ---
 
 func lobby_is_available() -> bool:
 	return false
@@ -126,16 +122,14 @@ func lobby_send_event(_event: String, _data: Variant, _target: Dictionary) -> vo
 	pass
 
 
-# ────────────────────────────────────────────────
-# WebRTC signaling
-# ────────────────────────────────────────────────
+# --- WebRTC signaling ---
 
 func webrtc_is_available() -> bool:
 	return false
 
 
-## Join the session's signaling room. `room_id` is normally "" — the platform
-## defaults to the active lobby's room. Returns the platform response shape:
+## Join the session's signaling room. `room_id` is normally "", which lets the
+## platform default to the active lobby's room. Returns the platform's shape:
 ## {success, message?, payload?: {peerId, roomId, iceServers}}.
 func webrtc_connect_signaling(_room_id: String) -> Dictionary:
 	return _not_implemented()
@@ -155,9 +149,7 @@ func webrtc_disconnect() -> void:
 	pass
 
 
-# ────────────────────────────────────────────────
-# Play mode
-# ────────────────────────────────────────────────
+# --- Play mode ---
 
 func multiplayer_get_play_mode() -> String:
 	return ""
