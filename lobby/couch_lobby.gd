@@ -1,13 +1,13 @@
 # Multiplayer lobby abstraction, exposed as `CouchGames.lobby`.
 #
 # Push-driven: the backend emits roster and tunnel-event updates (from the
-# platform bridge on web, from the local simulation in mock) and this node
-# turns them into typed Godot signals. Game code never touches the transport.
+# platform bridge on web, from the local simulation in mock) and this node turns
+# them into typed Godot signals, so game code never touches the transport.
 class_name CouchLobby
 extends Node
 
 ## A tunnel event from another client in the session. You never receive your
-## own send_event back (server semantics) — apply local effects at send time.
+## own send_event back (server semantics), so apply local effects at send time.
 signal event_received(event: String, data: Variant, sender_user_id: String)
 ## The full new roster after any membership/status/slot change. Ping-only
 ## changes don't fire. players: Array[CouchLobbyPlayer]
@@ -100,8 +100,8 @@ func send_event(event: String, data: Variant = null, target: Dictionary = {}) ->
 	_backend.lobby_send_event(event, data, _normalize_target(target))
 
 
-## Re-fetch the roster from the backend immediately. Normally unnecessary —
-## updates are pushed — but useful right after awaiting CouchGames.init().
+## Re-fetch the roster from the backend immediately. Rarely needed, since
+## updates are pushed, but useful right after awaiting CouchGames.init().
 func refresh_players() -> void:
 	if _backend == null:
 		return

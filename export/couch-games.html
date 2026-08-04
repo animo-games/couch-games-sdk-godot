@@ -176,7 +176,7 @@
 
       // This shell is the single source of truth for canvas size. Godot's
       // canvas_resize_policy is set to 0 (None) for this preset so the engine
-      // never resizes the canvas itself — that removes the dual-owner race that
+      // never resizes the canvas itself. That kills the dual-owner race that
       // left the game zoomed-in after exiting fullscreen.
       window.addEventListener('resize', resizeCanvas);
 

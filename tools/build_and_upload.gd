@@ -1,30 +1,29 @@
 extends SceneTree
-# Build the Web export and push it to couchgames.com as a new dev version.
+# Builds the Web export and pushes it to couchgames.com as a new dev version.
 #
-# Pure Godot, zero external CLI tools: uses ZIPPacker (instead of `zip`),
-# HTTPClient (instead of `curl`), and JSON (instead of `jq`), so the exact same
-# logic runs on Windows, macOS, and Linux. The only requirement is a Godot
-# editor binary with the Web export templates installed.
+# Uses ZIPPacker instead of `zip`, HTTPRequest instead of `curl` and JSON instead
+# of `jq`, so it behaves the same on Windows, macOS and Linux. All it needs is a
+# Godot editor binary with the Web export templates installed.
 #
-# Run it through the thin launcher for your platform, which just locates Godot:
-#   ./addons/couch-games-sdk/build_and_upload.sh  <game-slug>   (macOS/Linux)
-#   ./addons/couch-games-sdk/build_and_upload.ps1 <game-slug>   (Windows)
-# ...or invoke it directly:
+# Run it through the launcher for your platform (they only locate Godot):
+#   ./addons/couch-games-sdk/tools/build_and_upload.sh  <game-slug>   macOS/Linux
+#   .\addons\couch-games-sdk\tools\build_and_upload.ps1 <game-slug>   Windows
+# or invoke it directly:
 #   <godot> --headless --path <project> \
-#     --script res://addons/couch-games-sdk/build_and_upload.gd -- <game-slug>
+#     --script res://addons/couch-games-sdk/tools/build_and_upload.gd -- <slug>
 #
-# Assumes it lives at <project>/addons/couch-games-sdk/ inside a Godot project
-# with a "Web" export preset. Reads COUCHGAMES_API_KEY (required) and optional
-# DEV_PORTAL_URL from the environment or a .env file at the project root.
+# Expects to live at <project>/addons/couch-games-sdk/ in a project that has a
+# "Web" export preset. Reads COUCHGAMES_API_KEY (required) and DEV_PORTAL_URL
+# (optional) from the environment or from a .env file at the project root.
 
 const PRESET := "Web"
 const DEFAULT_PORTAL := "https://developer.couchgames.com"
 const PRESENT_PATH_PATCH_MARKER := "/*present-path-patch*/"
 
 func _init() -> void:
-	# Defer to the first idle frame: doing TLS/network I/O straight from _init()
-	# fails with "SSL module failed to initialize!" because the crypto module and
-	# scene tree aren't ready yet. By the deferred call they are.
+	# Deferred to the first idle frame. TLS/network I/O straight out of _init()
+	# fails with "SSL module failed to initialize!" because the crypto module
+	# and the scene tree aren't up yet.
 	_start.call_deferred()
 
 func _start() -> void:
@@ -44,7 +43,7 @@ func _run() -> int:
 		return 1
 	var portal := _resolve("DEV_PORTAL_URL", env, DEFAULT_PORTAL).rstrip("/")
 
-	# 1. Export ----------------------------------------------------------------
+	# 1. Export
 	var project_dir := ProjectSettings.globalize_path("res://")
 	var web_dir := ProjectSettings.globalize_path("res://build/web")
 	DirAccess.make_dir_recursive_absolute(web_dir)
@@ -83,7 +82,7 @@ func _run() -> int:
 		printerr("Export produced no files in %s" % web_dir)
 		return 1
 
-	# 3. Upload ----------------------------------------------------------------
+	# 3. Upload
 	var zip_bytes := FileAccess.get_file_as_bytes(zip_path)
 	print("Uploading %s build to %s ..." % [_human_size(zip_bytes.size()), portal])
 	return await _upload(portal, slug, api_key, zip_bytes)
@@ -170,10 +169,10 @@ func _human_size(n: int) -> String:
 	return "%dB" % n
 
 
-# POST the zip as the raw application/zip request body to the versions endpoint
-# (the portal streams it to R2); older portals expected multipart — this
-# requires the streaming endpoint from platform-dev commit aaee04b.
-# Uses HTTPRequest so TLS, redirects, and chunked responses are handled for us.
+# POSTs the zip as a raw application/zip body to the versions endpoint, which
+# streams it on to R2. Older portals expected multipart, so this needs the
+# streaming endpoint added in platform-dev commit aaee04b. HTTPRequest takes
+# care of TLS, redirects and chunked responses.
 func _upload(portal: String, slug: String, api_key: String, zip_bytes: PackedByteArray) -> int:
 	var url := "%s/api/games/%s/versions" % [portal, slug]
 	var headers := PackedStringArray([
@@ -209,7 +208,7 @@ func _upload(portal: String, slug: String, api_key: String, zip_bytes: PackedByt
 			printerr("Upload failed (HTTP %d):" % status_code)
 			printerr(text)
 			return 1
-		print("Uploaded version %s (%s files) — now the isDeveloperActive build for \"%s\"." % [
+		print("Uploaded version %s (%s files); now the isDeveloperActive build for \"%s\"." % [
 			str(data.get("versionNumber", "?")), str(data.get("filesUploaded", "?")), slug])
 	else:
 		print(text)

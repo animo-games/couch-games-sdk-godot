@@ -3,18 +3,18 @@
 # tested across separate processes (Debug > Run Multiple Instances) instead of
 # only against overlay-faked players.
 #
-# Role is decided automatically: the first instance to bind
-# couch_games/local/port becomes the host; later instances find the port taken
-# and join it as guests. Override per instance with the user args
-# `--couch-role=host` / `--couch-role=guest` (Debug > Customize Run Instances).
+# Roles sort themselves out: the first instance to bind couch_games/local/port
+# becomes the host, later instances find the port taken and join it as guests.
+# Override per instance with the user args `--couch-role=host` /
+# `--couch-role=guest` (Debug > Customize Run Instances).
 #
 # The host relays with the same semantics as the platform's signaling server:
 # senderUserId is stamped from the connection (no impersonation), target
 # userId/role conditions AND together, and nothing echoes back to its sender.
 #
 # Extends the mock backend, so classic verbs (saves/stats/metadata) and the
-# debug overlay keep working — overlay-faked players on the host are part of
-# the shared roster and visible to real guest instances too.
+# debug overlay keep working. Overlay-faked players on the host are part of the
+# shared roster and visible to real guest instances too.
 class_name CouchGamesLocalBackend
 extends CouchGamesMockBackend
 
@@ -49,12 +49,12 @@ func initialize() -> void:
 	if role_override != "host" and await _try_join():
 		print("CouchGames SDK: joined local lobby on port %d as %s" % [_port, local_user_id])
 		return
-	push_warning("CouchGames SDK: no local lobby on port %d — running as solo mock host" % _port)
+	push_warning("CouchGames SDK: no local lobby on port %d, running as solo mock host" % _port)
 
 
 func get_network_status() -> String:
 	if _server:
-		return "hosting ws://127.0.0.1:%d — %d instance(s) connected" % [_port, _peers.size()]
+		return "hosting ws://127.0.0.1:%d, %d instance(s) connected" % [_port, _peers.size()]
 	if _guest_ws:
 		return "guest of ws://127.0.0.1:%d" % _port
 	return "solo (no local lobby)"
@@ -69,9 +69,7 @@ func _exit_tree() -> void:
 		_server.stop()
 
 
-# ────────────────────────────────────────────────
-# Role setup
-# ────────────────────────────────────────────────
+# --- Role setup ---
 
 func _try_listen() -> bool:
 	_server = TCPServer.new()
@@ -83,7 +81,7 @@ func _try_listen() -> bool:
 
 func _try_join() -> bool:
 	local_role = "guest"
-	# Unique per instance — the host dedups connections by userId.
+	# Unique per instance, since the host dedups connections by userId.
 	local_user_id = "local-%d-%04x" % [OS.get_process_id(), randi() & 0xFFFF]
 	_seed_local_player()
 	_guest_ws = WebSocketPeer.new()
@@ -127,9 +125,7 @@ func _join_failed() -> bool:
 	return false
 
 
-# ────────────────────────────────────────────────
-# Per-frame socket pumping
-# ────────────────────────────────────────────────
+# --- Per-frame socket pumping ---
 
 func _process(_delta: float) -> void:
 	if _server:
@@ -188,9 +184,7 @@ func _process_guest() -> void:
 				webrtc_signaling_closed.emit(WEBRTC_LOCAL_ROOM)
 
 
-# ────────────────────────────────────────────────
-# Host: registration, routing, relay
-# ────────────────────────────────────────────────
+# --- Host: registration, routing, relay ---
 
 func _register_guest(ws: WebSocketPeer, msg: Dictionary) -> void:
 	var user_id := str(msg.get("userId", ""))
@@ -216,12 +210,13 @@ func _handle_host_message(sender_id: String, msg: Variant) -> void:
 	match str(msg.get("type", "")):
 		"lobby-tunnel-event":
 			var target: Dictionary = msg.get("target") if msg.get("target") is Dictionary else {}
-			# senderUserId is stamped from the connection, like the real server —
-			# a guest can't impersonate anyone.
+			# senderUserId is stamped from the connection, like the real
+			# server does, so a guest can't impersonate anyone.
 			_route_event(str(msg.get("event", "")), msg.get("payload"), sender_id, target)
 		"webrtc-join":
-			# Reply with the existing member roster, then announce the newcomer —
-			# same ordering as the real signaling room (peer-exists, peer-joined).
+			# Reply with the existing member roster, then announce the
+			# newcomer: same ordering as the real signaling room, which
+			# sends peer-exists before peer-joined.
 			var existing: Array = _webrtc_members.keys()
 			_webrtc_members[sender_id] = true
 			if _peers.has(sender_id):
@@ -281,9 +276,7 @@ func _emit_players() -> void:
 		_broadcast({"type": "lobby-update", "players": _round_trip(_players)})
 
 
-# ────────────────────────────────────────────────
-# Guest: incoming messages
-# ────────────────────────────────────────────────
+# --- Guest: incoming messages ---
 
 func _handle_guest_message(msg: Variant) -> void:
 	if not (msg is Dictionary):
@@ -309,9 +302,7 @@ func _handle_guest_message(msg: Variant) -> void:
 			_deliver_webrtc_local(msg)
 
 
-# ────────────────────────────────────────────────
-# Overrides: send/simulate/roster control
-# ────────────────────────────────────────────────
+# --- Overrides: send/simulate/roster control ---
 
 func lobby_send_event(event: String, data: Variant, target: Dictionary) -> void:
 	var payload: Variant = _round_trip(data)
@@ -363,9 +354,7 @@ func set_player_status(user_id: String, status: String) -> void:
 	super.set_player_status(user_id, status)
 
 
-# ────────────────────────────────────────────────
-# WebRTC signaling (relayed over the loopback socket)
-# ────────────────────────────────────────────────
+# --- WebRTC signaling (relayed over the loopback socket) ---
 
 func webrtc_connect_signaling(_room_id: String) -> Dictionary:
 	if not _server and not (_guest_ws and _guest_ws.get_ready_state() == WebSocketPeer.STATE_OPEN):
@@ -457,9 +446,7 @@ func _emit_webrtc_peer_exists(peer_id: String) -> void:
 		webrtc_peer_exists.emit(peer_id)
 
 
-# ────────────────────────────────────────────────
-# Wire helpers
-# ────────────────────────────────────────────────
+# --- Wire helpers ---
 
 func _send(ws: WebSocketPeer, msg: Dictionary) -> void:
 	ws.send_text(JSON.stringify(msg))

@@ -1,11 +1,11 @@
 # Mock-only debug panel for the CouchGames SDK. Lets you fake a lobby while
-# testing in the editor: add/remove guests, change their status, and send
+# testing in the editor: add and remove guests, change their status, and send
 # tunnel events as any fake player. Toggle with the key configured in
-# couch_games/mock/overlay_toggle_key (F10 by default — F12 is commonly
-# grabbed system-wide on Linux, e.g. by drop-down terminals).
+# couch_games/mock/overlay_toggle_key (F10 by default; F12 is commonly grabbed
+# system-wide on Linux, by drop-down terminals among others).
 #
 # Only ever instantiated by the CouchGames autoload when the mock backend is
-# active — it never exists against the real platform.
+# active. It never exists against the real platform.
 class_name CouchGamesDebugOverlay
 extends CanvasLayer
 
@@ -63,9 +63,7 @@ func _unhandled_key_input(event: InputEvent) -> void:
 		get_viewport().set_input_as_handled()
 
 
-# ────────────────────────────────────────────────
-# UI construction (in code — keeps the addon scene-free)
-# ────────────────────────────────────────────────
+# --- UI construction (in code, which keeps the addon scene-free) ---
 
 func _build_ui() -> void:
 	_panel = PanelContainer.new()
@@ -161,9 +159,7 @@ func _labeled_row(text: String, control: Control) -> HBoxContainer:
 	return row
 
 
-# ────────────────────────────────────────────────
-# Players section
-# ────────────────────────────────────────────────
+# --- Players section ---
 
 func _refresh_players() -> void:
 	_status_label.text = _mock.get_network_status()
@@ -204,8 +200,8 @@ func _refresh_players() -> void:
 			)
 			row.add_child(remove_button)
 
-			# Only fake players can be senders — game-originated sends belong
-			# in game code via CouchGames.lobby.send_event.
+			# Only fake players can be senders. Game-originated sends belong
+			# in game code, via CouchGames.lobby.send_event.
 			_sender_option.add_item("%s (%s)" % [username, uid])
 			_sender_option.set_item_metadata(_sender_option.item_count - 1, uid)
 
@@ -224,9 +220,7 @@ func _on_add_guest() -> void:
 	_guest_name_edit.clear()
 
 
-# ────────────────────────────────────────────────
-# Send-event section
-# ────────────────────────────────────────────────
+# --- Send-event section ---
 
 func _on_send_pressed() -> void:
 	_send_error_label.visible = false
@@ -235,7 +229,7 @@ func _on_send_pressed() -> void:
 		_show_send_error("Event name is required")
 		return
 	if _sender_option.item_count == 0 or _sender_option.selected < 0:
-		_show_send_error("Add a guest first — events are sent as a fake player")
+		_show_send_error("Add a guest first; events are sent as a fake player")
 		return
 
 	var data: Variant = null
@@ -261,9 +255,7 @@ func _show_send_error(message: String) -> void:
 	_send_error_label.visible = true
 
 
-# ────────────────────────────────────────────────
-# Event log
-# ────────────────────────────────────────────────
+# --- Event log ---
 
 func _on_event_logged(entry: Dictionary) -> void:
 	var recipients: Array = entry.get("delivered_to", [])
@@ -273,7 +265,7 @@ func _on_event_logged(entry: Dictionary) -> void:
 		for recipient in recipients:
 			parts.append(str(recipient))
 		to_text = ", ".join(parts)
-	var line := "[%s] %s %s  from %s → %s  %s" % [
+	var line := "[%s] %s %s  from %s to %s  %s" % [
 		entry.get("time", ""),
 		"IN " if entry.get("direction") == "in" else "OUT",
 		entry.get("event", ""),

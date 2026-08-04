@@ -1,14 +1,14 @@
-# Mock backend: a full local simulation of the CouchGames platform so games
-# are testable in the editor (and any non-platform build) without changes.
+# Mock backend: a local stand-in for the CouchGames platform, so games stay
+# testable in the editor (and in any non-platform build) without changes.
 #
 # - Classic verbs persist to user://couch_games_mock/*.json.
-# - The lobby starts with the local player as host; fake guests are added via
+# - The lobby starts with the local player as host; fake guests come from
 #   add_guest() or the debug overlay.
 # - Tunnel routing mirrors the real server (signaling-object): an event is
 #   NEVER delivered back to its sender, and a target's userId/role conditions
 #   AND together.
 # - Every payload crosses a JSON round-trip so type fidelity matches the web
-#   bridge exactly (ints become floats, callers get copies).
+#   bridge (ints become floats, callers get copies).
 class_name CouchGamesMockBackend
 extends CouchGamesBackend
 
@@ -82,9 +82,7 @@ func get_network_status() -> String:
 	return "offline mock"
 
 
-# ────────────────────────────────────────────────
-# Mock-control API (used by tests and the debug overlay)
-# ────────────────────────────────────────────────
+# --- Mock-control API (used by tests and the debug overlay) ---
 
 ## Adds a fake guest and returns its generated user id ("mock-guest-<n>").
 func add_guest(username: String = "") -> String:
@@ -162,9 +160,7 @@ func reset_persistence() -> void:
 			dir.remove(file_name)
 
 
-# ────────────────────────────────────────────────
-# Classic SDK verbs
-# ────────────────────────────────────────────────
+# --- Classic SDK verbs ---
 
 func save_game(save_data: Dictionary, progress: float) -> Dictionary:
 	await _tick()
@@ -265,9 +261,7 @@ func get_session_stats() -> Dictionary:
 	}}
 
 
-# ────────────────────────────────────────────────
-# Lobby
-# ────────────────────────────────────────────────
+# --- Lobby ---
 
 func lobby_is_available() -> bool:
 	return true
@@ -299,9 +293,7 @@ func lobby_send_event(event: String, data: Variant, target: Dictionary) -> void:
 	_log_event("out", event, payload, LOCAL_USER_ID, target, delivered)
 
 
-# ────────────────────────────────────────────────
-# WebRTC signaling (offline mock: a room with only the local peer)
-# ────────────────────────────────────────────────
+# --- WebRTC signaling (offline mock: a room with only the local peer) ---
 
 const WEBRTC_MOCK_ROOM := "mock-room"
 
@@ -316,8 +308,8 @@ func webrtc_is_available() -> bool:
 func webrtc_connect_signaling(_room_id: String) -> Dictionary:
 	await _tick()
 	webrtc_joined = true
-	# Overlay-faked guests are roster-only — they can't do WebRTC, so the mock
-	# room never reports other peers.
+	# Overlay-faked guests are roster-only and can't do WebRTC, so the mock room
+	# never reports other peers.
 	return {"success": true, "payload": {
 		"peerId": local_user_id,
 		"roomId": WEBRTC_MOCK_ROOM,
@@ -337,9 +329,7 @@ func webrtc_disconnect() -> void:
 		webrtc_signaling_closed.emit(WEBRTC_MOCK_ROOM)
 
 
-# ────────────────────────────────────────────────
-# Play mode (native dev/testing: emulated via env vars, no platform page)
-# ────────────────────────────────────────────────
+# --- Play mode (native dev/testing: emulated via env vars, no platform page) ---
 
 func multiplayer_get_play_mode() -> String:
 	return OS.get_environment("COUCH_PLAY_MODE")
@@ -357,9 +347,7 @@ func _emit_play_mode_selected() -> void:
 	play_mode_selected.emit(multiplayer_get_play_mode(), multiplayer_get_share_code())
 
 
-# ────────────────────────────────────────────────
-# Internals
-# ────────────────────────────────────────────────
+# --- Internals ---
 
 func _deliver_local(event: String, payload: Variant, sender_user_id: String) -> void:
 	await _tick()
@@ -436,7 +424,7 @@ func _mock_experience_payload() -> Dictionary:
 
 
 ## Suspends like a web-bridge call would: one frame minimum, or the configured
-## artificial latency. Keeps `await` timing semantics identical across backends.
+## artificial latency. Keeps await timing the same across backends.
 func _tick() -> void:
 	if latency_ms > 0:
 		await get_tree().create_timer(latency_ms / 1000.0).timeout
@@ -444,8 +432,8 @@ func _tick() -> void:
 		await get_tree().process_frame
 
 
-## Replicates the JS bridge's JSON boundary: ints become floats, non-JSON
-## types degrade identically, and callers receive copies rather than aliases.
+## Replicates the JS bridge's JSON boundary: ints become floats, non-JSON types
+## degrade the same way, and callers get copies rather than aliases.
 func _round_trip(value: Variant) -> Variant:
 	if value == null:
 		return null
