@@ -97,7 +97,14 @@ func connect_signaling(explicit_room_id: String = "") -> Dictionary:
 	local_peer_id = str(payload.get("peerId", ""))
 	room_id = str(payload.get("roomId", ""))
 	var servers: Variant = payload.get("iceServers", [])
+	if payload.has("iceServers") and not (servers is Array):
+		push_warning("CouchWebRTC: connect response iceServers was %s, not Array — falling back to empty" % type_string(typeof(servers)))
 	ice_servers = servers if servers is Array else []
+	# Warned rather than swallowed: an empty ICE list means no STUN/TURN,
+	# so any player on a restrictive network fails to connect with nothing
+	# in the log pointing at why.
+	if ice_servers.is_empty():
+		push_warning("CouchWebRTC: no ICE servers available — connections will fail on any network that needs STUN/TURN")
 	is_signaling_connected = true
 	return {
 		"success": true,
