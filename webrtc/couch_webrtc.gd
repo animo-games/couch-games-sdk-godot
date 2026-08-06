@@ -162,6 +162,20 @@ func get_connection_paths() -> Array:
 	return _PathProbe.paths()
 
 
+## Ordered log of every RTCPeerConnection state transition this session, oldest
+## first, capped at the last 64. Each entry:
+##   ms     int     performance.now() at the transition
+##   kind   String  "pc" (connectionState) | "ice" (iceConnectionState)
+##   state  String  the new state
+##   ufrag  String  local ICE ufrag, "" before a local description exists
+## Also written to the browser console as `NETPATH STATE` lines as it happens.
+## Entries survive the connection closing, so this is the one path-probe reader
+## that still answers questions after a peer is lost — get_connection_paths()
+## drops dead connections and reports nothing about how they ended.
+func get_connection_state_events() -> Array:
+	return _PathProbe.state_events()
+
+
 func _on_signaling_closed(closed_room_id: String) -> void:
 	is_signaling_connected = false
 	signaling_closed.emit(closed_room_id)
