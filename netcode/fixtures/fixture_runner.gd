@@ -78,11 +78,21 @@ const ACTION_KEYS := {
 		"expectCalls",
 	],
 	"authoritative":
-	["op", "expectConsumed", "expectSteps", "moveOutcomes", "epochAfterMove", "expectCalls"],
-	"tick": ["expectSteps", "moveOutcomes", "epochAfterMove", "expectCalls"],
+	[
+		"op", "expectConsumed", "expectSteps", "moveOutcomes", "epochAfterMove",
+		"generationAfterMove", "stackOps", "expectCalls",
+	],
+	"tick":
+	[
+		"expectSteps", "moveOutcomes", "epochAfterMove", "generationAfterMove", "stackOps",
+		"expectCalls",
+	],
 	"reset": ["expectSteps", "expectCalls"],
 	"set-world":
-	["epoch", "generation", "canReconcile", "canApplyRemote", "applyRemote", "rewindBudget"],
+	[
+		"epoch", "generation", "canReconcile", "canApplyRemote", "applyRemote", "rewindBudget",
+		"rewind", "rewindResults",
+	],
 	"assert":
 	[
 		"pendingCount", "isDiverged", "needsRebaseline", "isAwaitingRebaseline",
@@ -97,11 +107,12 @@ const ACTION_KEYS := {
 	[
 		"isPredicting", "currentLevel", "head", "expectActions", "expectSteps",
 		"expectHeadConsumed", "expectCalls", "expectAuthorityProbeCount", "applyHeadUnpredicted",
+		"canReachAuthority", "moveOutcomes", "epochAfterMove", "generationAfterMove", "stackOps",
 	],
 	"arrival":
 	[
 		"authoritySequence", "isLoadLevel", "isPredicting", "expectEnqueued", "expectActions",
-		"expectSteps", "expectCalls",
+		"expectSteps", "expectCalls", "canReachAuthority", "expectAuthorityProbeCount",
 	],
 	"adopt-sync":
 	["authoritySequence", "level", "paused", "operationCount", "expectCalls", "expectSteps", "expectActions"],
@@ -116,9 +127,13 @@ const ACTION_KEYS := {
 	"local-world-replaced": ["expectActions", "expectCalls"],
 }
 
-## Actions this build can actually drive. Everything else in ACTION_KEYS is a known
-## action awaiting its coordinator.
-const IMPLEMENTED_ACTIONS := ["local-move", "authoritative", "tick", "reset", "set-world", "assert"]
+## Actions this build can actually drive. Kept distinct from ACTION_KEYS so a future
+## declared action can remain an honest third status while its coordinator is absent.
+const IMPLEMENTED_ACTIONS := [
+	"local-move", "authoritative", "tick", "reset", "set-world", "assert", "frame",
+	"arrival", "adopt-sync", "recovery", "transport-gap", "rebaselined",
+	"topology-changed", "local-world-replaced",
+]
 
 var results: Array = []
 
@@ -227,9 +242,14 @@ func run_case(case_data: Dictionary) -> CaseResult:
 	var shared_log: Array = []
 	var world := _build_world(case_data.get("world", {}), shared_log)
 	var core := CouchPredictionCore.new(_build_policy(case_data.get("policy", {})))
+	var session_policy := _build_session_policy(case_data.get("session", {}))
+	var recovery := CouchRecoveryCoordinator.new(session_policy)
+	var drain_coordinator := CouchDrainCoordinator.new(core, recovery, session_policy)
+	var scripted_drain := CouchScriptedDrain.new(shared_log)
 	var step_index := 0
 	for step in case_data.get("steps", []):
 		shared_log.clear()
+		scripted_drain.reset_authority_probe_count()
 		var action: String = step.get("action", "")
 		if not ACTION_KEYS.has(action):
 			result.status = Status.FAILED
@@ -248,12 +268,25 @@ func run_case(case_data: Dictionary) -> CaseResult:
 			result.message = "step %d: action %s is not ported yet" % [step_index, action]
 			return result
 
-		var failure := _drive(action, step, world, core)
+		var failure := _drive(
+			action, step, world, core, recovery, drain_coordinator, scripted_drain
+		)
 		# A fixture contradicting itself outranks everything: it means the case cannot
 		# be trusted either way, so report it before any pass/fail verdict.
 		if not world.contract_violation.is_empty():
 			result.status = Status.FAILED
 			result.message = "step %d: fixture self-contradiction: %s" % [step_index, world.contract_violation]
+			return result
+		if not scripted_drain.contract_violation.is_empty():
+			result.status = Status.FAILED
+			result.message = (
+				"step %d: fixture self-contradiction: %s"
+				% [step_index, scripted_drain.contract_violation]
+			)
+			return result
+		if not drain_coordinator.contract_violation.is_empty():
+			result.status = Status.FAILED
+			result.message = "step %d: %s" % [step_index, drain_coordinator.contract_violation]
 			return result
 		if failure == SESSION_NOT_PORTED:
 			result.status = Status.UNIMPLEMENTED
@@ -267,6 +300,21 @@ func run_case(case_data: Dictionary) -> CaseResult:
 		if not failure.is_empty():
 			result.status = Status.FAILED
 			result.message = "step %d (%s): %s" % [step_index, action, failure]
+			return result
+		if (
+			step.has("expectAuthorityProbeCount")
+			and scripted_drain.authority_probe_count != int(step["expectAuthorityProbeCount"])
+		):
+			result.status = Status.FAILED
+			result.message = (
+				"step %d (%s): expectAuthorityProbeCount expected %d, got %d"
+				% [
+					step_index,
+					action,
+					int(step["expectAuthorityProbeCount"]),
+					scripted_drain.authority_probe_count,
+				]
+			)
 			return result
 		step_index += 1
 	return result
@@ -394,7 +442,7 @@ func _validate_step_schema(step: Dictionary, step_index: int, action: String) ->
 			"expectPredicted", "expectConsumed", "canReconcile", "canApplyRemote", "applyRemote",
 			"isDiverged", "needsRebaseline", "isAwaitingRebaseline", "hasGivenUp",
 			"suppressPrediction", "isPredicting", "expectHeadConsumed", "isLoadLevel",
-			"expectEnqueued", "paused", "canReachAuthority", "isGuest",
+			"expectEnqueued", "paused", "canReachAuthority", "isGuest", "rewind",
 		],
 		context
 	)
@@ -516,6 +564,12 @@ func _validate_step_schema(step: Dictionary, step_index: int, action: String) ->
 	if step.has("applyHeadUnpredicted"):
 		failure = _validate_array_members(
 			step["applyHeadUnpredicted"], TYPE_BOOL, "%s.applyHeadUnpredicted" % context
+		)
+		if not failure.is_empty():
+			return failure
+	if step.has("rewindResults"):
+		failure = _validate_array_members(
+			step["rewindResults"], TYPE_BOOL, "%s.rewindResults" % context
 		)
 		if not failure.is_empty():
 			return failure
@@ -641,10 +695,33 @@ func _build_policy(spec: Dictionary) -> CouchPredictionPolicy:
 	return policy
 
 
+func _build_session_policy(spec: Dictionary) -> CouchSessionPolicy:
+	var policy := CouchSessionPolicy.default_policy()
+	if spec.has("stuckHeadMs"):
+		policy.stuck_head_ms = int(spec["stuckHeadMs"])
+	if spec.has("baseBackoffMs"):
+		policy.base_backoff_ms = int(spec["baseBackoffMs"])
+	if spec.has("maxBackoffMs"):
+		policy.max_backoff_ms = int(spec["maxBackoffMs"])
+	if spec.has("backoffShiftCap"):
+		policy.backoff_shift_cap = int(spec["backoffShiftCap"])
+	if spec.has("maxAttempts"):
+		policy.max_attempts = int(spec["maxAttempts"])
+	if spec.has("noBaselineMs"):
+		policy.no_baseline_ms = int(spec["noBaselineMs"])
+	return policy
+
+
 ## Drives one step. Returns "" on success or a failure description.
 ##
 func _drive(
-	action: String, step: Dictionary, world: CouchScriptedWorld, core: CouchPredictionCore
+	action: String,
+	step: Dictionary,
+	world: CouchScriptedWorld,
+	core: CouchPredictionCore,
+	recovery: CouchRecoveryCoordinator,
+	drain_coordinator: CouchDrainCoordinator,
+	scripted_drain: CouchScriptedDrain
 ) -> String:
 	match action:
 		"local-move":
@@ -710,6 +787,96 @@ func _drive(
 			return _compare_steps(step, core.tick(int(step.get("at", 0)), world).steps)
 		"reset":
 			return _compare_steps(step, core.reset())
+		"frame":
+			var queue_failure := _queue_world_effects(step, world)
+			if not queue_failure.is_empty():
+				return queue_failure
+			for value in step.get("applyHeadUnpredicted", []):
+				scripted_drain.apply_head_unpredicted_results.append(bool(value))
+			scripted_drain.can_reach_authority_result = bool(step.get("canReachAuthority", true))
+			var parsed_head := _parse_head(step.get("head", null))
+			if not parsed_head["error"].is_empty():
+				return parsed_head["error"]
+			var frame_input := CouchSessionTypes.FrameInput.create(
+				int(step["at"]),
+				bool(step.get("isPredicting", true)),
+				int(step.get("currentLevel", 0)),
+				parsed_head["head"]
+			)
+			var frame_result := drain_coordinator.run_frame(frame_input, world, scripted_drain)
+			if (
+				step.has("expectHeadConsumed")
+				and frame_result.head_consumed != bool(step["expectHeadConsumed"])
+			):
+				return (
+					"expectHeadConsumed expected %s, got %s"
+					% [bool(step["expectHeadConsumed"]), frame_result.head_consumed]
+				)
+			var compare_failure := _compare_steps(step, frame_result.steps)
+			if not compare_failure.is_empty():
+				return compare_failure
+			return _compare_actions(step, frame_result.actions)
+		"arrival":
+			scripted_drain.can_reach_authority_result = bool(step.get("canReachAuthority", true))
+			var arrival_result := drain_coordinator.on_arrival(
+				int(step.get("authoritySequence", 0)),
+				bool(step.get("isLoadLevel", false)),
+				bool(step.get("isPredicting", true)),
+				int(step["at"]),
+				scripted_drain
+			)
+			if (
+				step.has("expectEnqueued")
+				and arrival_result.should_enqueue != bool(step["expectEnqueued"])
+			):
+				return (
+					"expectEnqueued expected %s, got %s"
+					% [bool(step["expectEnqueued"]), arrival_result.should_enqueue]
+				)
+			var compare_failure := _compare_steps(step, arrival_result.steps)
+			if not compare_failure.is_empty():
+				return compare_failure
+			return _compare_actions(step, arrival_result.actions)
+		"adopt-sync":
+			if drain_coordinator.is_stale_sync(int(step.get("authoritySequence", 0))):
+				return ""
+			var adoption_result := drain_coordinator.adopt_sync(
+				int(step.get("authoritySequence", 0)),
+				int(step.get("level", 0)),
+				bool(step.get("paused", false)),
+				int(step.get("operationCount", 0)),
+				scripted_drain
+			)
+			var compare_failure := _compare_steps(step, adoption_result.steps)
+			if not compare_failure.is_empty():
+				return compare_failure
+			return _compare_actions(step, adoption_result.actions)
+		"recovery":
+			scripted_drain.can_reach_authority_result = bool(step.get("canReachAuthority", true))
+			var trigger := _parse_recovery_trigger(str(step["trigger"]))
+			return _compare_actions(
+				step,
+				recovery.request(
+					trigger,
+					int(step["at"]),
+					bool(step.get("isGuest", true)),
+					bool(step.get("canReachAuthority", true))
+				)
+			)
+		"rebaselined":
+			return _compare_actions(step, recovery.on_rebaselined())
+		"topology-changed":
+			return _compare_actions(step, recovery.on_topology_changed())
+		"local-world-replaced":
+			return _compare_actions(step, drain_coordinator.on_local_world_replaced())
+		"transport-gap":
+			scripted_drain.can_reach_authority_result = bool(step.get("canReachAuthority", true))
+			return _compare_actions(
+				step,
+				drain_coordinator.on_transport_gap(
+					int(step["at"]), bool(step.get("isPredicting", true)), scripted_drain
+				)
+			)
 		"set-world":
 			if step.has("epoch"):
 				world.world_epoch_value = int(step["epoch"])
@@ -723,15 +890,23 @@ func _drive(
 				world.apply_remote_result = bool(step["applyRemote"])
 			if step.has("rewindBudget"):
 				world.set_rewind_budget(int(step["rewindBudget"]))
+			if step.has("rewind"):
+				world.rewind_result = bool(step["rewind"])
+			for rewind_result in step.get("rewindResults", []):
+				world.rewind_results.append(bool(rewind_result))
 			return ""
 		"assert":
-			return _assert_state(step, world, core)
+			return _assert_state(step, world, core, recovery, drain_coordinator)
 		_:
 			return SESSION_NOT_PORTED
 
 
 func _assert_state(
-	step: Dictionary, world: CouchScriptedWorld, core: CouchPredictionCore
+	step: Dictionary,
+	world: CouchScriptedWorld,
+	core: CouchPredictionCore,
+	recovery: CouchRecoveryCoordinator,
+	drain_coordinator: CouchDrainCoordinator
 ) -> String:
 	if step.has("pendingCount") and core.pending_count != int(step["pendingCount"]):
 		return "pendingCount expected %d, got %d" % [int(step["pendingCount"]), core.pending_count]
@@ -769,16 +944,30 @@ func _assert_state(
 		)
 	if step.has("topToken") and world.top_token() != int(step["topToken"]):
 		return "topToken expected %d, got %d" % [int(step["topToken"]), world.top_token()]
-	for session_key in [
-		"isAwaitingRebaseline",
-		"recoveryAttempts",
-		"hasGivenUp",
-		"outstandingNonce",
-		"suppressPrediction",
-		"headToken",
-	]:
-		if step.has(session_key):
-			return SESSION_NOT_PORTED
+	if step.has("isAwaitingRebaseline") and recovery.is_awaiting != bool(step["isAwaitingRebaseline"]):
+		return (
+			"isAwaitingRebaseline expected %s, got %s"
+			% [bool(step["isAwaitingRebaseline"]), recovery.is_awaiting]
+		)
+	if step.has("recoveryAttempts") and recovery.attempts != int(step["recoveryAttempts"]):
+		return (
+			"recoveryAttempts expected %d, got %d"
+			% [int(step["recoveryAttempts"]), recovery.attempts]
+		)
+	if step.has("hasGivenUp") and recovery.has_given_up != bool(step["hasGivenUp"]):
+		return "hasGivenUp expected %s, got %s" % [bool(step["hasGivenUp"]), recovery.has_given_up]
+	if step.has("outstandingNonce") and recovery.outstanding_nonce != int(step["outstandingNonce"]):
+		return (
+			"outstandingNonce expected %d, got %d"
+			% [int(step["outstandingNonce"]), recovery.outstanding_nonce]
+		)
+	if step.has("suppressPrediction") and recovery.suppress_prediction != bool(step["suppressPrediction"]):
+		return (
+			"suppressPrediction expected %s, got %s"
+			% [bool(step["suppressPrediction"]), recovery.suppress_prediction]
+		)
+	if step.has("headToken") and drain_coordinator.head_token != int(step["headToken"]):
+		return "headToken expected %d, got %d" % [int(step["headToken"]), drain_coordinator.head_token]
 	return ""
 
 
@@ -831,6 +1020,125 @@ func _parse_authoritative_op(spec: Dictionary) -> Dictionary:
 			}
 		_:
 			return {"op": null, "error": "unknown authoritative op kind %s" % kind_label}
+
+
+func _parse_head(value: Variant) -> Dictionary:
+	if value == null:
+		return {"head": CouchSessionTypes.HeadDescriptor.none(), "error": ""}
+	var spec: Dictionary = value
+	var kind_label := str(spec["kind"])
+	var op_kind := _op_kind_for_label(kind_label)
+	if op_kind < 0:
+		return {"head": null, "error": "unknown head op kind %s" % kind_label}
+	return {
+		"head":
+		CouchSessionTypes.HeadDescriptor.create(
+			int(spec["token"]),
+			op_kind,
+			int(spec.get("level", 0)),
+			int(spec.get("playerSlot", -1)),
+			int(spec.get("requestSequence", 0)),
+			int(spec.get("dx", 0)),
+			int(spec.get("dy", 0))
+		),
+		"error": "",
+	}
+
+
+func _op_kind_for_label(label: String) -> int:
+	match label:
+		"move":
+			return CouchPredictionTypes.OpKind.MOVE
+		"undo":
+			return CouchPredictionTypes.OpKind.UNDO
+		"restart", "load-level":
+			return CouchPredictionTypes.OpKind.WORLD_RESET
+		"pause", "accept", "skip":
+			return CouchPredictionTypes.OpKind.NEUTRAL
+	return -1
+
+
+func _parse_recovery_trigger(label: String) -> int:
+	return CouchSessionTypes.value_for_label(CouchSessionTypes.RECOVERY_TRIGGER_LABELS, label)
+
+
+func _compare_actions(step: Dictionary, actual: Array) -> String:
+	if not step.has("expectActions"):
+		return ""
+	var expected: Array = step["expectActions"]
+	if expected.size() != actual.size():
+		return (
+			"expected %d action(s) %s, got %d %s"
+			% [
+				expected.size(),
+				_describe_expected_actions(expected),
+				actual.size(),
+				_describe_actions(actual),
+			]
+		)
+	for i in range(expected.size()):
+		var expected_action: Dictionary = expected[i]
+		var actual_action: CouchSessionTypes.SessionAction = actual[i]
+		var expected_kind := CouchSessionTypes.value_for_label(
+			CouchSessionTypes.SESSION_ACTION_KIND_LABELS, str(expected_action["kind"])
+		)
+		if actual_action.kind != expected_kind:
+			return (
+				"expected %s, got %s (kind mismatch at index %d)"
+				% [_describe_expected_actions(expected), _describe_actions(actual), i]
+			)
+		if expected_action.has("trigger"):
+			var expected_trigger := _parse_recovery_trigger(str(expected_action["trigger"]))
+			if actual_action.trigger != expected_trigger:
+				return "action trigger mismatch at index %d" % i
+		for field in ["nonce", "attempt", "maxAttempts", "elapsedMs", "headLevel"]:
+			if not expected_action.has(field):
+				continue
+			var actual_value: int
+			match field:
+				"nonce":
+					actual_value = actual_action.nonce
+				"attempt":
+					actual_value = actual_action.attempt
+				"maxAttempts":
+					actual_value = actual_action.max_attempts
+				"elapsedMs":
+					actual_value = actual_action.elapsed_ms
+				_:
+					actual_value = actual_action.head_level
+			if actual_value != int(expected_action[field]):
+				return "%s mismatch at action index %d: expected %d, got %d" % [
+					field, i, int(expected_action[field]), actual_value
+				]
+		if expected_action.has("active") and actual_action.active != bool(expected_action["active"]):
+			return "active mismatch at action index %d" % i
+	return ""
+
+
+func _describe_actions(actions: Array) -> String:
+	var labels: Array[String] = []
+	for action in actions:
+		labels.append(str(action))
+	return "[%s]" % ", ".join(labels)
+
+
+func _describe_expected_actions(actions: Array) -> String:
+	var labels: Array[String] = []
+	for expected in actions:
+		var action := CouchSessionTypes.SessionAction.create(
+			CouchSessionTypes.value_for_label(
+				CouchSessionTypes.SESSION_ACTION_KIND_LABELS, str(expected["kind"])
+			),
+			_parse_recovery_trigger(str(expected.get("trigger", "none"))),
+			int(expected.get("nonce", 0)),
+			int(expected.get("attempt", 0)),
+			int(expected.get("maxAttempts", 0)),
+			bool(expected.get("active", false)),
+			int(expected.get("elapsedMs", 0)),
+			int(expected.get("headLevel", CouchSessionTypes.SessionAction.NO_HEAD_LEVEL))
+		)
+		labels.append(str(action))
+	return "[%s]" % ", ".join(labels)
 
 
 func _compare_steps(step: Dictionary, actual: Array) -> String:
