@@ -32,6 +32,26 @@
 ## a fixed timer until then. This is an observable behaviour change from the
 ## pre-session code: the guest shows nothing for up to one RTT at match start.
 ##
+## Guest-side restart: a guest that is ALREADY active and then adopts a new
+## epoch has by definition been handed a session it never joined -- the host is
+## the sole minter, so a different epoch means the host stopped and restarted
+## (D8). It therefore STOPS first, `session_stopped("host-restarted")` via
+## _restart_as_guest, at the point of adoption and ahead of the dispatch that
+## applies the envelope, and starts fresh when the host's hello lands. This is
+## what makes a PROMOTION visible: a spectator the restarted host pinned as
+## player 2 keeps the same identity, so nothing in evaluate() fires, and the
+## hello alone used to update _local_slot while emitting NOTHING -- every
+## consumer that mirrors the session through session_started/session_stopped
+## kept slot -1 and dropped the player's input forever. It also self-heals the
+## snapshot-first ordering: going inactive re-arms poll()'s hello retry, which
+## is gated on `not _active`, so a guest that learned the new epoch from a
+## snapshot asks for the new slots map instead of holding a dead session's slot.
+## The guard is `_active` and nothing else: an inactive guest has no session to
+## stop, which is exactly what keeps normal bootstrap (UNKNOWN_EPOCH -> the real
+## epoch on the first hello) a single session_started and not a stop/start
+## cycle. The observable cost, accepted: the guest is briefly inactive
+## mid-match, so a role indicator blanks for about one RTT.
+##
 ## Authorized guest: picked once, when the host's session starts (lowest
 ## controller_slot, ties broken by ascending user_id -- the pre-session pick,
 ## preserved verbatim). It is pinned for the life of the session: a roster
@@ -517,6 +537,17 @@ func _on_envelope_received(envelope: Dictionary, sender_id: String) -> void:
 	# guest can learn a new epoch from ANY accepted kind, not only hello.
 	if not _is_host and bool(result.get("reset", false)):
 		_epoch = tracker.epoch
+		# An ALREADY-ACTIVE guest adopting a new epoch has been handed a session
+		# it never joined, so it stops and re-joins rather than mutating in
+		# place -- see the "Guest-side restart" paragraph in this file's header.
+		# This must run BEFORE _dispatch: the hello that carries the new epoch is
+		# what starts the replacement session, and it can only do that if the
+		# session is already inactive when it is applied. Moving it after
+		# _dispatch turns the FIRST hello a guest ever receives -- which also
+		# carries an epoch change, UNKNOWN_EPOCH -> the real one -- into a
+		# start-then-stop; probed, it fails 11 corpus cases.
+		if _active:
+			_restart_as_guest("host-restarted")
 
 	var gap := int(result.get("gap", 0))
 	if gap > 0 and not CouchEnvelope.gap_is_ignorable(kind):
@@ -540,6 +571,26 @@ func _dispatch(kind: String, envelope: Dictionary, sender_id: String) -> void:
 			input_received.emit(body, sender_id)
 		CouchEnvelope.KIND_SNAPSHOT:
 			snapshot_received.emit(body)
+
+
+## Guest-only. Ends the current session WITHOUT disengaging, so the very next
+## poll() re-sends the guest hello and the replacement session can start from
+## the same receive that triggered this. Deliberately NOT stop(): stop() clears
+## `_engaged`, `_host_id`, `_epoch` and `_trackers`, and each of those is
+## load-bearing here. Probed with stop() substituted: session_started then fires
+## with epoch 0 and an empty peer id, the guest stamps epoch 0 on every send and
+## is rejected forever, and in the snapshot-first ordering `_engaged == false`
+## gates BOTH poll()'s retry and the first line of _on_envelope_received, so the
+## host's next hello is dropped on the floor and the guest is permanently deaf.
+## `_out_seq` is kept for the reason envelope.gd's header states outright: a
+## sender's outgoing counters are NOT reset when it adopts a new epoch, because
+## restarting at 1 against a receiver already at N wedges on epoch churn.
+func _restart_as_guest(reason: String) -> void:
+	_active = false
+	_local_slot = SLOT_SPECTATOR
+	_peer_name = ""
+	_next_hello_retry_ms = 0
+	session_stopped.emit(reason)
 
 
 func _on_transport_gap(peer_id: String, reason: String) -> void:
