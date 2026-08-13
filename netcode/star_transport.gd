@@ -79,25 +79,40 @@
 ## change does. There is no mid-session switching anywhere in v1.
 ##
 ## v1 limitations, decided and stated rather than hidden:
-##   - A link that came UP and then died is not rebuilt. peer_lost fires and that
-##     is all. The rebuild path is armed only by the connect timeout (a link that
+##   - A link that came UP and then died is not automatically rebuilt by this
+##     file reacting to the disconnect itself -- peer_lost fires and that is
+##     all. The rebuild path is armed only by the connect timeout (a link that
 ##     never came up) and by a signaling peer_left/peer_joined pair. Automatic
 ##     re-establishment needs a backoff policy to avoid a rebuild storm, and that
 ##     is design surface Phase 1 did not sanction. Phase 2 adds it in
-##     _on_engine_peer_disconnected.
+##     _on_engine_peer_disconnected. One consequence of the incarnation scheme
+##     below: a link that came up and then died CAN now recover if a post-death
+##     host offer ever arrives, because the guest is no longer "established"
+##     (_connected no longer holds it) and will follow the new incarnation the
+##     offer carries. This is a deliberate, Daniel-approved consequence, not a
+##     backdoor around the Phase-2 boundary: the guest never initiates a
+##     rebuild itself, so the rebuild-storm risk that motivated deferring
+##     re-establishment to Phase 2 does not apply here -- the host's retransmit
+##     interval and its MAX_CONNECT_ATTEMPTS budget already bound how often a
+##     post-death offer can occur.
 ##   - There is no star->lobby fallback SWITCHING. Selecting a transport is the
 ##     caller's job and happens once.
 ##   - A roster player with no signaling presence (an overlay-faked guest) is
 ##     never discovered and never connected. The star carries traffic only between
 ##     peers that are really in the signaling room.
-##   - Handshake generations are classified three ways (PROCESS / DROP_STALE /
-##     ADOPT -- see classify_generation) rather than "!= adopts": a delayed
-##     older packet must never rebuild a live connection backward, on pain of
-##     wedging a guest permanently against a single reordered frame. A rejoin
-##     (signaling peer_left -> peer_joined) is the only legal way a generation
-##     goes down, and it is guarded by an explicit incarnation barrier
-##     (_awaiting_rejoin_gen0) so a stale higher-generation packet cannot get
-##     ADOPTed across the rejoin and re-wedge the guest in mirror image. A host
+##   - Handshake identity is a host-minted INCARNATION label (classify_incarnation),
+##     not a generation counter -- generations reset to 0 on every signaling
+##     rejoin, so a delayed packet from the PREVIOUS incarnation was
+##     indistinguishable from the new one's, and the barrier guarding that case
+##     (_awaiting_rejoin_gen0) could itself be cleared by a delayed gen-0 packet
+##     before it was validated, permanently wedging a guest. An incarnation
+##     label needs no ORDERING between old and new, so no barrier exists any
+##     more: the host is the sole minter and never follows a peer; an established
+##     guest link is never disturbed; otherwise a guest follows whichever
+##     incarnation it last heard, bounded by MAX_INCARNATION_FOLLOWS. Being
+##     wrong is transient -- the host's SDP_RETRANSMIT_INTERVAL_MS retransmit
+##     brings a guest that followed a straggler back to the live incarnation
+##     within one retransmit -- where being frozen was permanent. A host
 ##     restart that signaling does not report as peer_left/peer_joined heals
 ##     only when the dead link finally dies -- loud (stale_generation_drops) and
 ##     diagnosable, not silent.
@@ -138,6 +153,11 @@ const MAX_RECENTLY_LOST := 64             # same bound and same rationale as Cou
 const MAX_UNMAPPED_LOGGED := 16           # flood control on "packet from an id we never bound"
 const MAX_DEPARTED := 64                  # same bound and rationale as MAX_RECENTLY_LOST
 const MAX_REJECT_KEYS := 32               # flood-control dedup keys; distinct malformed-frame shapes are few
+## Rejections that make the CURRENT connection unusable rather than merely
+## discarding one frame. The boundary: malformed, stale, or individually
+## non-fatal remote input is a warning; a failure that costs the whole
+## incarnation is an error. Flood control already bounds repetition.
+const FATAL_REJECT_ERRORS := ["sdp-rejected"]
 const MAX_PENDING_ANNOUNCES := 32         # peer_joined announces buffered during start()'s connect_room() await
 const MAX_PEERS := 16                     # a couch lobby is <= 8; bounds allocation from a hostile signaling server
 const MAX_DEFERRED_PEERS := 16            # announcements held while the roster has not yet named a host
@@ -162,6 +182,11 @@ const MAX_CONNECT_ATTEMPTS := 2           # the initial attempt plus exactly one
 ## Bounds a hostile or buggy signaling peer that would otherwise force
 ## unlimited WebRTCPeerConnection allocations.
 const MAX_GEN := MAX_CONNECT_ATTEMPTS - 1
+## The host mints at most MAX_CONNECT_ATTEMPTS incarnations per discovery, so
+## this is generous; it exists to bound a hostile signaling peer's ability to
+## make a guest ADOPT forever, not to constrain a real one.
+const MAX_INCARNATION_FOLLOWS := 8
+const MAX_INC := 1000000                  # hygiene bound on the wire field, not a real budget
 
 # ============================================================================
 # Signals -- the four CouchTransport contract signals, verbatim (transport.gd:26-33)
@@ -314,21 +339,55 @@ static func lane_for_kind(kind: String) -> int:
 			return MultiplayerPeer.TRANSFER_MODE_RELIABLE
 
 
-enum GenAction {
-	PROCESS,     ## Same generation -- the envelope belongs to our connection.
-	DROP_STALE,  ## Older generation -- from a connection we already discarded.
-	ADOPT,       ## Newer generation -- the peer restarted; follow it.
+enum IncAction {
+	PROCESS,     ## Same incarnation -- the envelope belongs to our connection.
+	DROP_STALE,  ## Not ours, and not one we may follow -- discard it.
+	ADOPT,       ## Not ours, but we may follow it -- the peer restarted.
 }
 
-## Decide what to do with a handshake envelope tagged `incoming_gen` when our own
-## connection for that peer sits at `local_gen`. Pure, static, and unit-tested
-## directly (G7) -- the whole of Codex finding 1 lives in these three lines.
-static func classify_generation(local_gen: int, incoming_gen: int) -> GenAction:
-	if incoming_gen < local_gen:
-		return GenAction.DROP_STALE
-	if incoming_gen > local_gen:
-		return GenAction.ADOPT
-	return GenAction.PROCESS
+## Decide what to do with a handshake envelope tagged `incoming_inc` when our
+## own connection for that peer is operating under `local_inc`. Pure, static,
+## and unit-tested directly (G7) -- replaces classify_generation/GenAction,
+## which reset to 0 on every signaling rejoin and made a delayed packet from
+## the PREVIOUS incarnation indistinguishable from the new one's (a permanent
+## wedge -- see the header's "Handshake identity" note).
+##
+## Needs no ORDERING between local_inc and incoming_inc, unlike the generation
+## scheme it replaces: the host is the sole minter and never follows a peer
+## (DROP_STALE unconditionally on mismatch); an established guest link is
+## never disturbed (DROP_STALE); otherwise a guest follows whichever
+## incarnation it last heard, bounded by `follows_left` so a hostile or buggy
+## signaling peer cannot force unlimited rebuilds. Being wrong is transient --
+## the host's retransmit brings a guest that followed a straggler back to the
+## live incarnation within one retransmit interval -- where being frozen was
+## permanent.
+static func classify_incarnation(
+	local_inc: int, incoming_inc: int, is_host: bool, established: bool, follows_left: int
+) -> IncAction:
+	if incoming_inc == local_inc:
+		return IncAction.PROCESS
+	if is_host:
+		return IncAction.DROP_STALE      # the sole minter never follows a peer
+	if established:
+		return IncAction.DROP_STALE      # a straggler may never disturb a live link
+	if follows_left <= 0:
+		return IncAction.DROP_STALE      # bounded allocation
+	return IncAction.ADOPT
+
+
+## A JSON-crossed integer. Every number arrives as a float (see the fixture
+## header), so a float IS valid -- but only a finite, integral one. Anything
+## else (a numeric string, a bool, a fractional float, a container) is not the
+## wire shape this protocol documents. Returns the int, or `null` for "not an
+## integer", which callers must distinguish from a valid 0.
+static func _wire_int(value: Variant) -> Variant:
+	if value is int:
+		return value
+	if value is float:
+		if not is_finite(value) or value != floor(value):
+			return null
+		return int(value)
+	return null
 
 # ============================================================================
 # Internal state
@@ -353,9 +412,11 @@ var _pcs: Dictionary = {}                  # peer_id -> WebRTCPeerConnection
 var _peer_to_net: Dictionary = {}          # peer_id -> int
 var _net_to_peer: Dictionary = {}          # int -> peer_id
 var _connected: Dictionary = {}            # peer_id -> true, engine-level link is UP
-var _gens: Dictionary = {}                 # peer_id -> int, handshake generation (wire-visible)
+var _gens: Dictionary = {}                 # peer_id -> int, handshake generation (host retry budget, wire-visible)
 var _pc_epochs: Dictionary = {}            # peer_id -> int, identity of the live connection; never reused
 var _epoch_seq: int = 0
+var _inc: Dictionary = {}                  # peer_id -> int, the incarnation THIS transport operates under for that peer
+var _incarnation_follows: Dictionary = {}  # peer_id -> int, ADOPTs spent since the follow budget last reset
 var _remote_desc_set: Dictionary = {}      # peer_id -> true
 var _pending_ice: Dictionary = {}          # peer_id -> Array[Dictionary], bounded by MAX_PENDING_ICE
 var _departed: Dictionary = {}             # peer_id -> true, left signaling; only peer_joined re-authorises
@@ -366,9 +427,7 @@ var _pending_peer_ids: Array = []          # announces during connect_room()'s a
 var _recently_lost: Dictionary = {}        # bounded by MAX_RECENTLY_LOST
 var _seen_reject_errors: Dictionary = {}   # flood control, verbatim from CouchLobbyTransport, bounded by MAX_REJECT_KEYS
 var _seen_unmapped: Dictionary = {}
-## peer_id -> true. Incarnation barrier: only a generation-0 envelope may clear
-## it, see classify_generation's docs and _on_sig_received.
-var _awaiting_rejoin_gen0: Dictionary = {}
+var _failed: Dictionary = {}               # peer_id -> true, terminal connect-failure tombstone; bounded like _departed
 var _deferred_peer_ids: Dictionary = {}    # peer_id -> true, held while the roster names no host, bounded by MAX_DEFERRED_PEERS
 var _host_resolve_deadline: int = 0        # 0 = disarmed, -1 = arm on next poll(), >0 = absolute ms
 var _decode_failures: Dictionary = {}      # peer_id -> int, consecutive rejects with no accepted frame between
@@ -488,6 +547,15 @@ func start() -> Dictionary:
 	_is_host = bool(_lobby.is_host())
 	_host_peer_id = _local_peer_id if _is_host else _field_string(_lobby.get_host(), "user_id")
 
+	if not _is_host and _host_peer_id.is_empty():
+		# A guest whose roster never names a host, and which never receives ANY
+		# signaling announcement either, must still arm the resolve deadline --
+		# otherwise poll()'s resolve block previously ran only in reaction to a
+		# buffered announcement, and a guest with zero announcements polled
+		# forever, silently, never emitting host-unresolved (Codex finding 3).
+		# Armed here per the existing "-1 == arm on next poll()" convention.
+		_host_resolve_deadline = -1
+
 	var servers: Variant = res.get("ice_servers", [])
 	_ice_servers = (servers as Array).duplicate(true) if servers is Array else []
 
@@ -569,30 +637,45 @@ func poll(now_ms: int) -> void:
 		var bytes := _mp.get_packet()
 		_receive(from_net, bytes)
 
-	# Retry resolving the host's platform user id for any announcement that
-	# arrived before the roster named a host (Codex finding 2). Holding rather
-	# than refusing is what makes a late-settling roster non-fatal; the
-	# deadline below is what makes a roster that NEVER settles loud instead of
-	# an eternal silent wait.
-	if not _deferred_peer_ids.is_empty():
+	# Retry resolving the host's platform user id whenever a guest still has
+	# none -- not only while an announcement sits in _deferred_peer_ids, so a
+	# guest whose roster never names a host AND which receives no signaling
+	# announcement at all still arms and eventually trips this deadline
+	# instead of polling forever in silence (Codex finding 3 / start()'s
+	# unconditional arm). Holding rather than refusing a deferred announcement
+	# is what makes a late-settling roster non-fatal; the deadline is what
+	# makes a roster that NEVER settles loud instead of an eternal silent
+	# wait. The host and an already-resolved guest never enter this block.
+	if not _is_host and _host_peer_id.is_empty():
 		if not _resolve_host_peer_id().is_empty():
-			var deferred := _deferred_peer_ids.keys()
-			_deferred_peer_ids.clear()
 			_host_resolve_deadline = 0
-			for pid in deferred:
-				_discover_peer(pid as String)
+			# Discover the host explicitly -- the same "don't wait for a
+			# redundant signaling announce" saving start() already makes for
+			# the ordinary case, now applied to a roster that settled late.
+			_discover_peer(_host_peer_id)
+			if not _deferred_peer_ids.is_empty():
+				var deferred := _deferred_peer_ids.keys()
+				_deferred_peer_ids.clear()
+				for pid in deferred:
+					_discover_peer(pid as String)
 		else:
 			if _host_resolve_deadline == -1:
 				_host_resolve_deadline = now_ms + HOST_RESOLVE_TIMEOUT_MS
 			elif _host_resolve_deadline > 0 and now_ms >= _host_resolve_deadline:
 				# A guest that can never learn who the host is must FAIL, loudly and
-				# once, not wait forever with nothing reported.
+				# once, not wait forever with nothing reported. When nothing was ever
+				# deferred, no peer id is knowable at all -- the roster never named a
+				# host and nobody ever announced -- so the gap is reported once with
+				# an empty peer id rather than not at all.
 				_connect_failures += 1
 				_host_resolve_deadline = 0
 				push_error("CouchStarTransport: the roster never named a host; %d announcement(s) unclassifiable"
 					% _deferred_peer_ids.size())
-				for pid in _deferred_peer_ids.keys():
-					transport_gap.emit(pid as String, "host-unresolved")
+				if _deferred_peer_ids.is_empty():
+					transport_gap.emit("", "host-unresolved")
+				else:
+					for pid in _deferred_peer_ids.keys():
+						transport_gap.emit(pid as String, "host-unresolved")
 				_deferred_peer_ids.clear()
 
 	# Both loops below iterate a DUPLICATED key list: a timeout can rebuild a
@@ -630,6 +713,10 @@ func poll(now_ms: int) -> void:
 			_signaling.send(pid as String, {
 				"v": SIGNAL_PROTOCOL_VERSION, "gen": int(e["gen"]), "kind": SIGNAL_KIND_SDP,
 				"sdp_type": str(e["sdp_type"]), "sdp": str(e["sdp"]),
+				# Read at EMIT time, not stored in the retransmit entry: a guest
+				# does not know its incarnation until the host's offer arrives,
+				# and this retransmit can fire again after an ADOPT changed it.
+				"inc": int(_inc.get(pid, 0)),
 			})
 			e["next_ms"] = now_ms + SDP_RETRANSMIT_INTERVAL_MS
 			_sdp_retx[pid] = e
@@ -664,15 +751,17 @@ func close() -> void:
 	_connected.clear()
 	_gens.clear()
 	_pc_epochs.clear()
+	_inc.clear()
+	_incarnation_follows.clear()
 	_remote_desc_set.clear()
 	_pending_ice.clear()
 	_departed.clear()
+	_failed.clear()
 	_attempts.clear()
 	_connect_deadlines.clear()
 	_sdp_retx.clear()
 	_pending_peer_ids.clear()
 	_recently_lost.clear()
-	_awaiting_rejoin_gen0.clear()
 	_deferred_peer_ids.clear()
 	_host_resolve_deadline = 0
 	_decode_failures.clear()
@@ -757,6 +846,16 @@ func connected_peer_ids() -> Array:
 func generation_for(peer_id: String) -> int:
 	return int(_gens.get(peer_id, -1))
 
+
+## The incarnation this transport is operating under for `peer_id`, or 0 when it
+## holds none (an unknown peer, or a guest that has not yet heard from the host).
+## 0 is never a valid wire incarnation -- the host mints from _next_epoch(),
+## which only ever returns >= 1 -- so "none" and a real value cannot be confused.
+## Exposed for the same reason generation_for is: G11 must be able to assert that
+## a stale packet did NOT move the live incarnation.
+func incarnation_for(peer_id: String) -> int:
+	return int(_inc.get(peer_id, 0))
+
 # ============================================================================
 # Peer discovery / connection establishment
 # ============================================================================
@@ -796,6 +895,13 @@ func _discover_peer(pid: String) -> void:
 		return
 
 	if pid.is_empty() or pid == _local_peer_id or _pcs.has(pid):
+		return
+
+	if _failed.has(pid):
+		# Terminal per A3/finding 4: this peer already burned its whole
+		# connect budget. A stray re-announce must not resurrect it -- only a
+		# fresh peer_joined (which erases the tombstone) may try again. Return
+		# before allocating anything, same as every other refusal above.
 		return
 
 	if not _is_host:
@@ -875,6 +981,13 @@ func _build_connection(pid: String, gen: int) -> bool:
 	# closed connection can still deliver queued signals, and those must not
 	# be published as if they belonged to its replacement.
 	var epoch := _next_epoch()
+	if _is_host:
+		# The host mints one incarnation per (re)build attempt -- _epoch_seq is
+		# already strictly increasing and never reused, exactly the identity an
+		# incarnation label needs. A guest never mints; it ADOPTs the host's
+		# label when the offer arrives (classify_incarnation / _adopt_incarnation)
+		# because it cannot know its incarnation before then.
+		_inc[pid] = epoch
 	pc.session_description_created.connect(_on_sdp_created.bind(pid, gen, epoch))
 	pc.ice_candidate_created.connect(_on_ice_created.bind(pid, gen, epoch))
 
@@ -955,6 +1068,12 @@ func _teardown_peer(pid: String) -> void:
 	_pcs.erase(pid)
 	_gens.erase(pid)
 	_pc_epochs.erase(pid)
+	# _inc is erased here, not just on close(): _on_signaling_peer_joined's
+	# rejoin path relies on "after teardown, local_inc is 0" so the next offer
+	# (any incarnation) is followed cleanly instead of compared against a
+	# stale label from the incarnation that just got torn down.
+	_inc.erase(pid)
+	_incarnation_follows.erase(pid)
 	_remote_desc_set.erase(pid)
 	_pending_ice.erase(pid)
 	_sdp_retx.erase(pid)
@@ -963,7 +1082,6 @@ func _teardown_peer(pid: String) -> void:
 	_peer_to_net.erase(pid)
 	_net_to_peer.erase(net_id)
 	_connected.erase(pid)
-	_awaiting_rejoin_gen0.erase(pid)
 	_decode_failures.erase(pid)
 	_muted_until.erase(pid)
 
@@ -1007,6 +1125,12 @@ func _on_sdp_created(sdp_type: String, sdp: String, pid: String, gen: int, epoch
 	_signaling.send(pid, {
 		"v": SIGNAL_PROTOCOL_VERSION, "gen": gen, "kind": SIGNAL_KIND_SDP,
 		"sdp_type": sdp_type, "sdp": sdp,
+		# Read from _inc at EMIT time, never from a bound argument: a guest does
+		# not know its incarnation until the host's offer arrives, only once
+		# this PC is already built. The _pc_epochs guard above already proves
+		# this callback belongs to the live connection, so _inc[pid] is right
+		# whenever it fires.
+		"inc": int(_inc.get(pid, 0)),
 	})
 	# Retransmit until something proves this arrived -- the adapter contract
 	# is explicitly best-effort. "Something proves it arrived" is either an
@@ -1024,6 +1148,8 @@ func _on_ice_created(mid: String, index: int, candidate: String, pid: String, ge
 	_signaling.send(pid, {
 		"v": SIGNAL_PROTOCOL_VERSION, "gen": gen, "kind": SIGNAL_KIND_ICE,
 		"mid": mid, "index": index, "candidate": candidate,
+		# Read at EMIT time -- see _on_sdp_created's identical comment.
+		"inc": int(_inc.get(pid, 0)),
 	})
 
 # ============================================================================
@@ -1038,7 +1164,8 @@ func _on_sig_received(sender_pid: String, data: Variant) -> void:
 		_reject("bad-signal:not-a-dictionary", sender_pid)
 		return
 	var d: Dictionary = data
-	if int(d.get("v", 0)) != SIGNAL_PROTOCOL_VERSION:
+	var v := _wire_int(d.get("v"))
+	if v == null or int(v) != SIGNAL_PROTOCOL_VERSION:
 		_reject("bad-signal:bad-version", sender_pid)
 		return
 	var kind := str(d.get("kind", ""))
@@ -1064,59 +1191,79 @@ func _on_sig_received(sender_pid: String, data: Variant) -> void:
 		# buffered pending start()'s await -- nothing to dispatch to yet.
 		return
 
-	var incoming_gen := int(d.get("gen", 0))   # int() because it crossed JSON
-	var local_gen := int(_gens.get(sender_pid, 0))
+	# gen/inc validation moves here, before ANY classification action -- a
+	# malformed numeric field must never reach classify_incarnation (A2/finding
+	# 5): int() silently accepts numeric strings, bools and fractional floats,
+	# so "gen": "1" or "inc": 1.9 would otherwise alias a real value.
+	var gen_wire := _wire_int(d.get("gen"))
+	if gen_wire == null or int(gen_wire) < 0 or int(gen_wire) > MAX_GEN:
+		_reject("bad-signal:gen-out-of-budget", sender_pid)
+		return
+	var incoming_gen: int = gen_wire
 
-	if not _is_host and _awaiting_rejoin_gen0.has(sender_pid):
-		# Rejoin barrier (see classify_generation's docs). This peer's presence
-		# was just re-authorised by a fresh signaling peer_joined and we cannot
-		# yet tell its NEW incarnation's envelopes from its previous one's --
-		# only a fresh generation-0 offer proves this is the new incarnation.
-		# Anything else here is a straggler from the incarnation we just
-		# discarded. Without this barrier a stale higher-generation packet
-		# would ADOPT across the rejoin and re-wedge the guest in mirror image.
-		if incoming_gen != 0:
+	var inc_wire := _wire_int(d.get("inc"))
+	if inc_wire == null or int(inc_wire) < 1 or int(inc_wire) > MAX_INC:
+		_reject("bad-signal:bad-incarnation", sender_pid)
+		return
+	var incoming_inc: int = inc_wire
+
+	var local_inc := int(_inc.get(sender_pid, 0))
+	var action := classify_incarnation(local_inc, incoming_inc, _is_host,
+		_connected.has(sender_pid),
+		MAX_INCARNATION_FOLLOWS - int(_incarnation_follows.get(sender_pid, 0)))
+	match action:
+		IncAction.DROP_STALE:
+			# Either the sole minter hearing a mismatched label, an established
+			# guest link being disturbed by a straggler, or a guest's follow
+			# budget spent -- see classify_incarnation. Never rebuild on a bare
+			# mismatch: that is Codex finding 1's exact wedge, a single delayed
+			# packet tearing down and permanently stranding a live connection.
 			_stale_generation_drops += 1
 			_reject("stale-generation", sender_pid)
 			return
-		_awaiting_rejoin_gen0.erase(sender_pid)
-
-	var action := classify_generation(local_gen, incoming_gen)
-	if _is_host:
-		# Sole minter, NEVER adopts a peer's generation. Any classification
-		# other than PROCESS is stale.
-		if action != GenAction.PROCESS:
-			_stale_generation_drops += 1
-			_reject("stale-generation", sender_pid)
-			return
-	else:
-		match action:
-			GenAction.DROP_STALE:
-				# A delayed packet from a connection we already discarded. Never
-				# rebuild backwards -- rebuilding on a bare `!=` is Codex finding
-				# 1's exact wedge: a single delayed older packet would tear down
-				# and permanently strand a live, newer connection.
-				_stale_generation_drops += 1
-				_reject("stale-generation", sender_pid)
-				return
-			GenAction.ADOPT:
-				if incoming_gen > MAX_GEN:
-					_reject("bad-signal:gen-out-of-budget", sender_pid)
-					return
-				# The same rule and the same reason as CouchSession's epoch
-				# adoption: a follower that never adopts forward leaves itself
-				# permanently rejecting the authority after a legitimate restart.
-				_rebuild_connection(sender_pid, incoming_gen)
-				_handshake_restarts += 1
-				transport_gap.emit(sender_pid, "handshake-restart")
-			GenAction.PROCESS:
-				pass
+		IncAction.ADOPT:
+			# The same rule and the same reason as CouchSession's epoch
+			# adoption: a follower that never adopts forward leaves itself
+			# permanently rejecting the authority after a legitimate restart.
+			# Being wrong here is transient (see classify_incarnation's docs);
+			# being frozen was permanent.
+			_adopt_incarnation(sender_pid, incoming_inc, incoming_gen)
+		IncAction.PROCESS:
+			pass
 
 	match kind:
 		SIGNAL_KIND_SDP:
 			_handle_sdp(sender_pid, d)
 		SIGNAL_KIND_ICE:
 			_handle_ice(sender_pid, d)
+
+
+## Follow a peer's new incarnation label. Rebuild ONLY if a remote description
+## from the dead incarnation is already installed -- that is the thing that
+## would otherwise refuse the live host's offer forever. A PC that has never
+## taken a description is reusable as-is, and reusing it deliberately
+## PRESERVES _pending_ice, which is the ICE-before-SDP buffer M41 exists to
+## prove load-bearing.
+func _adopt_incarnation(pid: String, inc: int, gen: int) -> void:
+	# The FIRST adoption for this peer (no entry in _inc at all, local_inc read
+	# as 0 by classify_incarnation) is not a restart -- it IS the handshake:
+	# a guest holds no incarnation until the host's first offer tells it one.
+	# Counting it as a handshake-restart and emitting transport_gap would make
+	# every clean establishment look like a recovery to anything listening on
+	# that signal (G8's clean-establishment gate caught exactly this). Only a
+	# GENUINE change -- adopting away from an incarnation we already held --
+	# is a restart: something to rebuild around, report, and spend budget on.
+	var is_initial := not _inc.has(pid)
+	if not is_initial and _remote_desc_set.has(pid):
+		_rebuild_connection(pid, gen)
+	_inc[pid] = inc
+	_gens[pid] = gen
+	_drop_pending_ice_other_than(pid, inc)
+	if is_initial:
+		return
+	_incarnation_follows[pid] = int(_incarnation_follows.get(pid, 0)) + 1
+	_handshake_restarts += 1
+	transport_gap.emit(pid, "handshake-restart")
 
 
 func _handle_sdp(pid: String, d: Dictionary) -> void:
@@ -1164,7 +1311,6 @@ func _handle_sdp(pid: String, d: Dictionary) -> void:
 
 func _handle_ice(pid: String, d: Dictionary) -> void:
 	var mid := str(d.get("mid", ""))
-	var index := int(d.get("index", 0))   # int() because it crossed JSON
 	var candidate := str(d.get("candidate", ""))
 
 	# Flood/allocation control (Codex finding 7): a real ICE candidate line and
@@ -1174,9 +1320,19 @@ func _handle_ice(pid: String, d: Dictionary) -> void:
 	if mid.length() > MAX_MID_CHARS or candidate.length() > MAX_CANDIDATE_CHARS:
 		_reject("bad-signal:oversized-candidate", pid)
 		return
-	if index < 0 or index > 255:
+
+	# _wire_int, not a bare int() (A2/finding 5): a numeric string, bool, or
+	# fractional float must not alias a real index.
+	var index_wire := _wire_int(d.get("index"))
+	if index_wire == null or int(index_wire) < 0 or int(index_wire) > 255:
 		_reject("bad-signal:bad-ice-index", pid)
 		return
+	var index: int = index_wire
+
+	# Already validated in _on_sig_received, before this dispatch -- see the
+	# gen/inc block there. Re-read rather than threaded through as a parameter,
+	# matching this file's existing pattern for other already-validated fields.
+	var inc := int(d.get("inc", 0))
 
 	var pc := _pcs.get(pid) as WebRTCPeerConnection
 	if pc == null or not _remote_desc_set.has(pid):
@@ -1184,24 +1340,28 @@ func _handle_ice(pid: String, d: Dictionary) -> void:
 		# of the peer announce, or ahead of their own session description.
 		# Dropping them costs the entire trickle set on links slow enough to
 		# reorder the handshake against discovery; hold them instead.
-		_buffer_pending_ice(pid, mid, index, candidate)
+		_buffer_pending_ice(pid, inc, mid, index, candidate)
 		return
 	_apply_ice(pid, pc, mid, index, candidate)
 
 
-func _buffer_pending_ice(pid: String, mid: String, index: int, candidate: String) -> void:
+func _buffer_pending_ice(pid: String, inc: int, mid: String, index: int, candidate: String) -> void:
 	var queued: Array = _pending_ice.get(pid, [])
 	if queued.size() >= MAX_PENDING_ICE:
 		_ice_dropped += 1
 		_reject("pending-ice-overflow", pid)
 		return
-	queued.append({"mid": mid, "index": index, "candidate": candidate})
+	queued.append({"inc": inc, "mid": mid, "index": index, "candidate": candidate})
 	_pending_ice[pid] = queued
 
 
-## Apply everything held for `pid`, in arrival order. Called once the peer's
-## remote description lands, which is what makes the connection able to accept
-## candidates at all.
+## Apply everything held for `pid`, in arrival order, that was buffered under
+## the incarnation we are CURRENTLY operating under. An entry tagged with any
+## other incarnation is a candidate for a dead connection's successor and must
+## never be applied to it; _adopt_incarnation's _drop_pending_ice_other_than
+## normally clears those already, this is the same invariant enforced again at
+## the point of use. Called once the peer's remote description lands, which is
+## what makes the connection able to accept candidates at all.
 func _flush_pending_ice(pid: String) -> void:
 	var queued: Array = _pending_ice.get(pid, [])
 	if queued.is_empty():
@@ -1210,9 +1370,31 @@ func _flush_pending_ice(pid: String) -> void:
 	var pc := _pcs.get(pid) as WebRTCPeerConnection
 	if pc == null:
 		return
+	var current_inc := int(_inc.get(pid, 0))
 	for entry in queued:
 		var e: Dictionary = entry
+		if int(e.get("inc", 0)) != current_inc:
+			continue
 		_apply_ice(pid, pc, str(e["mid"]), int(e["index"]), str(e["candidate"]))
+
+
+## Discard every candidate buffered for `pid` that was NOT tagged with the
+## incarnation we just adopted. Called from _adopt_incarnation right after
+## `_inc[pid]` is updated -- without this, a candidate buffered under a dead
+## incarnation would sit in the queue and later be applied to its successor.
+func _drop_pending_ice_other_than(pid: String, inc: int) -> void:
+	var queued: Array = _pending_ice.get(pid, [])
+	if queued.is_empty():
+		return
+	var kept: Array = []
+	for entry in queued:
+		var e: Dictionary = entry
+		if int(e.get("inc", 0)) == inc:
+			kept.append(e)
+	if kept.is_empty():
+		_pending_ice.erase(pid)
+	else:
+		_pending_ice[pid] = kept
 
 
 ## Hand one candidate to the connection, reporting rejection rather than
@@ -1242,17 +1424,22 @@ func _apply_ice(pid: String, pc: WebRTCPeerConnection, mid: String, index: int, 
 ## _discover_peer's own guard, so both join orders converge on the same state.
 ##
 ## A rejoin (this peer was previously recorded as departed) fires an
-## incarnation change on whatever this transport still holds for it, and arms
-## the rejoin barrier: both sides reset to generation 0 on a rejoin, and until
-## this peer speaks at generation 0 we cannot tell its new incarnation's
-## envelopes from its previous one's, so it may not move us off generation 0 in
-## the meantime (Codex finding 1's mirror-image wedge; see classify_generation).
+## incarnation change on whatever this transport still holds for it.
+## _on_incarnation_change tears the peer down, which erases `_inc[pid]` --
+## so local_inc reads back as 0 afterward and the next offer, at whatever
+## incarnation the host now mints, is followed cleanly. No explicit barrier is
+## needed here any more: classify_incarnation needs no ordering between labels
+## (see the header's "Handshake identity" note), unlike the generation scheme
+## this replaced.
+##
+## Also clears a connect-failure tombstone (A3/finding 4): only a fresh
+## peer_joined may give a terminally-failed peer another chance.
 func _on_signaling_peer_joined(pid: String) -> void:
+	_failed.erase(pid)
 	if _departed.has(pid):
 		_departed.erase(pid)
 		if _pcs.has(pid) or _connected.has(pid):
 			_on_incarnation_change(pid)
-		_awaiting_rejoin_gen0[pid] = true
 	_discover_peer(pid)
 
 
@@ -1300,6 +1487,10 @@ func _on_engine_peer_connected(net_id: int) -> void:
 	_connected[pid] = true
 	_connect_deadlines.erase(pid)
 	_sdp_retx.erase(pid)
+	# A link that came up earns a fresh follow budget -- the ADOPTs it took to
+	# get here paid for themselves; a FUTURE rejoin's straggler traffic must
+	# not inherit whatever was already spent chasing this one.
+	_incarnation_follows.erase(pid)
 	peer_ready.emit(pid)
 	if _recently_lost.has(pid):
 		_recently_lost.erase(pid)
@@ -1334,8 +1525,16 @@ func _on_connect_timeout(pid: String) -> void:
 		return
 	if not _is_host:
 		_connect_failures += 1
-		_connect_deadlines.erase(pid)
-		_sdp_retx.erase(pid)
+		# _teardown_peer, not just the deadline/retx pair (A3/finding 4): a
+		# terminal failure that leaves the PC in _pcs and in _mp is still a
+		# LIVE connection as far as the engine is concerned, so peer_ready
+		# could still fire after this advertised terminal failure, and the
+		# peer keeps consuming one of MAX_PEERS's slots forever. Tombstone
+		# after teardown so a stray re-announce can't rebuild it; only a fresh
+		# peer_joined (which erases the tombstone) may try again. Signal last,
+		# so a listener observes settled state.
+		_teardown_peer(pid)
+		_remember_failed(pid)
 		push_error("CouchStarTransport: host %s connect timeout, giving up" % pid)
 		transport_gap.emit(pid, "connect-failed")
 		return
@@ -1343,8 +1542,10 @@ func _on_connect_timeout(pid: String) -> void:
 	_attempts[pid] = attempts
 	if attempts >= MAX_CONNECT_ATTEMPTS:
 		_connect_failures += 1
-		_connect_deadlines.erase(pid)
-		_sdp_retx.erase(pid)
+		# Same fix, host side: the retry budget is spent, so this is now
+		# terminal too (A3/finding 4).
+		_teardown_peer(pid)
+		_remember_failed(pid)
 		push_error("CouchStarTransport: peer %s connect timeout, giving up" % pid)
 		transport_gap.emit(pid, "connect-failed")
 		return
@@ -1433,11 +1634,15 @@ func _send(envelope: Dictionary, target_net_id: int) -> bool:
 
 ## Flood-controlled rejection log, verbatim in spirit from
 ## CouchLobbyTransport._on_lobby_event: at most one push per distinct error
-## string, `push_error` for anything beginning with "oversized" (a behaviour
-## cliff that must stay visible), `push_warning` otherwise. Used both for
-## malformed envelopes (_receive, oversized sends) and for malformed handshake
-## frames (_on_sig_received, _handle_sdp, _handle_ice) -- one flood-control
-## mechanism, two wires.
+## string. Severity boundary (finding 7 / A1, A4): `push_error`
+## for anything beginning with "oversized" (a behaviour cliff that must stay
+## visible) OR listed in FATAL_REJECT_ERRORS (a failure that costs the whole
+## CURRENT connection, not merely one discarded frame -- e.g. a rejected
+## set_remote_description leaves the current incarnation unable to
+## establish); `push_warning` otherwise, for malformed/stale/individually
+## non-fatal input. Used both for malformed envelopes (_receive, oversized
+## sends) and for malformed handshake frames (_on_sig_received, _handle_sdp,
+## _handle_ice) -- one flood-control mechanism, two wires.
 ##
 ## `detail` carries attacker-controlled text (an unknown kind, an sdp_type)
 ## OUT of the dedup key -- keying on raw attacker input would let a flood of
@@ -1453,7 +1658,7 @@ func _reject(error: String, who: String, detail: String = "") -> void:
 	_seen_reject_errors[error] = true
 	var suffix := "" if detail.is_empty() else " (%s)" % detail
 	var message := "CouchStarTransport: rejected frame from %s: %s%s" % [who, error, suffix]
-	if error.begins_with("oversized"):
+	if error.begins_with("oversized") or error in FATAL_REJECT_ERRORS:
 		push_error(message)
 	else:
 		push_warning(message)
@@ -1484,6 +1689,20 @@ func _remember_departed(pid: String) -> void:
 	_departed[pid] = true
 	while _departed.size() > MAX_DEPARTED:
 		_departed.erase(_departed.keys()[0])
+
+
+## Bounded connect-failure tombstone bookkeeping, identical in shape and
+## rationale to _remember_departed (A3/finding 4): a peer that burns its whole
+## connect budget must not be silently re-discoverable by a stray
+## re-announce, but a long-lived session with heavy churn must not grow
+## _failed forever either. Only a fresh peer_joined clears an entry (see
+## _on_signaling_peer_joined).
+func _remember_failed(pid: String) -> void:
+	if _failed.has(pid):
+		return
+	_failed[pid] = true
+	while _failed.size() > MAX_DEPARTED:
+		_failed.erase(_failed.keys()[0])
 
 
 func _attach_signaling() -> void:

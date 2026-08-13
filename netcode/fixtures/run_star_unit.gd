@@ -41,7 +41,7 @@ func _initialize() -> void:
 	_check_net_id_invariants()
 	_check_collision_fixture_is_real()
 	_check_lane_table()
-	_check_classify_generation()
+	_check_classify_incarnation()
 	_check_object_payloads_are_refused()
 
 	print("")
@@ -482,41 +482,87 @@ func _check_lane_table() -> void:
 		)
 
 
-# --- 15. classify_generation, all three branches --------------------------------
+# --- 15. classify_incarnation, the whole truth table -----------------------------
 #
-# CouchStarTransport.classify_generation(local_gen, incoming_gen) -> GenAction is
-# the pure, static, three-valued classification that replaces the iteration-1
-# `!=` rule (delta plan iteration 2, section 1). It is the whole of the fix for
-# Codex's delayed-stale-packet wedge, and it lives entirely in these branches,
-# so it is unit-tested directly rather than only indirectly through G11's fault
-# scenarios.
+# CouchStarTransport.classify_incarnation(local_inc, incoming_inc, is_host,
+# established, follows_left) -> IncAction is the pure, static classification
+# that REPLACES classify_generation/GenAction entirely (iteration 3, finding 1):
+# generations reset to 0 on every signaling rejoin, so a delayed packet from the
+# PREVIOUS incarnation was indistinguishable from the new one's, and the barrier
+# guarding that case could itself be cleared by a delayed packet before it was
+# validated -- a permanent wedge. An incarnation label needs no ORDERING between
+# old and new, so the whole shape of the decision changed: it is unit-tested
+# directly here, not only indirectly through G11's fault scenarios, exactly as
+# classify_generation was.
+#
+# The host-branch cases below are M18/M40's exact named detector: a mutation
+# pass proved that testing ONLY a lower differing incarnation at the host left a
+# mutant alive that adopted a HIGHER one (the host is the sole minter and must
+# never follow a peer in EITHER direction) -- see also G11's F6c, which proves
+# the same rule end to end against a real replayed blob.
 
 
-func _check_classify_generation() -> void:
+func _check_classify_incarnation() -> void:
+	# -- equal incarnations -> PROCESS, for every role/established combination --
 	_check(
-		CouchStarTransport.classify_generation(1, 1) == CouchStarTransport.GenAction.PROCESS,
-		"classify_generation(1, 1): same generation -> PROCESS"
-	)
-	# M19's exact named detector (delta plan section 6): a DROP_STALE branch
-	# rewritten to return ADOPT must turn this assertion red.
-	_check(
-		CouchStarTransport.classify_generation(1, 0) == CouchStarTransport.GenAction.DROP_STALE,
-		"classify_generation(1, 0): an older incoming generation -> DROP_STALE"
+		CouchStarTransport.classify_incarnation(5, 5, true, false, 8) == CouchStarTransport.IncAction.PROCESS,
+		"classify_incarnation(5, 5, host, unestablished): equal incarnations -> PROCESS"
 	)
 	_check(
-		CouchStarTransport.classify_generation(0, 1) == CouchStarTransport.GenAction.ADOPT,
-		"classify_generation(0, 1): a newer incoming generation -> ADOPT"
-	)
-	# A second DROP_STALE case at different magnitudes than (1, 0), so a mutation
-	# that special-cases the exact (1, 0) pair cannot hide behind the assertion
-	# above.
-	_check(
-		CouchStarTransport.classify_generation(5, 2) == CouchStarTransport.GenAction.DROP_STALE,
-		"classify_generation(5, 2): a generation two behind the local one -> DROP_STALE"
+		CouchStarTransport.classify_incarnation(5, 5, true, true, 8) == CouchStarTransport.IncAction.PROCESS,
+		"classify_incarnation(5, 5, host, established): equal incarnations -> PROCESS"
 	)
 	_check(
-		CouchStarTransport.classify_generation(0, 0) == CouchStarTransport.GenAction.PROCESS,
-		"classify_generation(0, 0): generation zero on both sides -> PROCESS"
+		CouchStarTransport.classify_incarnation(5, 5, false, false, 8) == CouchStarTransport.IncAction.PROCESS,
+		"classify_incarnation(5, 5, guest, unestablished): equal incarnations -> PROCESS"
+	)
+	_check(
+		CouchStarTransport.classify_incarnation(5, 5, false, true, 8) == CouchStarTransport.IncAction.PROCESS,
+		"classify_incarnation(5, 5, guest, established): equal incarnations -> PROCESS"
+	)
+
+	# -- host + differing incarnation -> DROP_STALE, whether HIGHER or LOWER --
+	# (the sole minter never follows a peer -- M18/M40's exact untested rule).
+	_check(
+		CouchStarTransport.classify_incarnation(5, 3, true, false, 8) == CouchStarTransport.IncAction.DROP_STALE,
+		"classify_incarnation(5, 3, host): a LOWER incoming incarnation -> DROP_STALE"
+	)
+	_check(
+		CouchStarTransport.classify_incarnation(5, 9, true, false, 8) == CouchStarTransport.IncAction.DROP_STALE,
+		"classify_incarnation(5, 9, host): a HIGHER incoming incarnation -> DROP_STALE too "
+			+ "(M18/M40: a mutant that only dropped LOWER values and ADOPTed higher ones passed on the case above alone)"
+	)
+
+	# -- guest + established + differing -> DROP_STALE (a straggler may never --
+	# disturb a live link).
+	_check(
+		CouchStarTransport.classify_incarnation(5, 9, false, true, 8) == CouchStarTransport.IncAction.DROP_STALE,
+		"classify_incarnation(5, 9, guest, established): a differing incarnation -> DROP_STALE"
+	)
+
+	# -- guest + not established + differing + follows left -> ADOPT. Also at a --
+	# LOWER incoming value, to show no ORDERING is required between labels
+	# (unlike the generation scheme this replaced).
+	_check(
+		CouchStarTransport.classify_incarnation(5, 9, false, false, 1) == CouchStarTransport.IncAction.ADOPT,
+		"classify_incarnation(5, 9, guest, unestablished, follows_left=1): a HIGHER differing incarnation -> ADOPT"
+	)
+	_check(
+		CouchStarTransport.classify_incarnation(5, 3, false, false, 8) == CouchStarTransport.IncAction.ADOPT,
+		"classify_incarnation(5, 3, guest, unestablished, follows_left=8): a LOWER differing incarnation ADOPTs too -- no ordering required"
+	)
+
+	# -- guest + not established + differing + follows_left <= 0 -> DROP_STALE --
+	# (bounded allocation, the budget a hostile signaling peer cannot exceed).
+	_check(
+		CouchStarTransport.classify_incarnation(5, 9, false, false, 0) == CouchStarTransport.IncAction.DROP_STALE,
+		"classify_incarnation(5, 9, guest, unestablished, follows_left=0): budget exactly exhausted -> DROP_STALE"
+	)
+
+	# -- local_inc == 0 (nothing adopted yet) + any incoming -> ADOPT for a guest --
+	_check(
+		CouchStarTransport.classify_incarnation(0, 1, false, false, 8) == CouchStarTransport.IncAction.ADOPT,
+		"classify_incarnation(0, 1, guest, unestablished): a fresh guest holding no incarnation yet ADOPTs the first one it hears"
 	)
 
 

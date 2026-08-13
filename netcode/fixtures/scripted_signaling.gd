@@ -49,6 +49,10 @@
 ##   - announce_left(): peer_left sibling of the existing announce().
 ##   - close_count / connect_room_count: call counters for concurrency tests
 ##     (concurrent start(), close() racing a suspended start()).
+##   - is_joined(): whether this side currently considers itself joined to the
+##     room. Exists so a test (run_star_faults.gd's F10) can assert on the
+##     TRANSPORT's own cleanup rather than on this fake refusing to join in the
+##     first place -- see connect_room()'s docstring.
 class_name CouchScriptedSignaling
 extends RefCounted
 
@@ -84,11 +88,6 @@ var connect_room_count: int = 0
 
 var _other: CouchScriptedSignaling = null
 var _joined: bool = false
-## TEST-ONLY bookkeeping (not part of the control surface table): bumped by
-## close(). Lets a suspended connect_room() detect that close() landed while
-## it was awaiting the process frame, so it can release the late-arriving
-## membership instead of applying it -- see F10 in run_star_faults.gd.
-var _close_epoch: int = 0
 
 
 func _init(p_peer_id: String, p_ice_servers: Array = []) -> void:
@@ -105,23 +104,35 @@ static func link(a: CouchScriptedSignaling, b: CouchScriptedSignaling) -> void:
 
 ## Join the room. See the file header for why this costs one real frame and why
 ## presence fires both ways from whichever side resolves second.
+##
+## The pending join ALWAYS completes, even when close() lands on THIS side
+## while the call is suspended at the `await` below (Codex finding 6). A real
+## signaling backend has no way to know a purely LOCAL close() call happened
+## mid-request -- the join lands regardless -- and a fake that suppressed it
+## made the transport's OWN cleanup (CouchStarTransport._abort_start) untestable:
+## a superseded start() never had a real membership to release, so F10 passed
+## even with that cleanup deleted outright. It is the TRANSPORT's job to notice
+## a start() was superseded and release what connect_room() went on to join
+## anyway, and F10 (run_star_faults.gd) now asserts exactly that: two close()
+## calls (the star's own, plus _abort_start's) leaving this fake unjoined.
 func connect_room() -> Dictionary:
 	connect_room_count += 1
-	var epoch := _close_epoch
 	await (Engine.get_main_loop() as SceneTree).process_frame
-	# If close() landed while this call was suspended, the late-arriving
-	# membership is released, not applied: no _joined flip, no presence.
-	if _close_epoch == epoch:
-		_joined = true
-		if _other != null and _other._joined:
-			_other.peer_joined.emit.call_deferred(peer_id)
-			peer_joined.emit.call_deferred(_other.peer_id)
+	_joined = true
+	if _other != null and _other._joined:
+		_other.peer_joined.emit.call_deferred(peer_id)
+		peer_joined.emit.call_deferred(_other.peer_id)
 	return {
 		"success": true,
 		"peer_id": peer_id,
 		"room_id": "scripted-room",
 		"ice_servers": ice_servers.duplicate(true),
 	}
+
+
+## TEST-ONLY. Whether this side currently considers itself joined to the room.
+func is_joined() -> bool:
+	return _joined
 
 
 ## Best-effort by contract: an unknown or not-yet-joined target is dropped
@@ -168,7 +179,6 @@ func replay(blob: Variant, from_peer_id: String) -> void:
 
 func close() -> void:
 	close_count += 1
-	_close_epoch += 1
 	_joined = false
 	if _other != null:
 		_other.peer_left.emit.call_deferred(peer_id)

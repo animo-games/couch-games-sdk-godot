@@ -6,16 +6,17 @@
 ## CouchScriptedSignaling extended with its TEST-ONLY fault-injection surface
 ## (netcode/fixtures/scripted_signaling.gd -- hold_kind/release_held, drop_all,
 ## duplicate_sends, captured, replay, announce_left, close_count,
-## connect_room_count). run_star_link.gd (G8) proves the star establishes and
-## carries traffic cleanly; run_star_unit.gd (G7) proves classify_generation and
-## the codec in isolation. Neither gate forces ICE-before-SDP, a duplicate
-## peer_joined, a connect timeout/rebuild, a stale-generation delivery, or a
-## close-during-start -- which is exactly why this gate exists: it is where
-## Codex's critical finding (a delayed OLDER-generation packet rebuilding the
-## guest backward and wedging it permanently) becomes a test that can fail. Every
-## assertion below is on an OBSERVED EFFECT -- a signal fired, a counter moved, a
-## frame that did or did not arrive -- never on a send's return value, which the
-## contract documents as "accepted for send", not a delivery receipt.
+## connect_room_count, is_joined). run_star_link.gd (G8) proves the star
+## establishes and carries traffic cleanly; run_star_unit.gd (G7) proves
+## classify_incarnation and the codec in isolation. Neither gate forces
+## ICE-before-SDP, a duplicate peer_joined, a connect timeout/rebuild, a
+## stale-incarnation delivery, or a close-during-start -- which is exactly why
+## this gate exists: it is where Codex's critical finding (a delayed packet from
+## a DEAD incarnation rebuilding the guest backward and wedging it permanently)
+## becomes a test that can fail. Every assertion below is on an OBSERVED EFFECT
+## -- a signal fired, a counter moved, a frame that did or did not arrive --
+## never on a send's return value, which the contract documents as "accepted
+## for send", not a delivery receipt.
 ##
 ## Transport-only, like run_star_link.gd: no CouchSession anywhere here.
 ##
@@ -47,8 +48,9 @@
 ## unresolved roster, a connection that must never establish) that would
 ## contaminate every case after it on a shared pair. Each fault function below
 ## either takes a dedicated, freshly constructed _Pair or is explicitly
-## documented as reusing one that stays generation-stable (the MAIN pair, used
-## for F1/F2 and again for the orthogonal F14/F15/F16 reject/mute counters).
+## documented as reusing one that stays incarnation-stable (the MAIN pair, used
+## for F1/F2 and again for the orthogonal F14/F15/F16/F22 reject/mute/validation
+## counters).
 ##
 ## HONESTY RISKS, stated plainly rather than papered over:
 ##   - F3 (duplicate SDP/ICE): loopback establishment can be fast enough that a
@@ -57,11 +59,18 @@
 ##     removal. Implemented anyway for the coverage it does provide; do not read
 ##     a pass here as proof of that guard.
 ##   - F6/F6b/F8 all replay a blob pulled from some signaling's `captured`
-##     array verbatim. CONFIRMED by actually running this gate: captured DOES
-##     record a blob at send()'s JSON-round-trip step regardless of whether
-##     drop_all/hold_kind ultimately deliver it -- the only reading of "captured:
-##     every blob sent" (netcode/fixtures/scripted_signaling.gd) that made F6's
-##     own setup possible, and it holds against the real implementation.
+##     array verbatim; F6c replays one MUTATED (its `inc` field bumped past the
+##     host's own) and re-JSON-round-tripped, never actually sent over the wire.
+##     CONFIRMED by actually running this gate: captured DOES record a blob at
+##     send()'s JSON-round-trip step regardless of whether drop_all/hold_kind
+##     ultimately deliver it -- the only reading of "captured: every blob sent"
+##     (netcode/fixtures/scripted_signaling.gd) that made F6's own setup
+##     possible, and it holds against the real implementation.
+##   - F21 (the asymmetric reconnect) depends on a REAL WebRTCPeerConnection
+##     teardown on the host propagating to a real disconnect on the guest within
+##     WAIT_TIMEOUT_MS -- see that function's own header comment for the full
+##     reasoning. This is genuine engine timing, not a scripted guarantee, in
+##     the same honesty-risk family as F3's and F7/F8's real-engine dependence.
 ##   - F7's setup cell says only "announce_left(host) then announce(host) AT THE
 ##     GUEST". Taken completely literally that leaves the HOST's own connection
 ##     untouched -- nothing would ever produce the fresh generation-0 offer the
@@ -73,20 +82,14 @@
 ##     "genuine host restart" narrative) would produce on both ends. Flagged here
 ##     as an explicit extension beyond the setup cell's literal text, not a
 ##     silent deviation. CONFIRMED working by actually running this gate.
-##   - F7 and F8 are SEPARATE dedicated pairs, not one combined flow as
-##     originally written. Measured empirically: on this engine, the host's
-##     fresh post-rejoin offer AND its ICE candidates can both reach the guest
-##     and clear the rejoin barrier within the SAME _step() that processes the
-##     deferred rejoin signals -- there is no naturally-occurring multi-frame
-##     window after "the guest processed the rejoin" to inject a stale replay
-##     into, and `hold_kind` cannot close it either (it is a single string and
-##     cannot hold both "sdp" and "ice" at once, so a held offer still leaves
-##     ICE free to clear the barrier first). F7 now runs on a clean pair with no
-##     interference, proving the recovery path end to end; F8 runs on its own
-##     dedicated pair with the host's signaling fully `drop_all`-blocked through
-##     the whole rejoin, which reliably keeps the barrier armed long enough to
-##     inject the stale replay -- at the cost of F8's pair never establishing
-##     again afterward, which is fine, since F7's pair is what proves that part.
+##   - F7 and F8 are SEPARATE dedicated pairs, not one combined flow. F7 proves
+##     the clean rejoin-recovery path end to end with no interference; F8
+##     deliberately injects a stale, dead-incarnation replay into the same kind
+##     of rejoin and proves CONVERGENCE despite it. There is no barrier any more
+##     to keep armed (`_awaiting_rejoin_gen0` is deleted -- see F8's own header),
+##     so unlike its predecessor F8 no longer needs `drop_all` to hold a window
+##     open, and it DOES need its pair to actually re-establish afterward, which
+##     is why it stays on its own pair rather than sharing F7's.
 ##
 ## NOT COVERED, stated rather than hidden (mirrors run_star_link.gd's own
 ## assertion-21 note and the plan's own §3.5 closing line): `pc-init-failed`,
@@ -302,39 +305,127 @@ func _drive_host_to_gen1(pair: _Pair) -> bool:
 
 
 # ============================================================================
-# F1 -- ICE before SDP (M41)
+# F1 -- ICE before SDP, starved in BOTH directions (M41)
 # ============================================================================
 
 
+## Count of `signaling.captured` entries whose `kind` == `kind_filter` --
+## generation-agnostic (unlike `_find_captured`), for a fault that cares only
+## about volume, not any one blob's contents.
+func _count_captured(captured: Array, kind_filter: String) -> int:
+	var n := 0
+	for entry in captured:
+		if entry is Dictionary and str((entry as Dictionary).get("kind", "")) == kind_filter:
+			n += 1
+	return n
+
+
+## Poll `pair` until `signaling`'s captured ICE count has stopped growing for
+## `quiet_steps` consecutive polled frames, having captured at least one.
+## Returns the count at the moment quiescence is declared, or -1 on timeout
+## (nothing ever captured, or it never stopped growing within WAIT_TIMEOUT_MS).
+## `dt_ms == 0` throughout (via `_step`'s default), so this never advances any
+## deadline -- see the file header's virtual-clock note.
+func _wait_ice_quiescent(pair: _Pair, signaling: CouchScriptedSignaling, quiet_steps: int) -> int:
+	var last_count := -1
+	var stable_for := 0
+	var deadline := Time.get_ticks_msec() + WAIT_TIMEOUT_MS
+	while Time.get_ticks_msec() < deadline:
+		var count := _count_captured(signaling.captured, CouchStarTransport.SIGNAL_KIND_ICE)
+		if count > 0 and count == last_count:
+			stable_for += 1
+			if stable_for >= quiet_steps:
+				return count
+		else:
+			stable_for = 0
+		last_count = count
+		await _step(pair.stars())
+	return -1
+
+
+## Rebuilt per finding "M41 coverage hole": the previous version held only the
+## HOST's SDP and released the moment the FIRST ice blob was captured, while
+## gathering was still running -- so later candidates landed AFTER the SDP was
+## released (post-release, i.e. NOT starved), and only the host's own
+## candidates were ever buffered at all (the guest's reached a host whose
+## remote description was already set, since the guest was never held). A
+## mutation pass proved this stayed green even with the pending-ICE buffer
+## deleted outright: ICE still completed by peer-reflexive discovery on the
+## unstarved side. Fixed here as a TWO-PHASE, BOTH-DIRECTIONS starvation: both
+## signalings hold "sdp" from the start, each side's ICE gathering is run all
+## the way to QUIESCENCE (not just "one candidate seen") before its SDP is
+## released, and the test asserts its OWN premise at the end -- that no
+## candidate arrived on either side after that side's release -- so a run that
+## silently stopped starving the buffer is caught rather than passing by
+## accident, mirroring the exact way the old version lost its power invisibly.
 func _run_f1_ice_before_sdp(pair: _Pair) -> void:
-	print("-- F1: ICE demonstrably arrives before SDP (host SDP held) --")
+	print("-- F1: ICE buffering is load-bearing in BOTH directions (two-phase starvation, M41) --")
 	pair.host_signaling.hold_kind = "sdp"
+	pair.guest_signaling.hold_kind = "sdp"
 
 	var host_start: Dictionary = await pair.host_star.start()
 	var guest_start: Dictionary = await pair.guest_star.start()
 	_check(bool(host_start.get("success", false)), "F1: host_star.start() succeeds")
 	_check(bool(guest_start.get("success", false)), "F1: guest_star.start() succeeds")
 
-	var ice_predicate := func() -> bool:
-		return _find_captured(pair.host_signaling.captured, "ice", 0) != null
-	var ice_captured := await _wait_until(
-		pair.stars(), ice_predicate,
-		"F1: the host to generate and send a gen-0 ICE candidate while its SDP offer is held"
+	# Phase 1: the host's offer is held, so the guest can never take a remote
+	# description yet -- every ICE candidate the host gathers in the meantime
+	# lands in the guest's pending-ICE buffer. Wait for the host's gathering to
+	# go fully quiescent (not merely "one candidate seen") before releasing.
+	var host_ice_at_release := await _wait_ice_quiescent(pair, pair.host_signaling, 60)
+	_check(
+		host_ice_at_release > 0,
+		"F1: setup -- the host's ICE gathering goes quiescent (>= 1 candidate, none new for 60 frames) while its own SDP offer is held"
 	)
-	_check(ice_captured, "F1: setup -- the host's ICE candidate(s) were sent while the SDP offer was held")
+	if host_ice_at_release <= 0:
+		return
 
 	pair.host_signaling.release_held()
+
+	# Phase 2: the guest takes the offer, flushes what it buffered, and answers
+	# -- but that answer is held by the GUEST's own hold_kind, so the host has
+	# no remote description either. Every candidate the guest gathers now lands
+	# in the HOST's pending-ICE buffer. Wait for the guest's gathering to go
+	# quiescent the same way before releasing its answer.
+	var guest_ice_at_release := await _wait_ice_quiescent(pair, pair.guest_signaling, 60)
+	_check(
+		guest_ice_at_release > 0,
+		"F1: setup -- the guest's ICE gathering goes quiescent (>= 1 candidate, none new for 60 frames) after taking the offer, with its own answer still held"
+	)
+	if guest_ice_at_release <= 0:
+		return
+
+	pair.guest_signaling.release_held()
 
 	var both_ready_predicate := func() -> bool:
 		return pair.host_ready.has(pair.guest_id) and pair.guest_ready.has(pair.host_id)
 	var both_ready := await _wait_until(
 		pair.stars(), both_ready_predicate,
-		"F1: both sides to reach peer_ready after the held SDP is released"
+		"F1: both sides to reach peer_ready after both held SDPs are released"
 	)
 	_check(
 		both_ready,
-		"F1 (M41): both sides reach peer_ready even though ICE demonstrably arrived before the SDP offer"
+		"F1 (M41): both sides reach peer_ready even though EVERY candidate on BOTH sides was gathered before that "
+			+ "side's own SDP was released -- with the pending-ICE buffer removed, neither side would hold a single "
+			+ "remote candidate and no connectivity check could ever be sent"
 	)
+
+	# The test's OWN premise, not the code's -- this is what stops it silently
+	# losing its power the way the old version did. If a candidate arrived on
+	# either side AFTER that side's release, this run no longer starved that
+	# side's buffer and proves nothing about it.
+	var host_ice_at_end := _count_captured(pair.host_signaling.captured, CouchStarTransport.SIGNAL_KIND_ICE)
+	var guest_ice_at_end := _count_captured(pair.guest_signaling.captured, CouchStarTransport.SIGNAL_KIND_ICE)
+	var host_premise_msg := (
+		"F1 premise: the host's captured ICE count is unchanged between release and the end (%d -> %d) -- "
+			+ "otherwise a candidate arrived AFTER the release, so this case no longer starves the buffer and cannot prove it load-bearing"
+	) % [host_ice_at_release, host_ice_at_end]
+	_check(host_ice_at_end == host_ice_at_release, host_premise_msg)
+	var guest_premise_msg := (
+		"F1 premise: the guest's captured ICE count is unchanged between release and the end (%d -> %d) -- "
+			+ "otherwise a candidate arrived AFTER the release, so this case no longer starves the buffer and cannot prove it load-bearing"
+	) % [guest_ice_at_release, guest_ice_at_end]
+	_check(guest_ice_at_end == guest_ice_at_release, guest_premise_msg)
 
 
 # ============================================================================
@@ -473,15 +564,59 @@ func _run_f4_host_timeout_rebuild(pair: _Pair) -> void:
 		pair.host_star.connect_failures == failures_before + 1,
 		"F4: the second connect timeout is terminal -- connect_failures goes up by exactly 1"
 	)
+	# A3/finding 4: a terminal failure now tears the peer down completely
+	# (_teardown_peer + a _failed tombstone), not merely caps it at generation 1
+	# -- MAX_CONNECT_ATTEMPTS is proven above by handshake_restarts/gen==1 at
+	# the FIRST (non-terminal) timeout; this second timeout's own guarantee is
+	# that nothing is left half-mapped behind it.
 	_check(
-		pair.host_star.generation_for(pair.guest_id) == 1,
-		"F4: generation_for stays at 1 after the terminal failure -- MAX_CONNECT_ATTEMPTS is honored, no third attempt"
+		pair.host_star.generation_for(pair.guest_id) == -1,
+		"F4 (A3/finding 4): generation_for(guest) == -1 after the terminal failure -- the peer is torn down, not merely capped at generation 1"
+	)
+	_check(
+		pair.host_star.net_id_for(pair.guest_id) == 0,
+		"F4 (A3/finding 4): net_id_for(guest) == 0 after the terminal failure -- the net id mapping was released, not left dangling"
+	)
+	_check(
+		not pair.host_star.connected_peer_ids().has(pair.guest_id),
+		"F4 (A3/finding 4): the guest never appears in connected_peer_ids() -- it never actually came up"
 	)
 	var connect_failed_gap := false
 	for g in pair.host_gaps:
 		if g["peer_id"] == pair.guest_id and g["reason"] == "connect-failed":
 			connect_failed_gap = true
 	_check(connect_failed_gap, "F4: transport_gap(pid, \"connect-failed\") fired for the terminal failure")
+
+	# The tombstone itself (A3/finding 4): a RAW signaling message purporting to
+	# be from the failed peer -- NOT a fresh peer_joined -- must not resurrect
+	# it. _on_sig_received's own "not _pcs.has(sender_pid): _discover_peer(...)"
+	# path is exactly what `_failed` exists to block; the message never even
+	# reaches the gen/inc validation, since _discover_peer returns first.
+	var straggler_blob := {
+		"v": CouchStarTransport.SIGNAL_PROTOCOL_VERSION, "gen": 0,
+		"kind": CouchStarTransport.SIGNAL_KIND_ICE, "mid": "0", "index": 0,
+		"candidate": "candidate:1 1 UDP 1 0.0.0.0 9 typ host", "inc": 1,
+	}
+	pair.host_signaling.replay(straggler_blob, pair.guest_id)
+	await _step(pair.stars())
+	_check(
+		pair.host_star.net_id_for(pair.guest_id) == 0,
+		"F4 (A3/finding 4): a raw signaling message from the tombstoned peer does NOT resurrect it -- net_id_for stays 0"
+	)
+
+	# A fresh peer_joined, by contrast, DOES clear the tombstone --
+	# _on_signaling_peer_joined erases _failed[pid] UNCONDITIONALLY, before
+	# _discover_peer runs, and only a fresh peer_joined does that.
+	pair.host_signaling.announce(pair.guest_id)
+	var rediscovered_predicate := func() -> bool: return pair.host_star.net_id_for(pair.guest_id) != 0
+	var rediscovered := await _wait_until(
+		pair.stars(), rediscovered_predicate,
+		"F4 (A3/finding 4): a fresh peer_joined to clear the tombstone and rediscover the peer"
+	)
+	_check(
+		rediscovered,
+		"F4 (A3/finding 4): a fresh peer_joined DOES clear the tombstone -- net_id_for(guest) becomes nonzero again"
+	)
 
 
 # ============================================================================
@@ -517,14 +652,18 @@ func _run_f5_guest_timeout(pair: _Pair) -> void:
 
 
 # ============================================================================
-# F6 -- a delayed, replayed generation-0 SDP must not disturb a live
-# generation-1 link (M19 / M36) -- the critical finding this whole gate exists
-# to prove closed.
+# F6 -- an ESTABLISHED guest ignores a delayed, replayed LOWER-incarnation SDP
+# (M19/M36) -- the critical finding this whole gate exists to prove closed, and
+# C4's "established guest freezes" case: classify_incarnation's guest+
+# established branch is DROP_STALE unconditionally, so this now proves the rule
+# through `incarnation_for`, the field the rule actually operates on, not only
+# through `generation_for` (which stays wire-visible but is no longer what
+# decides anything).
 # ============================================================================
 
 
 func _run_f6_delayed_stale_generation(pair: _Pair) -> void:
-	print("-- F6: a delayed generation-0 SDP must not disturb a live generation-1 link --")
+	print("-- F6: an established guest ignores a delayed, replayed LOWER-incarnation SDP --")
 	var established := await _drive_host_to_gen1(pair)
 	_check(established, "F6: setup -- the pair reaches a live link at generation 1")
 	if not established:
@@ -533,11 +672,12 @@ func _run_f6_delayed_stale_generation(pair: _Pair) -> void:
 	var gen0_offer: Variant = _find_captured(pair.host_signaling.captured, CouchStarTransport.SIGNAL_KIND_SDP, 0)
 	_check(
 		gen0_offer != null,
-		"F6: setup -- a generation-0 SDP offer was captured (before the rebuild) to drop into replay"
+		"F6: setup -- a generation-0 SDP offer (the pair's FIRST, now-dead incarnation) was captured before the rebuild, to drop into replay"
 	)
 	if gen0_offer == null:
 		return
 
+	var inc_before := pair.guest_star.incarnation_for(pair.host_id)
 	var restarts_before := pair.guest_star.handshake_restarts
 	var lost_before := pair.guest_lost.size()
 	var stale_before := pair.guest_star.stale_generation_drops
@@ -546,6 +686,10 @@ func _run_f6_delayed_stale_generation(pair: _Pair) -> void:
 	await _step(pair.stars())
 	await _step(pair.stars())
 
+	_check(
+		pair.guest_star.incarnation_for(pair.host_id) == inc_before,
+		"F6 (M19/M36, C4 \"established guest freezes\"): incarnation_for(host) is unchanged -- the established-guest branch of classify_incarnation drops the stale replay outright"
+	)
 	_check(
 		pair.guest_star.generation_for(pair.host_id) == 1,
 		"F6 (M19/M36): the guest's generation stays at 1 after the replayed stale generation-0 SDP"
@@ -573,43 +717,137 @@ func _run_f6_delayed_stale_generation(pair: _Pair) -> void:
 
 
 # ============================================================================
-# F6b -- the host, sole minter, never adopts a differing generation (M40)
+# F6b -- the host, sole minter, never adopts a LOWER differing incarnation
+# (M40). See F6c below for the HIGHER-incarnation half of the same rule.
 # ============================================================================
 
 
 func _run_f6b_host_never_adopts(pair: _Pair, donor: _Pair) -> void:
-	print("-- F6b: the host never adopts a differing generation --")
+	print("-- F6b: the host never adopts a LOWER differing incarnation --")
 	var established := await _drive_host_to_gen1(pair)
 	_check(established, "F6b: setup -- the pair reaches a live link at generation 1")
 	if not established:
 		return
 
-	# Borrowed from `donor`'s guest, which established cleanly at generation 0
-	# (any real, cleanly-captured guest blob at gen 0 works -- replay() re-emits
-	# it verbatim regardless of which pair originally produced it).
-	var gen0_guest_blob: Variant = _find_captured(donor.guest_signaling.captured, "", 0)
+	# Borrowed from `donor`'s guest, which established cleanly at its FIRST (and
+	# only) incarnation -- any real, cleanly-captured guest blob at generation 0
+	# works (replay() re-emits it verbatim regardless of which pair originally
+	# produced it). `donor` never rebuilt, so its incarnation is necessarily
+	# LOWER than `pair`'s post-rebuild one.
+	var lower_inc_guest_blob: Variant = _find_captured(donor.guest_signaling.captured, "", 0)
 	_check(
-		gen0_guest_blob != null,
-		"F6b: setup -- a captured generation-0 guest blob is available to replay"
+		lower_inc_guest_blob != null,
+		"F6b: setup -- a captured guest blob at a lower (never-rebuilt) incarnation is available to replay"
 	)
-	if gen0_guest_blob == null:
+	if lower_inc_guest_blob == null:
 		return
 
-	var gen_before := pair.host_star.generation_for(pair.guest_id)
+	var inc_before := pair.host_star.incarnation_for(pair.guest_id)
 	var stale_before := pair.host_star.stale_generation_drops
 
-	pair.host_signaling.replay(gen0_guest_blob, pair.guest_id)
+	pair.host_signaling.replay(lower_inc_guest_blob, pair.guest_id)
 	await _step(pair.stars())
 	await _step(pair.stars())
 
 	_check(
-		pair.host_star.generation_for(pair.guest_id) == gen_before,
-		"F6b (M40): the host's generation for the guest is unchanged -- the sole minter never adopts"
+		pair.host_star.incarnation_for(pair.guest_id) == inc_before,
+		"F6b (M40): the host's incarnation for the guest is unchanged -- the sole minter never adopts a LOWER incarnation"
 	)
 	_check(
 		pair.host_star.stale_generation_drops == stale_before + 1,
 		"F6b (M40): stale_generation_drops on the host goes up by exactly 1"
 	)
+
+
+# ============================================================================
+# F6c -- the host, sole minter, never follows a HIGHER differing incarnation
+# either (M18/M40). F6b alone cannot catch a mutant that special-cases
+# "DROP_STALE only when the incoming incarnation is lower, ADOPT when higher"
+# -- F6b only ever replays a LOWER incarnation, so that mutant drops it
+# correctly and F6b stays green. This case replays a HIGHER one, which is
+# exactly the M18/M40 coverage hole the mutation pass found: the single
+# production line under test is classify_incarnation's `if is_host: return
+# DROP_STALE` (star_transport.gd), which must fire unconditionally on ANY
+# mismatch, not only a lower one. If that line were mutated to compare
+# magnitude and ADOPT on a higher incoming value, `_adopt_incarnation` would
+# run: `_remote_desc_set.has(pid)` is true on this established link, so it
+# would `_rebuild_connection` -- tearing down the live PC -- adopt the replayed
+# label, bump `_handshake_restarts`, and never touch
+# `_stale_generation_drops`. Every assertion below is chosen to catch exactly
+# that: `incarnation_for` moving, `handshake_restarts` moving, and
+# `stale_generation_drops` NOT moving would each independently go red, and the
+# final frame-crossing check would then also time out since the torn-down PC
+# has no fresh handshake driven through it.
+# ============================================================================
+
+
+func _run_f6c_host_never_follows_higher_incarnation(pair: _Pair) -> void:
+	print("-- F6c: the host never follows a HIGHER incarnation than its own (M18/M40) --")
+	var host_start: Dictionary = await pair.host_star.start()
+	var guest_start: Dictionary = await pair.guest_star.start()
+	_check(
+		bool(host_start.get("success", false)) and bool(guest_start.get("success", false)),
+		"F6c: setup -- both sides start()"
+	)
+
+	var ready_predicate := func() -> bool:
+		return pair.host_ready.has(pair.guest_id) and pair.guest_ready.has(pair.host_id)
+	var established := await _wait_until(pair.stars(), ready_predicate, "F6c: setup -- the pair to establish cleanly")
+	_check(established, "F6c: setup -- the pair establishes cleanly at its first (only) incarnation")
+	if not established:
+		return
+
+	# Any captured guest blob at the live (only) incarnation works -- kind
+	# doesn't matter, since a DROP_STALE verdict returns before either
+	# _handle_sdp or _handle_ice ever runs.
+	var guest_blob: Variant = _find_captured(pair.guest_signaling.captured, "", 0)
+	_check(
+		guest_blob != null,
+		"F6c: setup -- a captured guest blob at the live incarnation is available to mutate and replay"
+	)
+	if guest_blob == null:
+		return
+
+	var inc_before := pair.host_star.incarnation_for(pair.guest_id)
+	var restarts_before := pair.host_star.handshake_restarts
+	var stale_before := pair.host_star.stale_generation_drops
+	var lost_before := pair.host_lost.size()
+
+	var higher_blob: Dictionary = (guest_blob as Dictionary).duplicate(true)
+	higher_blob["inc"] = inc_before + 1
+	# JSON round-trip so `inc`/`gen` arrive as floats, exactly like a real blob
+	# (see the file header's captured/replay note) -- this mutated blob was
+	# never actually sent over `send()`, so it never got the treatment for free.
+	var wire: Variant = JSON.parse_string(JSON.stringify(higher_blob))
+
+	pair.host_signaling.replay(wire, pair.guest_id)
+	await _step(pair.stars())
+	await _step(pair.stars())
+
+	_check(
+		pair.host_star.incarnation_for(pair.guest_id) == inc_before,
+		"F6c (M18/M40): incarnation_for is unchanged -- the sole minter never follows a HIGHER incarnation either"
+	)
+	_check(
+		pair.host_star.handshake_restarts == restarts_before,
+		"F6c (M18/M40): handshake_restarts is unchanged -- no rebuild happened"
+	)
+	_check(
+		pair.host_star.stale_generation_drops == stale_before + 1,
+		"F6c (M18/M40): stale_generation_drops goes up by exactly 1"
+	)
+	_check(
+		pair.host_lost.size() == lost_before,
+		"F6c (M18/M40): peer_lost never fired -- the established link was untouched"
+	)
+
+	var pre_frame_count := pair.host_received.size()
+	pair.guest_star.send_to_authority(CouchEnvelope.make(CouchEnvelope.KIND_INTENT, 1, 960, {}))
+	var frame_predicate := func() -> bool: return pair.host_received.size() > pre_frame_count
+	var frame_crossed := await _wait_until(
+		pair.stars(), frame_predicate, "F6c: a frame to still cross the live link after the higher-incarnation replay"
+	)
+	_check(frame_crossed, "F6c (M18/M40): a frame still crosses the live link after the higher-incarnation replay")
 
 
 # ============================================================================
@@ -668,38 +906,62 @@ func _run_f7_rejoin(pair: _Pair) -> void:
 
 
 # ============================================================================
-# F8 -- the rejoin barrier holds against a stale replay in the window before
-# the fresh generation-0 offer arrives (M37). A SEPARATE dedicated pair from
-# F7: measured empirically (running this gate) that on this engine, the
-# host's fresh post-rejoin offer AND its ICE candidates can both reach the
-# guest and clear the barrier within the very first _step() that processes
-# the deferred rejoin -- there is no naturally-occurring multi-frame window to
-# inject a stale replay into. `hold_kind` (a single string) cannot hold both
-# "sdp" and "ice" at once, so it cannot close that race either -- an early
-# gen-0 ICE candidate would still clear the barrier while only "sdp" is held.
-# `drop_all` blocks BOTH, deterministically, for the rest of this pair's life;
-# this function does not need the pair to ever establish again afterward
-# (F7's own clean pair already proves recovery works), only that the barrier
-# demonstrably holds while armed.
+# F8 -- after a rejoin, a delayed straggler from the incarnation that JUST DIED
+# may be followed TRANSIENTLY, but the guest CONVERGES on the host's live one
+# rather than wedging (Codex finding 1's core ABA case). `_awaiting_rejoin_gen0`
+# -- the barrier the OLD version of this case tested -- is deleted; there is no
+# barrier any more BY DESIGN (star_transport.gd's header: "no barrier exists
+# any more ... a guest follows whichever incarnation it last heard, bounded by
+# MAX_INCARNATION_FOLLOWS. Being wrong is transient"). This case exercises
+# exactly that trade: a stale replay from the dead incarnation, injected right
+# after a rejoin, IS followed (ADOPT needs no ordering between labels) -- and
+# the guarantee under test is that a SECOND, correcting ADOPT -- driven by the
+# live host's own SDP_RETRANSMIT_INTERVAL_MS retransmit -- brings the guest
+# back to the host's actual current incarnation and the link still establishes.
+#
+# HONESTY RISK, same family as the note this replaces: whether the guest's
+# very FIRST post-rejoin contact is this stale replay or the host's own fresh
+# offer (which can arrive within the same _step() that processes the rejoin)
+# is real-engine timing, not scripted. It does not matter which arrives first:
+# as long as the guest has not yet completed a real engine-level connect (a
+# multi-frame process the rejoin-signal-processing wait below does not by
+# itself complete), ADOPT has no ordering requirement, so replaying the DEAD
+# incarnation's blob always knocks incarnation_for onto the dead value
+# regardless of what arrived before it -- which is what makes the post-replay
+# assertion below deterministic even though the timing preceding it is not.
 # ============================================================================
 
 
-func _run_f8_rejoin_barrier(pair: _Pair) -> void:
-	print("-- F8: the rejoin barrier holds against a stale replay --")
+func _run_f8_rejoin_convergence(pair: _Pair) -> void:
+	print("-- F8: a stale straggler from a dead incarnation is followed TRANSIENTLY, but the guest converges on the live one --")
 	var established := await _drive_host_to_gen1(pair)
 	_check(established, "F8: setup -- the pair reaches a live link at generation 1")
 	if not established:
 		return
 
-	var gen1_blob: Variant = _find_captured(pair.host_signaling.captured, CouchStarTransport.SIGNAL_KIND_SDP, 1)
-	if gen1_blob == null:
-		gen1_blob = _find_captured(pair.host_signaling.captured, CouchStarTransport.SIGNAL_KIND_ICE, 1)
-	_check(gen1_blob != null, "F8: setup -- a captured generation-1 blob is available to replay")
-	if gen1_blob == null:
+	# Snapshot BEFORE the rejoin, not .has(): both ids are already present in
+	# these tap arrays from the FIRST establishment above, so a bare .has()
+	# check is vacuously true from the very start -- it would let the
+	# convergence wait below return the moment the incarnation LABELS match,
+	# long before the engine-level link has actually come back up, which is
+	# exactly what made the frame-crossing assertion after it time out.
+	var host_ready_before := pair.host_ready.size()
+	var guest_ready_before := pair.guest_ready.size()
+
+	# Capture a blob from the incarnation that is ABOUT TO DIE, and its
+	# incarnation number, before triggering the rejoin below.
+	var dying_inc := pair.host_star.incarnation_for(pair.guest_id)
+	var dying_inc_blob: Variant = _find_captured(pair.host_signaling.captured, CouchStarTransport.SIGNAL_KIND_SDP, 1)
+	if dying_inc_blob == null:
+		dying_inc_blob = _find_captured(pair.host_signaling.captured, CouchStarTransport.SIGNAL_KIND_ICE, 1)
+	_check(dying_inc_blob != null, "F8: setup -- a captured blob from the about-to-die incarnation is available to replay")
+	if dying_inc_blob == null:
 		return
 
-	pair.host_signaling.drop_all = true
-
+	# Mirrored rejoin, same technique as F7: both sides observe their own local
+	# rejoin. The host mints a FRESH incarnation (necessarily different from
+	# `dying_inc` -- epochs never repeat); the guest's local incarnation resets
+	# to 0 via _teardown_peer.
 	pair.guest_signaling.announce_left(pair.host_id)
 	pair.guest_signaling.announce(pair.host_id)
 	pair.host_signaling.announce_left(pair.guest_id)
@@ -711,30 +973,58 @@ func _run_f8_rejoin_barrier(pair: _Pair) -> void:
 				return true
 		return false
 	var rejoin_processed := await _wait_until(
-		pair.stars(), rejoin_predicate, "F8: the guest to process the rejoin and arm the rejoin barrier"
+		pair.stars(), rejoin_predicate, "F8: the guest to process the rejoin"
 	)
-	_check(rejoin_processed, "F8: setup -- the guest processes the rejoin (transport_gap fires, barrier arms)")
+	_check(rejoin_processed, "F8: setup -- the guest processes the rejoin")
 	if not rejoin_processed:
 		return
 
-	var restarts_before := pair.guest_star.handshake_restarts
-	var stale_before := pair.guest_star.stale_generation_drops
-
-	pair.guest_signaling.replay(gen1_blob, pair.host_id)
+	# Inject the straggler from the DEAD incarnation. Whatever the guest's
+	# incarnation currently is (0, if nothing has reached it yet; the host's
+	# fresh one, if it already has -- see the honesty-risk note above), this
+	# replay's incarnation is neither, so -- as long as the guest is not yet
+	# established -- ADOPT fires unconditionally and knocks it onto the dead
+	# value.
+	pair.guest_signaling.replay(dying_inc_blob, pair.host_id)
 	await _step(pair.stars())
 
 	_check(
-		pair.guest_star.generation_for(pair.host_id) == 0,
-		"F8 (M37): the guest stays at generation 0 -- the rejoin barrier holds against a stale generation-1 replay"
+		pair.guest_star.incarnation_for(pair.host_id) == dying_inc,
+		"F8: setup -- the guest is now pointed at the DEAD incarnation after transiently following the stale straggler"
+	)
+
+	# Let virtual time pass so the LIVE host's SDP_RETRANSMIT_INTERVAL_MS
+	# retransmit of its CURRENT offer actually fires and reaches the guest --
+	# see F21/F17's identical need for a nonzero step_dt_ms. Convergence means
+	# BOTH the incarnation labels matching AND a FRESH peer_ready on each side
+	# (size growth from the snapshot above) -- the engine-level link actually
+	# coming back up, not merely the label catching up while the old,
+	# now-dead-again PC from the stale replay is still mid-negotiation.
+	var converged_predicate := func() -> bool:
+		return (
+			pair.guest_star.incarnation_for(pair.host_id) == pair.host_star.incarnation_for(pair.guest_id)
+			and pair.host_ready.size() > host_ready_before
+			and pair.guest_ready.size() > guest_ready_before
+		)
+	var converged := await _wait_until(
+		pair.stars(), converged_predicate,
+		"F8 (Codex finding 1): the guest to converge on the host's CURRENT incarnation and RE-establish, after transiently following the stale straggler",
+		WAIT_TIMEOUT_MS, CouchStarTransport.SDP_RETRANSMIT_INTERVAL_MS
 	)
 	_check(
-		pair.guest_star.stale_generation_drops == stale_before + 1,
-		"F8 (M37): stale_generation_drops goes up by exactly 1"
+		converged,
+		"F8 (Codex finding 1): being wrong once is transient, not permanent -- guest.incarnation_for(host) converges on "
+			+ "host.incarnation_for(guest) and the link RE-establishes (a fresh peer_ready on both sides), rather than staying wedged pointing at the dead one"
 	)
-	_check(
-		pair.guest_star.handshake_restarts == restarts_before,
-		"F8 (M37): no rebuild happens from the barred replay"
+
+	var pre_frame_count := pair.host_received.size()
+	pair.guest_star.send_to_authority(CouchEnvelope.make(CouchEnvelope.KIND_INTENT, 1, 956, {}))
+	var frame_predicate := func() -> bool: return pair.host_received.size() > pre_frame_count
+	var frame_crossed := await _wait_until(
+		pair.stars(), frame_predicate, "F8: a frame to cross the converged link",
+		WAIT_TIMEOUT_MS, CouchStarTransport.SDP_RETRANSMIT_INTERVAL_MS
 	)
+	_check(frame_crossed, "F8 (Codex finding 1): a frame crosses the link once the guest has converged")
 
 
 # ============================================================================
@@ -794,7 +1084,7 @@ func _run_f9_generation_budget(pair: _Pair) -> void:
 
 
 func _run_f10_close_during_start() -> void:
-	print("-- F10: close() during start()'s own await --")
+	print("-- F10: close() during start()'s own await -- the fake now COMPLETES the join anyway (finding 6) --")
 	var signaling := CouchScriptedSignaling.new("solo10")
 	var player := {"user_id": "solo10"}
 	var roster := _StarRoster.new(player, player, true)
@@ -825,9 +1115,23 @@ func _run_f10_close_during_start() -> void:
 		bool(result.get("success", true)) == false and str(result.get("error", "")) == "superseded",
 		"F10 (M47): start() superseded by a close() during its own await returns {success: false, error: \"superseded\"}"
 	)
+	# The fake's connect_room() now ALWAYS completes the join (finding 6 -- it
+	# used to suppress this via `_close_epoch`, which made the transport's own
+	# cleanup untestable, since there was never a real membership left behind
+	# for it to release). So the join DOES land here, and what this asserts is
+	# that the TRANSPORT is the one that cleans it back up: `star.close()`
+	# above ran close() once immediately (before connect_room() even resumed),
+	# and once start() notices it was superseded AND that connect_room()
+	# reports success (which it now always does), `_abort_start(true)` runs a
+	# SECOND close() -- that is the cleanup this case exists to prove, not the
+	# fake refusing to join in the first place.
 	_check(
-		signaling.close_count >= close_count_before + 1,
-		"F10 (M47): the signaling membership's close() ran, releasing what start() had joined"
+		signaling.close_count == close_count_before + 2,
+		"F10 (M47/finding 6): close() was invoked exactly TWICE -- the star's own close() plus _abort_start's -- now that the fake no longer suppresses the join on a superseded connect_room()"
+	)
+	_check(
+		signaling.is_joined() == false,
+		"F10 (M47/finding 6): the signaling ends UNJOINED -- proof that the TRANSPORT's own _abort_start(joined=true) released the membership the fake actually completed"
 	)
 	_check(star.is_ready() == false, "F10: is_ready() is false after the aborted start()")
 
@@ -1181,6 +1485,255 @@ func _run_f18_host_never_resolves() -> void:
 
 
 # ============================================================================
+# F20 -- the guest's incarnation-follow budget exhausts, then drops the rest as
+# stale (C4, third case; MAX_INCARNATION_FOLLOWS). A solo guest, no real host:
+# ICE-kind replays (never SDP) are used deliberately -- an ICE blob with no
+# remote description set is simply buffered by _handle_ice and never touches
+# the real WebRTC engine's SDP parser, so the guest's own connection can never
+# accidentally establish and this case stays cleanly scoped to the budget
+# counters alone.
+# ============================================================================
+
+
+func _run_f20_follow_budget_exhausts() -> void:
+	print("-- F20: the guest's incarnation-follow budget exhausts, then drops the rest as stale --")
+	var host_id := "host20"
+	var guest_signaling := CouchScriptedSignaling.new("g20")
+	var host_player := {"user_id": host_id}
+	var guest_player := {"user_id": "g20"}
+	var guest_roster := _StarRoster.new(guest_player, host_player, false)
+	var guest_star := CouchStarTransport.new(guest_signaling, guest_roster)
+
+	var guest_start: Dictionary = await guest_star.start()
+	_check(
+		bool(guest_start.get("success", false)),
+		"F20: setup -- the solo guest starts (builds a PC to the roster-named host; no real peer on the other end)"
+	)
+
+	# The FIRST distinct incarnation this guest ever hears is an INITIAL
+	# adoption (local_inc == 0, i.e. `not _inc.has(pid)`) -- silent by design:
+	# it sets the label but consumes no follow budget and fires no
+	# handshake_restarts/transport_gap (adopting from nothing IS the
+	# handshake, not a restart -- see star_transport.gd's _adopt_incarnation).
+	# Every DISTINCT incarnation after that is a GENUINE follow, budgeted by
+	# MAX_INCARNATION_FOLLOWS. So N distinct incarnations succeed as
+	# 1 (free, initial) + MAX_INCARNATION_FOLLOWS (budgeted, genuine) before
+	# the budget is spent and the rest DROP_STALE -- the naive
+	# "N == MAX_INCARNATION_FOLLOWS" count this case originally asserted was
+	# off by exactly the free initial adoption.
+	var adopted := 0             # incarnation_for actually moved (initial OR genuine)
+	var genuinely_followed := 0  # handshake_restarts moved too (genuine only)
+	var dropped := 0
+	var total_attempts := CouchStarTransport.MAX_INCARNATION_FOLLOWS + 3
+	var expected_adopted := 1 + CouchStarTransport.MAX_INCARNATION_FOLLOWS
+	for i in range(total_attempts):
+		var blob := {
+			"v": CouchStarTransport.SIGNAL_PROTOCOL_VERSION,
+			"gen": 0,
+			"kind": CouchStarTransport.SIGNAL_KIND_ICE,
+			"mid": "0",
+			"index": 0,
+			"candidate": "candidate:1 1 UDP 1 0.0.0.0 9 typ host",
+			"inc": i + 1,   # strictly distinct, strictly increasing, never 0 (never a valid wire incarnation)
+		}
+		var inc_before := guest_star.incarnation_for(host_id)
+		var restarts_before := guest_star.handshake_restarts
+		guest_signaling.replay(blob, host_id)
+		if guest_star.incarnation_for(host_id) != inc_before:
+			adopted += 1
+			if guest_star.handshake_restarts > restarts_before:
+				genuinely_followed += 1
+		else:
+			dropped += 1
+
+	_check(
+		adopted == expected_adopted,
+		"F20: exactly %d distinct incarnations are ADOPTed -- 1 free initial + MAX_INCARNATION_FOLLOWS (%d) budgeted (got %d)"
+			% [expected_adopted, CouchStarTransport.MAX_INCARNATION_FOLLOWS, adopted]
+	)
+	_check(
+		genuinely_followed == CouchStarTransport.MAX_INCARNATION_FOLLOWS,
+		"F20: exactly MAX_INCARNATION_FOLLOWS (%d) of those adoptions are GENUINE follows that actually consumed the budget -- the first is free (got %d)"
+			% [CouchStarTransport.MAX_INCARNATION_FOLLOWS, genuinely_followed]
+	)
+	_check(
+		dropped == total_attempts - expected_adopted,
+		"F20: the incarnations past the budget are DROP_STALE, not allocating a connection each (got %d dropped, want %d)"
+			% [dropped, total_attempts - expected_adopted]
+	)
+	_check(
+		guest_star.stale_generation_drops == dropped,
+		"F20: stale_generation_drops == the number of over-budget replays (%d)" % dropped
+	)
+	_check(
+		guest_star.incarnation_for(host_id) == expected_adopted,
+		"F20: incarnation_for(host) settles at the LAST successfully adopted incarnation (%d = 1 free + MAX_INCARNATION_FOLLOWS budgeted), never a later dropped one"
+			% expected_adopted
+	)
+
+
+# ============================================================================
+# F21 -- an ASYMMETRIC signaling reconnect (C5, Codex finding 1's second half).
+# F7 mirrors the leave/rejoin announce onto the HOST's signaling too, which
+# supplies the very synchronisation the implementation is supposed to provide
+# on its own -- a real reconnect is not that tidy. This case drives each side's
+# signaling independently: the host sees a genuine left+rejoin pair (so its own
+# explicit rebuild path runs, exactly like F7), while the guest sees ONLY a
+# re-join, with no preceding "left" at all -- modelling a guest whose OWN
+# signaling session reset and simply re-reported the room's current members
+# ("peer_joined" collapsing "already here" and "just arrived", per the
+# adapter's documented contract), with nothing ever telling it the host went
+# away.
+#
+# WHAT THIS ACTUALLY PROVES, confirmed by instrumenting the transport directly
+# (that diagnostic build is not part of this file): the host's fresh,
+# higher-incarnation offer and candidates reach the guest WHILE it is still
+# established under the old incarnation, so the established-guest freeze rule
+# (F6's rule) correctly DROPS them first -- `_on_signaling_peer_joined` on the
+# guest's own side is a genuine no-op here (its `_departed` never held "host",
+# and `_pcs` already has it), so it is NOT what recovers this link. What
+# recovers it is the REAL WebRTCPeerConnection the host tears down as part of
+# its own rebuild: over a real, connected link, that eventually surfaces as a
+# real disconnect on the guest (`peer_lost` fires, `_connected` empties), which
+# is what makes the guest "not established" -- and therefore free to ADOPT --
+# by the time the host's NEXT retransmitted offer lands. So the case actually
+# under test is: the guest correctly freezes while it believes the link is up,
+# then follows the new incarnation once its engine link genuinely dies,
+# recovering within one SDP_RETRANSMIT_INTERVAL_MS retransmit. That retransmit
+# is background, virtual-time-gated behaviour -- exactly what `_wait_until`'s
+# own docstring (see its `step_dt_ms` parameter, exercised already by F17)
+# warns cannot fire under the default `step_dt_ms == 0`, which is why the
+# waits below pass SDP_RETRANSMIT_INTERVAL_MS explicitly. This is real engine
+# timing for the disconnect-detection half, not a scripted guarantee -- the
+# same honesty-risk family as F3's and F7/F8's real-engine dependence.
+# ============================================================================
+
+
+func _run_f21_asymmetric_reconnect(pair: _Pair) -> void:
+	print("-- F21: an ASYMMETRIC reconnect -- host sees left+rejoined, guest sees only re-joined --")
+	var established := await _drive_host_to_gen1(pair)
+	_check(established, "F21: setup -- the pair reaches a live link at generation 1")
+	if not established:
+		return
+
+	var host_ready_before := pair.host_ready.size()
+	var guest_ready_before := pair.guest_ready.size()
+
+	# HOST's signaling: a genuine left/rejoin pair, same explicit path as F7.
+	pair.host_signaling.announce_left(pair.guest_id)
+	pair.host_signaling.announce(pair.guest_id)
+
+	# GUEST's signaling: ONLY a re-join, deliberately NOT mirrored -- see the
+	# section header's honesty-risk note on what actually recovers this link.
+	pair.guest_signaling.announce(pair.host_id)
+
+	# The guest's recovery depends on the host's SDP_RETRANSMIT_INTERVAL_MS
+	# background retry actually firing (see the header) -- `step_dt_ms == 0`
+	# (the default) never advances the virtual clock and this wait times out.
+	var ready_again_predicate := func() -> bool:
+		return pair.host_ready.size() > host_ready_before and pair.guest_ready.size() > guest_ready_before
+	var both_ready_again := await _wait_until(
+		pair.stars(), ready_again_predicate,
+		"F21: both sides to reach peer_ready again once the guest's real engine-level disconnect is detected and the host's retransmit lands",
+		WAIT_TIMEOUT_MS, CouchStarTransport.SDP_RETRANSMIT_INTERVAL_MS
+	)
+	_check(
+		both_ready_again,
+		"F21 (finding 1, asymmetric case): the guest correctly FREEZES on the host's fresh offer while it still believes the old link is up, "
+			+ "then follows it once its engine-level link actually dies -- recovering within one retransmit rather than staying wedged forever"
+	)
+
+	var pre_frame_count := pair.host_received.size()
+	pair.guest_star.send_to_authority(CouchEnvelope.make(CouchEnvelope.KIND_INTENT, 1, 970, {}))
+	var frame_predicate := func() -> bool: return pair.host_received.size() > pre_frame_count
+	var frame_crossed := await _wait_until(
+		pair.stars(), frame_predicate, "F21: a frame to cross the re-established link",
+		WAIT_TIMEOUT_MS, CouchStarTransport.SDP_RETRANSMIT_INTERVAL_MS
+	)
+	_check(frame_crossed, "F21: a frame crosses the link after the asymmetric reconnect")
+
+
+# ============================================================================
+# F22 -- strict numeric field validation is observable (C7, finding 5). Each
+# case supplies a VALID value for every field EXCEPT the one under test (same
+# discipline as run_star_unit.gd's default-field checks), so a mutated
+# _wire_int call on any ONE field is independently observable and cannot hide
+# behind another field's defect. Reuses the MAIN pair -- orthogonal to
+# generation/incarnation state, same rationale as F14/F15/F16.
+# ============================================================================
+
+
+func _run_f22_field_validation(pair: _Pair) -> void:
+	print("-- F22: strict numeric field validation is observable through rejected_count --")
+	var valid_inc := pair.guest_star.incarnation_for(pair.host_id)
+
+	var cases := [
+		{
+			"label": "\"v\": \"1\" (a numeric STRING, not an int/float)",
+			"blob": {
+				"v": "1", "gen": 0, "kind": CouchStarTransport.SIGNAL_KIND_SDP,
+				"sdp_type": "offer", "sdp": "irrelevant-rejected-before-parsing", "inc": valid_inc,
+			},
+		},
+		{
+			"label": "gen: 1.9 (fractional -- used to alias generation 1 via a bare int())",
+			"blob": {
+				"v": CouchStarTransport.SIGNAL_PROTOCOL_VERSION, "gen": 1.9, "kind": CouchStarTransport.SIGNAL_KIND_SDP,
+				"sdp_type": "offer", "sdp": "irrelevant-rejected-before-parsing", "inc": valid_inc,
+			},
+		},
+		{
+			"label": "inc: 0 (never a valid wire incarnation)",
+			"blob": {
+				"v": CouchStarTransport.SIGNAL_PROTOCOL_VERSION, "gen": 0, "kind": CouchStarTransport.SIGNAL_KIND_SDP,
+				"sdp_type": "offer", "sdp": "irrelevant-rejected-before-parsing", "inc": 0,
+			},
+		},
+		{
+			"label": "index: 3.5 (fractional -- only reachable past a VALID v/gen/inc, since index is ICE-only)",
+			"blob": {
+				"v": CouchStarTransport.SIGNAL_PROTOCOL_VERSION, "gen": 0, "kind": CouchStarTransport.SIGNAL_KIND_ICE,
+				"mid": "0", "index": 3.5, "candidate": "candidate:1 1 UDP 1 0.0.0.0 9 typ host", "inc": valid_inc,
+			},
+		},
+	]
+
+	for c in cases:
+		var label: String = c["label"]
+		var blob: Dictionary = c["blob"]
+		# JSON round-trip so the malformed value arrives exactly as a real one
+		# would (see the file header's JSON-round-trip note) -- most load-bearing
+		# for the fractional cases, which are already floats in GDScript but
+		# should still cross the wire honestly rather than being assumed.
+		var wire: Variant = JSON.parse_string(JSON.stringify(blob))
+
+		var rejected_before := pair.guest_star.rejected_count
+		var inc_before := pair.guest_star.incarnation_for(pair.host_id)
+		var gen_before := pair.guest_star.generation_for(pair.host_id)
+		var ready_before := pair.guest_star.is_ready()
+
+		pair.guest_signaling.replay(wire, pair.host_id)
+		await _step(pair.stars())
+
+		_check(
+			pair.guest_star.rejected_count == rejected_before + 1,
+			"F22 (finding 5): %s is rejected -- rejected_count goes up by exactly 1" % label
+		)
+		_check(
+			pair.guest_star.incarnation_for(pair.host_id) == inc_before,
+			"F22 (finding 5): %s does not move incarnation_for" % label
+		)
+		_check(
+			pair.guest_star.generation_for(pair.host_id) == gen_before,
+			"F22 (finding 5): %s does not move generation_for" % label
+		)
+		_check(
+			pair.guest_star.is_ready() == ready_before,
+			"F22 (finding 5): %s does not disturb is_ready() (a proxy for _connected)" % label
+		)
+
+
+# ============================================================================
 # Orchestration
 # ============================================================================
 
@@ -1215,11 +1768,14 @@ func _run() -> void:
 	var p6b := _Pair.new("host6b", "g6b")
 	await _run_f6b_host_never_adopts(p6b, main)
 
+	var p6c := _Pair.new("host6c", "g6c")
+	await _run_f6c_host_never_follows_higher_incarnation(p6c)
+
 	var p7 := _Pair.new("host7", "g7")
 	await _run_f7_rejoin(p7)
 
 	var p8 := _Pair.new("host8", "g8")
-	await _run_f8_rejoin_barrier(p8)
+	await _run_f8_rejoin_convergence(p8)
 
 	var p9 := _Pair.new("host9", "g9")
 	await _run_f9_generation_budget(p9)
@@ -1234,6 +1790,13 @@ func _run() -> void:
 
 	await _run_f17_late_host_resolves()
 	await _run_f18_host_never_resolves()
+
+	await _run_f20_follow_budget_exhausts()
+
+	var p21 := _Pair.new("host21", "g21")
+	await _run_f21_asymmetric_reconnect(p21)
+
+	await _run_f22_field_validation(main)
 
 	print("")
 	print("total assertions: %d failed" % failures)
