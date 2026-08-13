@@ -41,10 +41,13 @@
 ##     claim (epoch A != epoch B), which the JSON itself cannot express since
 ##     the schema has no cross-step value-capture syntax.
 ##   - For every step EXCEPT recv/recv-frame -- the only actions through which
-##     a guest can silently adopt a new epoch from an accepted envelope
-##     without a session-started re-announcement, see couch_session.gd's
-##     _on_envelope_received comment ("a guest can learn a new epoch from ANY
-##     accepted kind, not only hello") -- if neither session-started nor
+##     a guest can adopt a new epoch from an accepted envelope, see
+##     couch_session.gd's _on_envelope_received comment ("a guest can learn a
+##     new epoch from ANY accepted kind, not only hello"); since the guest-side
+##     restart an adoption by an ALREADY-ACTIVE guest is no longer silent (it
+##     emits session-stopped, and a hello emits session-started in the same
+##     step), but an adoption by an INACTIVE guest still is, which is why the
+##     exemption stays -- if neither session-started nor
 ##     session-stopped fired during the step, CouchSession.epoch must be
 ##     unchanged. This is what actually proves
 ##     transport-gap-surfaces-without-changing-the-epoch's claim. Checked
