@@ -108,7 +108,10 @@ func _create_backend() -> CouchGamesBackend:
 	# Local relay: a real lobby between several local instances over a loopback
 	# WebSocket. Debug builds only, since a release build must never open a
 	# socket.
-	if not force_mock and OS.is_debug_build() \
+	# TCPServer is unavailable in Web exports. A standalone debug Web build is
+	# not inside the Couch parent bridge, so it must fall through to the mock
+	# instead of trying (and noisily failing) to open the native loopback lobby.
+	if not force_mock and not OS.has_feature("web") and OS.is_debug_build() \
 			and ProjectSettings.get_setting(_LOCAL_ENABLED_SETTING, true):
 		return _LocalBackend.new()
 	return _MockBackend.new()
