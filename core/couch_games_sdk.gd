@@ -22,6 +22,8 @@ const _MockBackend := preload("res://addons/couch-games-sdk/backends/mock_backen
 const _LocalBackend := preload("res://addons/couch-games-sdk/backends/local_backend.gd")
 const _Lobby := preload("res://addons/couch-games-sdk/lobby/couch_lobby.gd")
 const _WebRTC := preload("res://addons/couch-games-sdk/webrtc/couch_webrtc.gd")
+const _Experience := preload("res://addons/couch-games-sdk/experience/couch_experience.gd")
+const _GameFiles := preload("res://addons/couch-games-sdk/game/couch_game_files.gd")
 const _Overlay := preload("res://addons/couch-games-sdk/debug/debug_overlay.gd")
 const _PathProbe := preload("res://addons/couch-games-sdk/webrtc/path_probe.gd")
 
@@ -43,6 +45,12 @@ var lobby: CouchLobby
 
 ## WebRTC signaling: handshake relay, peer presence, ICE/TURN configuration.
 var webrtc: CouchWebRTC
+
+## The current experience's uploaded files, addressed by basename.
+var experience: CouchExperience
+
+## Files that shipped inside this build, addressed by their path relative to it.
+var game: CouchGameFiles
 
 ## The mock backend, for tests and debug tooling. Null when the real platform
 ## backend is active.
@@ -75,6 +83,14 @@ func _ready() -> void:
 	webrtc.name = "WebRTC"
 	webrtc.setup(_backend)
 	add_child(webrtc)
+	experience = _Experience.new()
+	experience.name = "Experience"
+	experience.setup(_backend)
+	add_child(experience)
+	game = _GameFiles.new()
+	game.name = "GameFiles"
+	game.setup(_backend)
+	add_child(game)
 	if _backend.is_mock():
 		print("CouchGames SDK: using mock backend (persistence at %s)" % _MockBackend.SAVE_DIR)
 		if _overlay_enabled():
@@ -95,7 +111,6 @@ func init() -> void:
 	var data := await get_experience_data()
 	if data.success and data.payload:
 		experience_data = data.payload
-		_backend.load_resource_packs(data.payload)
 	_initializing = false
 	_initialized = true
 
