@@ -18,6 +18,8 @@ const _SETTINGS := [
 	["couch_games/mock/local_username", "Player 1", TYPE_STRING, PROPERTY_HINT_NONE, ""],
 	["couch_games/mock/experience_name", "", TYPE_STRING, PROPERTY_HINT_NONE, ""],
 	["couch_games/mock/experience_url", "https://couch.games/mock", TYPE_STRING, PROPERTY_HINT_NONE, ""],
+	["couch_games/mock/experience_files_dir", "res://experience_files", TYPE_STRING, PROPERTY_HINT_DIR, ""],
+	["couch_games/mock/build_files_dir", "res://build/web", TYPE_STRING, PROPERTY_HINT_DIR, ""],
 	["couch_games/local/enabled", true, TYPE_BOOL, PROPERTY_HINT_NONE, ""],
 	["couch_games/local/port", 8974, TYPE_INT, PROPERTY_HINT_RANGE, "1024,65535,1"],
 	[_SLUG_SETTING, "", TYPE_STRING, PROPERTY_HINT_NONE, ""],

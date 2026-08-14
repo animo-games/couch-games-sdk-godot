@@ -46,8 +46,34 @@ func initialize() -> void:
 	pass
 
 
-func load_resource_packs(_experience_payload: Dictionary) -> void:
-	pass
+# --- Experience files ---
+#
+# Addressed by basename. `experience_get_file` returns
+# {success: bool, error: String, bytes: PackedByteArray} rather than raw bytes,
+# so CouchExperience can report WHY a file is missing instead of handing game
+# code an empty array with no cause.
+
+func experience_list_files() -> PackedStringArray:
+	return PackedStringArray()
+
+
+func experience_get_file(_file_name: String) -> Dictionary:
+	return {"success": false, "error": "Experience files are not available here"}
+
+
+# --- Build files ---
+#
+# Files that shipped inside the game's own build, addressed by their path
+# relative to it. `build_root()` is the only thing a backend has to supply:
+# CouchGameFiles joins the relative path onto it and picks a reader from the
+# SCHEME, so an http(s) root is downloaded and a local one is opened directly.
+#
+# The platform's build path carries a random suffix (games/<slug>/v73-1a2b3c4d),
+# so on web this can only come from the running frame's own URL — there is
+# nothing to reconstruct it from. Empty means build files are unavailable here.
+
+func build_root() -> String:
+	return ""
 
 
 # --- Classic SDK verbs ---
