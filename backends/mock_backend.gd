@@ -19,6 +19,17 @@ const _LATENCY_SETTING := "couch_games/mock/latency_ms"
 const _USERNAME_SETTING := "couch_games/mock/local_username"
 const _EXPERIENCE_NAME_SETTING := "couch_games/mock/experience_name"
 const _EXPERIENCE_URL_SETTING := "couch_games/mock/experience_url"
+const _EXPERIENCE_FILES_DIR_SETTING := "couch_games/mock/experience_files_dir"
+const _BUILD_FILES_DIR_SETTING := "couch_games/mock/build_files_dir"
+
+## Where the mock backend reads experience files from, so packs can be built and
+## played without uploading them.
+const DEFAULT_EXPERIENCE_FILES_DIR := "res://experience_files"
+
+## Where the mock backend reads build files from. res://build/web is the
+## directory tools/build_and_upload zips and uploads, so the file the game
+## loads in the editor is the same file that ships.
+const DEFAULT_BUILD_FILES_DIR := "res://build/web"
 
 ## Every tunnel delivery attempt (both directions), for the debug overlay log.
 ## entry = {direction: "in"|"out", event, data, sender_user_id, target,
@@ -210,6 +221,59 @@ func get_experience_date() -> Variant:
 	# NOTE: the web bridge returns a JS Date object here; a datetime string is
 	# the closest local equivalent. No game code consumes the value directly.
 	return Time.get_datetime_string_from_system()
+
+
+# --- Experience files ---
+#
+# Served from a directory in the project, so an experience can be built and
+# played in the editor before it is ever uploaded. Point
+# couch_games/mock/experience_files_dir at wherever your packs are built to.
+
+func experience_list_files() -> PackedStringArray:
+	var dir := _experience_files_dir()
+	if not DirAccess.dir_exists_absolute(dir):
+		return PackedStringArray()
+	var out := PackedStringArray()
+	for file_name in DirAccess.get_files_at(dir):
+		# The editor writes .import/.remap siblings next to real files; an
+		# exported build sees the .remap name instead. Neither is a payload.
+		if file_name.ends_with(".import") or file_name.ends_with(".remap"):
+			continue
+		out.append(file_name)
+	return out
+
+
+func experience_get_file(file_name: String) -> Dictionary:
+	await _tick()
+	if file_name.is_empty() or file_name != file_name.get_file():
+		# Basenames only, matching the platform. A path would escape the dir.
+		return {"success": false, "error": "Not a basename: '%s'" % file_name}
+	var path := _experience_files_dir().path_join(file_name)
+	if not FileAccess.file_exists(path):
+		return {"success": false, "error": "No file at %s" % path}
+	var bytes := FileAccess.get_file_as_bytes(path)
+	var open_error := FileAccess.get_open_error()
+	if open_error != OK:
+		return {"success": false, "error": error_string(open_error)}
+	return {"success": true, "bytes": bytes}
+
+
+func _experience_files_dir() -> String:
+	return str(ProjectSettings.get_setting(
+		_EXPERIENCE_FILES_DIR_SETTING, DEFAULT_EXPERIENCE_FILES_DIR))
+
+
+# --- Build files ---
+#
+# A local directory stands in for the served build. CouchGameFiles reads it with
+# FileAccess rather than HTTPRequest because the root has no http(s) scheme, so
+# CouchGames.game.load_pack() works in the editor exactly as it does on the
+# platform — which is the point, since on web a dev could have written the
+# HTTPRequest themselves.
+
+func build_root() -> String:
+	return str(ProjectSettings.get_setting(
+		_BUILD_FILES_DIR_SETTING, DEFAULT_BUILD_FILES_DIR))
 
 
 func get_game_metadata() -> Dictionary:

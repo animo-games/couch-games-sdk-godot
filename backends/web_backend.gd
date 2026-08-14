@@ -27,6 +27,9 @@ var _on_webrtc_closed_cb: JavaScriptObject
 var _on_webrtc_ice_servers_cb: JavaScriptObject
 var _on_play_mode_selected_cb: JavaScriptObject
 
+## Derived once from location.href; see build_root().
+var _build_root := ""
+
 
 ## True when this export can reach the platform SDK. False for web exports
 ## hosted outside the platform (itch.io, a local http server), in which case
@@ -43,8 +46,6 @@ func is_available() -> bool:
 
 
 func initialize() -> void:
-	# Note: This might be used by the platform to load external assets
-	ProjectSettings.load_resource_pack("/tmp/level.pck")
 	_window = JavaScriptBridge.get_interface("window")
 	if _window:
 		_sdk = _window.CouchGames
@@ -106,15 +107,96 @@ func _setup_play_mode_bridge() -> void:
 	_sdk.onPlayModeSelected(_on_play_mode_selected_cb)
 
 
-func load_resource_packs(experience_payload: Dictionary) -> void:
-	var files: Variant = experience_payload.get("files", [])
-	var names: Array = []
-	if files is Dictionary:
-		names = files.keys()
-	elif files is Array:
-		names = files
-	for file_name in names:
-		ProjectSettings.load_resource_pack("/tmp/" + str(file_name))
+# --- Experience files ---
+
+func experience_list_files() -> PackedStringArray:
+	var api := _get_experience_api()
+	var out := PackedStringArray()
+	if not api:
+		return out
+	var names = api.listFiles()
+	if not names:
+		return out
+	for i in range(int(names.length)):
+		out.append(str(names[i]))
+	return out
+
+
+func experience_get_file(file_name: String) -> Dictionary:
+	var api := _get_experience_api()
+	if not api:
+		return {"success": false, "error": "SDK not available"}
+	var settled: Dictionary = await _await_promise_settled(api.getFile(file_name))
+	if not settled.get("ok", false):
+		return {"success": false, "error": _js_error_text(settled.get("value"))}
+	var buffer = settled.get("value")
+	# The platform hands back a raw ArrayBuffer here, not the {success, payload}
+	# envelope every other verb uses.
+	if not JavaScriptBridge.is_js_buffer(buffer):
+		return {"success": false, "error": "Expected an ArrayBuffer for '%s'" % file_name}
+	return {
+		"success": true,
+		"bytes": JavaScriptBridge.js_buffer_to_packed_byte_array(buffer),
+	}
+
+
+func _get_experience_api() -> JavaScriptObject:
+	var sdk = _get_sdk()
+	if not sdk:
+		return null
+	# Older platform builds have no experience namespace. Losing files is better
+	# reported than crashed on.
+	return sdk.experience
+
+
+func _js_error_text(value: Variant) -> String:
+	if value == null:
+		return "Unknown error"
+	if value is JavaScriptObject:
+		var message = value.message
+		if message != null:
+			return str(message)
+	return str(value)
+
+
+# --- Build files ---
+
+## The directory this build was served from, taken from the running frame's own
+## URL. That is the only source: the platform mints each build's path with a
+## random suffix (games/<slug>/v73-1a2b3c4d) precisely so it cannot be guessed,
+## and the SDK has no other handle on it — get_url() returns the EXPERIENCE url,
+## which is a different thing with a rotating id inside it.
+func build_root() -> String:
+	if not _build_root.is_empty():
+		return _build_root
+	if _window == null:
+		# build_root() is reachable before initialize() (nothing awaits init to
+		# call it), so don't depend on that having run.
+		_window = JavaScriptBridge.get_interface("window")
+	if _window == null:
+		return ""
+
+	var href := str(_window.location.href)
+	# The play page appends ?cgcap=hook in one capture mode, and a fragment can
+	# arrive from anywhere. Neither is part of the path. Fragment first: it sits
+	# after the query, and may itself contain a '?'.
+	var fragment := href.find("#")
+	if fragment != -1:
+		href = href.substr(0, fragment)
+	var query := href.find("?")
+	if query != -1:
+		href = href.substr(0, query)
+
+	# Not get_base_dir(): this is a URL, and cutting at the last slash is the
+	# whole rule. The guard keeps a pathless URL ("https://host") from being
+	# truncated into its own scheme.
+	var scheme_end := href.find("://")
+	var last_slash := href.rfind("/")
+	if scheme_end == -1 or last_slash <= scheme_end + 2:
+		push_warning("CouchGames SDK: cannot derive a build root from '%s'" % href)
+		return ""
+	_build_root = href.substr(0, last_slash)
+	return _build_root
 
 
 func _get_sdk() -> JavaScriptObject:
@@ -402,6 +484,36 @@ func _await_promise(promise: JavaScriptObject) -> Variant:
 		await get_tree().process_frame
 
 	return result.data
+
+
+## Like _await_promise, but reports WHICH way the promise settled. The classic
+## verbs resolve to a {success, error} envelope so they can ignore the
+## difference; `experience.getFile` resolves to a bare ArrayBuffer and signals
+## failure by rejecting, so for it the difference is the whole message.
+## Returns {ok: bool, value: Variant}.
+func _await_promise_settled(promise: JavaScriptObject) -> Dictionary:
+	if not promise:
+		return {"ok": false, "value": "No promise returned"}
+
+	var result = {"completed": false, "ok": false, "value": null}
+
+	var on_success = JavaScriptBridge.create_callback(func(args):
+		result.value = args[0]
+		result.ok = true
+		result.completed = true
+	)
+	var on_error = JavaScriptBridge.create_callback(func(args):
+		result.value = args[0]
+		result.ok = false
+		result.completed = true
+	)
+
+	promise.then(on_success).catch(on_error)
+
+	while not result.completed:
+		await get_tree().process_frame
+
+	return {"ok": result.ok, "value": result.value}
 
 
 # --- Data conversion helpers ---
