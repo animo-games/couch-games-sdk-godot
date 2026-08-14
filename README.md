@@ -123,6 +123,13 @@ Off-platform this reads from `couch_games/mock/build_files_dir` (default
 `res://build/web`) with `FileAccess` instead of HTTP — the same directory that
 gets zipped, so the file you load in the editor is the file that ships.
 
+**Build the pack with the same Godot version you export the game with.** The
+engine refuses a pack written in a newer pack format than it understands, and
+all `load_pack()` can tell you is `'packs/rooms.pck' is not a loadable resource
+pack`. The real cause is the engine error just above it in the log:
+`Pack version unsupported: <n>`. Exporting the game with an older editor than
+the one that produced the pack is the easy way to do this to yourself.
+
 ## Deploying a build
 
 ```
