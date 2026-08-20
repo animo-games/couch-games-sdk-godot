@@ -35,6 +35,206 @@ tools/      build_and_upload and its per-platform launchers
 export/     HTML shell for the Web export preset
 ```
 
+## Lobby events
+
+`CouchGames.lobby` is the session: the roster of everyone in it, and a tunnel
+for sending named events between them. It is push-driven — the platform pushes
+roster changes and events, the SDK turns them into signals — so there is nothing
+to poll, no socket to open and no room to join. Connect and you are in.
+
+```gdscript
+func _ready() -> void:
+    await CouchGames.init()
+    CouchGames.lobby.event_received.connect(_on_lobby_event)
+    CouchGames.lobby.players_changed.connect(_on_players_changed)
+    CouchGames.lobby.refresh_players()
+```
+
+`refresh_players()` is the one piece of bookkeeping. Signals only fire on
+*change*, so a scene that connects after the roster already arrived would sit
+empty until somebody next joined; calling it once after `init()` replays the
+current roster through the same handler. `lobby.is_available` tells you whether
+there is a session at all — false in a single-player context, always true under
+the mock.
+
+### Sending
+
+```gdscript
+CouchGames.lobby.send_event("player-ready", {"slot": 1})                    # everyone else
+CouchGames.lobby.send_event("match-start", {"seed": 42}, {"role": "guest"}) # guests only
+CouchGames.lobby.send_event("deal", hand, {"user_id": player.user_id})      # one player
+```
+
+Without a target the event reaches **every other client** in the session.
+`{"user_id": ...}` and `{"role": "host"|"guest"}` narrow it, and the two AND
+together when you pass both.
+
+**You never receive your own event back.** That is server semantics, not a
+quirk of the SDK, and it is the one thing to design around: apply the local
+effect at send time rather than waiting for the event to come home. The example
+below does this in `_mark_ready()`.
+
+`data` must be JSON-serializable — dictionaries, arrays, strings, numbers,
+bools, null. `Vector2` and friends are not; pack them yourself. Payloads go
+through a JSON round trip on the way, which means **numbers arrive as floats**:
+write `int(data["slot"])`, never `data["slot"] as int` on a value you are about
+to use as an index.
+
+### Receiving
+
+```gdscript
+func _on_lobby_event(event: String, data: Variant, sender_user_id: String) -> void:
+    match event:
+        "player-ready":
+            _mark_ready(sender_user_id)
+        "match-start":
+            _start_match(int(data.get("seed", 0)))
+```
+
+Event names are yours to choose, with one reservation: `couch-net` belongs to
+`CouchSession`, which frames its own netcode over the same tunnel. If you are
+sending state at frame rate, use that instead of hand-rolling it on top of
+`send_event` — the tunnel is a relay through the platform, fine for lobby
+traffic and turn-based moves, not a rollback transport.
+
+### The roster
+
+`players_changed(players)` carries the full new roster after any membership,
+status or slot change — ping churn deliberately doesn't fire it, so you can
+connect a UI rebuild to it without throttling. `player_joined(player)` and
+`player_left(player)` fire first, so a `players_changed` handler always sees the
+final roster.
+
+```gdscript
+var everyone := CouchGames.lobby.get_players()   # Array[CouchLobbyPlayer]
+var host     := CouchGames.lobby.get_host()
+var guests   := CouchGames.lobby.get_guests()
+var me       := CouchGames.lobby.get_me()        # null when no lobby is active
+if CouchGames.lobby.is_host():
+    ...
+```
+
+Each `CouchLobbyPlayer` has `user_id`, `username`, `role` (`"host"`/`"guest"`),
+`is_host`, `status` (`"lobby"`, `"playing"`, `"browsing"`, `"disconnected"`),
+`experience_id`, `controller_slot` (`-1` when unassigned) and `ping` (`-1` when
+unknown).
+
+### Example: a ready-up screen
+
+Everyone marks themselves ready; the host notices the roster is unanimous and
+broadcasts the start, seed included, so every client generates the same level.
+
+```gdscript
+extends Control
+
+const READY_EVENT := "player-ready"
+const START_EVENT := "match-start"
+
+var _ready_ids := {}
+
+
+func _ready() -> void:
+    await CouchGames.init()
+    %ReadyButton.pressed.connect(_on_ready_pressed)
+
+    var lobby := CouchGames.lobby
+    if not lobby.is_available():
+        _start_match(randi())  # no session: nobody to wait for
+        return
+    lobby.event_received.connect(_on_lobby_event)
+    lobby.players_changed.connect(_on_players_changed)
+    lobby.player_left.connect(_on_player_left)
+    lobby.refresh_players()
+
+
+func _on_ready_pressed() -> void:
+    # Our own event never comes back, so mark ourselves here.
+    _mark_ready(CouchGames.lobby.get_me().user_id)
+    CouchGames.lobby.send_event(READY_EVENT)
+
+
+func _on_lobby_event(event: String, data: Variant, sender_user_id: String) -> void:
+    match event:
+        READY_EVENT:
+            _mark_ready(sender_user_id)
+        START_EVENT:
+            _start_match(int(data.get("seed", 0)))
+
+
+func _mark_ready(user_id: String) -> void:
+    _ready_ids[user_id] = true
+    _refresh_roster()
+    # One authority decides when the match starts, and it is always the host.
+    if CouchGames.lobby.is_host() and _everyone_ready():
+        var match_seed := randi()
+        CouchGames.lobby.send_event(START_EVENT, {"seed": match_seed})
+        _start_match(match_seed)
+
+
+func _everyone_ready() -> bool:
+    var players := CouchGames.lobby.get_players()
+    if players.is_empty():
+        return false
+    for player in players:
+        if not _ready_ids.has(player.user_id):
+            return false
+    return true
+
+
+func _on_player_left(player: CouchLobbyPlayer) -> void:
+    # A player who leaves half-readied would otherwise hold the match forever.
+    _ready_ids.erase(player.user_id)
+
+
+func _on_players_changed(_players: Array) -> void:
+    _refresh_roster()
+
+
+func _refresh_roster() -> void:
+    %RosterList.clear()
+    for player in CouchGames.lobby.get_players():
+        var mark := "✓" if _ready_ids.has(player.user_id) else "…"
+        %RosterList.add_item("%s %s%s" % [mark, player.username,
+            " (host)" if player.is_host else ""])
+
+
+func _start_match(match_seed: int) -> void:
+    seed(match_seed)
+    get_tree().change_scene_to_file("res://match.tscn")
+```
+
+Two habits are worth copying out of that. The host is the only one who decides
+the match starts, because every client running `_everyone_ready()` would
+otherwise broadcast its own start the moment the last ready arrived. And the
+ready set is keyed by `user_id` and pruned in `player_left`, because the roster
+is the source of truth about who is present — the events only say what those
+people did.
+
+### Trying it without the platform
+
+Off-platform the lobby is served by the mock, so all of the above runs in the
+editor. F10 opens the debug overlay: add fake guests, send an event **as** one
+of them with the same targeting filters the server applies, and watch the event
+log, which shows each event's direction and who it was delivered to. For
+automated tests the overlay's buttons are just calls you can make yourself:
+
+```gdscript
+var guest_id := CouchGames.mock.add_guest("Tester")
+CouchGames.mock.simulate_event("player-ready", {}, guest_id)
+CouchGames.mock.set_player_status(guest_id, "playing")
+CouchGames.mock.remove_player(guest_id)
+```
+
+`CouchGames.mock` is null on the real platform, and
+`couch_games/mock/latency_ms` puts a delay on delivery if you want to see what
+your UI does while an event is in flight.
+
+Fake guests only go so far, though — they have no game running behind them. Run
+several real instances instead (Debug > Run Multiple Instances) and they form an
+actual lobby over a loopback socket, events and all, with `--couch-role=host` or
+`--couch-role=guest` pinning which is which. Only the host instance can change
+the roster or simulate events; the others will warn if you try.
+
 ## Experience files
 
 An experience is a dated content drop — a level pack, a room, a puzzle set —
