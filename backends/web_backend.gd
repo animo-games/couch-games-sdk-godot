@@ -129,15 +129,51 @@ func experience_get_file(file_name: String) -> Dictionary:
 	var settled: Dictionary = await _await_promise_settled(api.getFile(file_name))
 	if not settled.get("ok", false):
 		return {"success": false, "error": _js_error_text(settled.get("value"))}
-	var buffer = settled.get("value")
 	# The platform hands back a raw ArrayBuffer here, not the {success, payload}
-	# envelope every other verb uses.
-	if not JavaScriptBridge.is_js_buffer(buffer):
+	# envelope every other verb uses -- and one built by the PARENT realm, so it
+	# has to be adopted into this one before the engine will read it.
+	var buffer = _adopt_js_buffer(settled.get("value"))
+	if buffer == null:
 		return {"success": false, "error": "Expected an ArrayBuffer for '%s'" % file_name}
 	return {
 		"success": true,
 		"bytes": JavaScriptBridge.js_buffer_to_packed_byte_array(buffer),
 	}
+
+
+## Re-views a JS buffer through THIS realm's Uint8Array. Null for anything that
+## is not buffer-like.
+##
+## Both `is_js_buffer()` and `js_buffer_to_packed_byte_array()` brand-check with
+## `obj instanceof ArrayBuffer`, which is bound to the realm whose constructor
+## built the object. The platform hands this frame the PARENT page's SDK by
+## reference -- `window.CouchGames` IS the parent's object -- so
+## `experience.getFile` resolves with a parent-realm ArrayBuffer. The check
+## reports false for it, and the transfer, which repeats the same check, then
+## writes no bytes. Symptom: every file fails as "Expected an ArrayBuffer"
+## while the network tab shows it downloaded perfectly.
+##
+## create_object() runs `new window.Uint8Array(value)` in THIS realm, which a
+## typed-array constructor accepts from any realm. Going through the
+## constructor rather than an eval'd helper keeps this working under a page CSP
+## that forbids eval, and leaves nothing behind on window.
+func _adopt_js_buffer(value: Variant) -> Variant:
+	if not value is JavaScriptObject:
+		return null
+	# A same-realm buffer already passes; this keeps the whole thing a no-op
+	# wherever the realm split does not apply.
+	if JavaScriptBridge.is_js_buffer(value):
+		return value
+	# Duck-typed, because every brand check reachable from here is the same
+	# realm-bound one that caused the problem. Without it a non-buffer would
+	# construct an empty Uint8Array and be reported as a successful zero-byte
+	# read rather than as the error it is.
+	if value.byteLength == null:
+		return null
+	var adopted = JavaScriptBridge.create_object("Uint8Array", value)
+	if not JavaScriptBridge.is_js_buffer(adopted):
+		return null
+	return adopted
 
 
 func _get_experience_api() -> JavaScriptObject:
