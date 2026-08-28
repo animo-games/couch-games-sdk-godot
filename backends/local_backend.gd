@@ -178,8 +178,11 @@ func _process_guest() -> void:
 			push_warning("CouchGames SDK: local lobby host disconnected")
 			_guest_ws = null
 			_seed_local_player()  # keep running with a roster of just ourselves
-			if webrtc_joined:
+			var signaling_was_active := _webrtc_connecting or webrtc_joined
+			if signaling_was_active:
 				# The relay is gone, so the signaling room is too.
+				_webrtc_lifecycle += 1
+				_webrtc_connecting = false
 				webrtc_joined = false
 				webrtc_signaling_closed.emit(WEBRTC_LOCAL_ROOM)
 
@@ -360,7 +363,13 @@ func webrtc_connect_signaling(_room_id: String) -> Dictionary:
 	if not _server and not (_guest_ws and _guest_ws.get_ready_state() == WebSocketPeer.STATE_OPEN):
 		# Solo instance: behave like the offline mock.
 		return await super.webrtc_connect_signaling(_room_id)
+	_webrtc_lifecycle += 1
+	var token := _webrtc_lifecycle
+	_webrtc_connecting = true
 	await _tick()
+	if token != _webrtc_lifecycle:
+		return {"success": false, "error": "signaling connect canceled"}
+	_webrtc_connecting = false
 	webrtc_joined = true
 	if _server:
 		var existing: Array = _webrtc_members.keys()
@@ -405,12 +414,18 @@ func webrtc_send_signal(target_peer_id: String, data: Variant) -> void:
 
 
 func webrtc_disconnect() -> void:
-	if not webrtc_joined:
+	if not _server and not (_guest_ws and _guest_ws.get_ready_state() == WebSocketPeer.STATE_OPEN):
+		super.webrtc_disconnect()
 		return
-	if _server:
+	var was_active := _webrtc_connecting or webrtc_joined
+	_webrtc_lifecycle += 1
+	_webrtc_connecting = false
+	if not was_active:
+		return
+	if webrtc_joined and _server:
 		_webrtc_members.erase(local_user_id)
 		_webrtc_broadcast({"type": "webrtc-peer-left", "peerId": local_user_id}, local_user_id)
-	elif _guest_ws and _guest_ws.get_ready_state() == WebSocketPeer.STATE_OPEN:
+	elif webrtc_joined and _guest_ws and _guest_ws.get_ready_state() == WebSocketPeer.STATE_OPEN:
 		_send(_guest_ws, {"type": "webrtc-leave"})
 	webrtc_joined = false
 	webrtc_signaling_closed.emit(WEBRTC_LOCAL_ROOM)

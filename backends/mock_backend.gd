@@ -299,6 +299,9 @@ const WEBRTC_MOCK_ROOM := "mock-room"
 
 ## True after webrtc_connect_signaling, until webrtc_disconnect.
 var webrtc_joined := false
+## Invalidates post-_tick connect work when disconnect wins the race.
+var _webrtc_lifecycle := 0
+var _webrtc_connecting := false
 
 
 func webrtc_is_available() -> bool:
@@ -306,7 +309,13 @@ func webrtc_is_available() -> bool:
 
 
 func webrtc_connect_signaling(_room_id: String) -> Dictionary:
+	_webrtc_lifecycle += 1
+	var token := _webrtc_lifecycle
+	_webrtc_connecting = true
 	await _tick()
+	if token != _webrtc_lifecycle:
+		return {"success": false, "error": "signaling connect canceled"}
+	_webrtc_connecting = false
 	webrtc_joined = true
 	# Overlay-faked guests are roster-only and can't do WebRTC, so the mock room
 	# never reports other peers.
@@ -324,8 +333,11 @@ func webrtc_send_signal(target_peer_id: String, data: Variant) -> void:
 
 
 func webrtc_disconnect() -> void:
-	if webrtc_joined:
-		webrtc_joined = false
+	var was_active := _webrtc_connecting or webrtc_joined
+	_webrtc_lifecycle += 1
+	_webrtc_connecting = false
+	webrtc_joined = false
+	if was_active:
 		webrtc_signaling_closed.emit(WEBRTC_MOCK_ROOM)
 
 
