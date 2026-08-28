@@ -482,3 +482,24 @@ The plugin registers these under Project Settings (Advanced), all optional:
 
 `--couch-mock` as a user arg forces the mock for a single run; `--couch-role=host`
 or `--couch-role=guest` pins an instance's role in the loopback lobby.
+
+## WebRTC signaling lifecycle
+
+`CouchGames.webrtc` owns signaling for the SDK. Calls to
+`connect_signaling()` are serialized because each backend exposes one physical
+signaling socket. A newer connect supersedes an older pending request, while
+`disconnect_signaling()` cancels the desired lifecycle; if a canceled backend
+promise later succeeds, the SDK closes that stale socket before allowing a
+replacement to start. Backends implementing the SDK contract must make
+`webrtc_disconnect()` invalidate pending post-await work and emit
+`webrtc_signaling_closed` when either a pending or live physical connection is
+gone.
+
+Unexpected socket closure reconnects automatically by default without touching
+established WebRTC peer connections. `signaling_reconnecting` and
+`signaling_reconnected` expose that lifecycle; an explicit disconnect stops the
+loop. `request_ice_servers()` and successful automatic reconnects update
+`CouchGames.webrtc.ice_servers` and emit `ice_servers_updated`. The bundled
+`CouchRollbackSignalingAdapter` forwards those values through the optional,
+SDK-neutral `get_connection_config()` / `connection_config_updated` transport
+capability so future peer rebuilds use current TURN credentials.

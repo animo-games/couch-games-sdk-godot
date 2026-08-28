@@ -31,6 +31,9 @@ signal sig_received(peer_id: String, data: Variant)
 signal peer_joined(peer_id: String)
 ## A peer left the signaling room.
 signal peer_left(peer_id: String)
+## Updated WebRTCPeerConnection.initialize() configuration. Kept generic so the
+## transport addon never needs to know which SDK supplied it.
+signal connection_config_updated(config: Dictionary)
 
 var _webrtc: CouchWebRTC
 var _explicit_room_id := ""
@@ -44,6 +47,7 @@ func _init(webrtc: CouchWebRTC, explicit_room_id: String = "") -> void:
 	_webrtc.peer_exists.connect(_on_peer_present)
 	_webrtc.peer_joined.connect(_on_peer_present)
 	_webrtc.peer_left.connect(_on_peer_left)
+	_webrtc.ice_servers_updated.connect(_on_ice_servers_updated)
 
 
 ## Join the signaling room. Async, so await the result. Returns
@@ -63,6 +67,12 @@ func send(target_peer_id: String, data: Variant) -> void:
 ## Leave the signaling room. Existing WebRTC peer connections are unaffected.
 func close() -> void:
 	_webrtc.disconnect_signaling()
+
+
+## Optional adapter capability consumed by WebRTC transports that rebuild peer
+## connections after the initial connect_room() result.
+func get_connection_config() -> Dictionary:
+	return {"iceServers": _webrtc.ice_servers.duplicate(true)}
 
 
 ## The selected candidate pair for one peer, or {} when unknown (no local
@@ -89,6 +99,10 @@ func _on_peer_present(peer_id: String) -> void:
 func _on_peer_left(peer_id: String) -> void:
 	_peer_ufrags.erase(peer_id)
 	peer_left.emit(peer_id)
+
+
+func _on_ice_servers_updated(servers: Array) -> void:
+	connection_config_updated.emit({"iceServers": servers.duplicate(true)})
 
 
 # The rollback transport relays each peer's LOCAL session description through

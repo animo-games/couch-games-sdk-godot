@@ -188,6 +188,11 @@ func webrtc_is_available() -> bool:
 ## Join the session's signaling room. `room_id` is normally "", which lets the
 ## platform default to the active lobby's room. Returns the platform's shape:
 ## {success, message?, payload?: {peerId, roomId, iceServers}}.
+## CouchWebRTC serializes calls because the platform owns one global signaling
+## socket. Implementations must make webrtc_disconnect() invalidate a connect
+## suspended inside this function, so post-await code cannot rejoin after a
+## cancellation. A disconnect of either a pending or live connection must emit
+## webrtc_signaling_closed once its physical socket/membership is gone.
 func webrtc_connect_signaling(_room_id: String) -> Dictionary:
 	return _not_implemented()
 

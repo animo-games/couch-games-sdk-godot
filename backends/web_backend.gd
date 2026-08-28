@@ -26,6 +26,12 @@ var _on_webrtc_peer_exists_cb: JavaScriptObject
 var _on_webrtc_closed_cb: JavaScriptObject
 var _on_webrtc_ice_servers_cb: JavaScriptObject
 var _on_play_mode_selected_cb: JavaScriptObject
+## Private cancellation generation for the awaited connect promise. The SDK
+## coordinator still owns cross-request serialization; this prevents backend
+## post-await state from reviving a request canceled by webrtc_disconnect().
+var _webrtc_lifecycle := 0
+var _webrtc_connecting := false
+var _webrtc_joined := false
 
 ## Derived once from location.href; see build_root().
 var _build_root := ""
@@ -453,13 +459,26 @@ func webrtc_is_available() -> bool:
 func webrtc_connect_signaling(room_id: String) -> Dictionary:
 	if _webrtc == null:
 		return {"success": false, "error": "WebRTC bridge not available"}
+	_webrtc_lifecycle += 1
+	var token := _webrtc_lifecycle
+	_webrtc_connecting = true
 	var promise: JavaScriptObject
 	if room_id.is_empty():
 		# No argument: the platform defaults to the active lobby's room.
 		promise = _webrtc.connectSignaling()
 	else:
 		promise = _webrtc.connectSignaling(room_id)
-	return _js_to_dict(await _await_promise(promise))
+	var result := _js_to_dict(await _await_promise(promise))
+	if token != _webrtc_lifecycle:
+		# Return the physical result unchanged. CouchWebRTC still owns this old
+		# attempt's serialized slot and will dispose a late successful socket before
+		# allowing a replacement to start. Disconnecting here too could consume the
+		# only close callback and make the coordinator wait for an acknowledgement
+		# that has already happened.
+		return result
+	_webrtc_connecting = false
+	_webrtc_joined = result.get("success", false)
+	return result
 
 
 func webrtc_send_signal(target_peer_id: String, data: Variant) -> void:
@@ -477,6 +496,9 @@ func webrtc_request_ice_servers() -> void:
 func webrtc_disconnect() -> void:
 	# disconnectSignaling, not disconnect: a JS method named "disconnect" is
 	# unreachable through JavaScriptObject (shadowed by Object.disconnect).
+	_webrtc_lifecycle += 1
+	_webrtc_connecting = false
+	_webrtc_joined = false
 	if _webrtc != null:
 		_webrtc.disconnectSignaling()
 
@@ -507,6 +529,8 @@ func _on_webrtc_peer_exists(args: Array) -> void:
 
 
 func _on_webrtc_closed(args: Array) -> void:
+	_webrtc_connecting = false
+	_webrtc_joined = false
 	var room := str(args[0]) if not args.is_empty() else ""
 	webrtc_signaling_closed.emit(room)
 
