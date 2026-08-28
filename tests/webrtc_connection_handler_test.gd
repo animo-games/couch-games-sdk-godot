@@ -10,10 +10,12 @@ class StubSource:
 	signal peer_joined(peer_id: String)
 	signal peer_left(peer_id: String)
 	signal connection_config_updated(config: Dictionary)
+	signal present_peers_updated(peer_ids: Array)
 
 	var sent: Array[Dictionary] = []
 	var closed := false
 	var present_peers: Array[String] = []
+	var snapshot_requests := 0
 
 	func connect_room() -> Dictionary:
 		return {
@@ -35,6 +37,9 @@ class StubSource:
 	func get_present_peers() -> Array[String]:
 		return present_peers.duplicate()
 
+	func request_present_peers() -> void:
+		snapshot_requests += 1
+
 
 class RecoveryConnection extends WebRTCMultiplayerConnection:
 	var rebuilt: Array[Dictionary] = []
@@ -47,6 +52,24 @@ class RecoveryConnection extends WebRTCMultiplayerConnection:
 			"config": _connection_config.duplicate(true),
 		})
 		return true
+
+
+## A signaling source from before either presence capability existed.
+class LegacySource:
+	extends RefCounted
+
+	signal sig_received(peer_id: String, data: Variant)
+	signal peer_joined(peer_id: String)
+	signal peer_left(peer_id: String)
+
+	func connect_room() -> Dictionary:
+		return {"success": true, "peer_id": "local", "room_id": "room", "ice_servers": []}
+
+	func send(_peer_id: String, _data: Variant) -> void:
+		pass
+
+	func close() -> void:
+		pass
 
 
 class DiscoveryConnection extends WebRTCMultiplayerConnection:
@@ -70,6 +93,7 @@ func _run() -> void:
 	_check_refreshed_config_reaches_recovery()
 	_check_safe_multiplayer_detach()
 	_check_cached_peer_discovery()
+	_check_authoritative_peer_snapshot()
 	_check_single_couch_handler()
 	_check_compatibility_alias()
 	await process_frame
@@ -281,6 +305,70 @@ func _check_cached_peer_discovery() -> void:
 		"a departure before startup completes must remove cached pending presence")
 	connection.free()
 	pending.free()
+
+
+func _check_authoritative_peer_snapshot() -> void:
+	var source := StubSource.new()
+	source.present_peers.assign(["peer-cached"])
+	var connection := DiscoveryConnection.new()
+	connection.local_peer_id = "local"
+	connection.local_net_id = WebRTCMultiplayerConnection.derive_net_id("local")
+	connection._peers_ready = true
+	connection._attach_source_signals(source)
+	connection._seed_present_peers(source)
+	_expect(source.snapshot_requests, 1,
+		"startup must ask the source for an authoritative room snapshot")
+	_expect(connection.created, ["peer-cached"],
+		"the cached view still seeds immediately, without waiting for a reply")
+
+	# The snapshot names a peer the cache never heard announced. That is the
+	# whole point: it must become a connection.
+	source.present_peers_updated.emit(["peer-cached", "peer-missed", "local", ""])
+	_expect(connection.created, ["peer-cached", "peer-missed"],
+		"a snapshot must create connections for peers the cached view missed")
+	_expect(connection._known_peers.has("local"), false,
+		"a snapshot must never discover the local peer")
+
+	# An established peer absent from a later snapshot is deliberately kept:
+	# tearing down a live connection on a possibly-raced snapshot costs more
+	# than carrying a stale peer until peer_left arrives.
+	source.present_peers_updated.emit([])
+	_expect(connection._known_peers, ["peer-cached", "peer-missed"],
+		"a snapshot must not tear down established connections")
+
+	# Before startup completes there is nothing established to protect, and a
+	# pending peer the room no longer lists has nothing else to retract it.
+	var pending := DiscoveryConnection.new()
+	pending._peers_ready = false
+	pending._attach_source_signals(source)
+	pending._discover_peer("peer-gone")
+	pending._discover_peer("peer-still-here")
+	_expect(pending._pending_peer_ids, ["peer-gone", "peer-still-here"],
+		"pre-startup discovery queues peers as pending")
+	source.present_peers_updated.emit(["peer-still-here"])
+	_expect(pending._pending_peer_ids, ["peer-still-here"],
+		"a snapshot must drop pending peers the room no longer lists")
+	_expect(pending.created.is_empty(), true,
+		"a snapshot must not create connections before startup completes")
+
+	connection._detach_source_signals(source)
+	pending._detach_source_signals(source)
+	connection.free()
+	pending.free()
+
+	# A source without the capability must still start: the request is skipped
+	# and the cached view stands, which is exactly the pre-snapshot behavior.
+	var legacy := LegacySource.new()
+	var legacy_connection := DiscoveryConnection.new()
+	legacy_connection.local_peer_id = "local"
+	legacy_connection.local_net_id = WebRTCMultiplayerConnection.derive_net_id("local")
+	legacy_connection._peers_ready = true
+	legacy_connection._attach_source_signals(legacy)
+	legacy_connection._seed_present_peers(legacy)
+	_expect(legacy_connection.created.is_empty(), true,
+		"a source without either presence capability must be tolerated")
+	legacy_connection._detach_source_signals(legacy)
+	legacy_connection.free()
 
 
 func _check_single_couch_handler() -> void:

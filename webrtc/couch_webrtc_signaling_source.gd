@@ -7,6 +7,9 @@ signal sig_received(peer_id: String, data: Variant)
 signal peer_joined(peer_id: String)
 signal peer_left(peer_id: String)
 signal connection_config_updated(config: Dictionary)
+## Optional capability: an authoritative room snapshot, in reply to
+## request_present_peers().
+signal present_peers_updated(peer_ids: Array)
 
 var _webrtc: CouchWebRTC
 var _explicit_room_id := ""
@@ -21,6 +24,7 @@ func _init(webrtc: CouchWebRTC, explicit_room_id: String = "") -> void:
 	_webrtc.peer_joined.connect(_on_peer_present)
 	_webrtc.peer_left.connect(_on_peer_left)
 	_webrtc.ice_servers_updated.connect(_on_ice_servers_updated)
+	_webrtc.peers_updated.connect(_on_peers_updated)
 
 
 func connect_room() -> Dictionary:
@@ -50,6 +54,13 @@ func get_present_peers() -> Array[String]:
 	return _webrtc.get_present_peers()
 
 
+## Optional signaling-source capability. Asks the room who is present; the
+## answer arrives on present_peers_updated, or never, if the platform build
+## predates the snapshot. Callers must not block on it.
+func request_present_peers() -> void:
+	_webrtc.request_peers()
+
+
 func get_path_for_peer(peer_id: String) -> Dictionary:
 	var ufrag := str(_peer_ufrags.get(peer_id, ""))
 	if ufrag.is_empty():
@@ -75,6 +86,10 @@ func _on_peer_left(peer_id: String) -> void:
 
 func _on_ice_servers_updated(servers: Array) -> void:
 	connection_config_updated.emit({"iceServers": servers.duplicate(true)})
+
+
+func _on_peers_updated(peer_ids: Array) -> void:
+	present_peers_updated.emit(peer_ids)
 
 
 func _note_local_ufrag(peer_id: String, data: Variant) -> void:
