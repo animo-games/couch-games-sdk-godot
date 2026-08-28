@@ -83,6 +83,10 @@ var _backend_close_expected := false
 var _backend_close_deadline_msec := 0
 var _backend_close_seq := 0
 var _backend_blocked_error := ""
+## Peers currently present on the live signaling socket. Presence events can
+## arrive before a connection handler is created (the menu flow joins first),
+## so the handler must be able to take a current snapshot later.
+var _present_peers: Dictionary = {}
 ## The Couch backend owns one physical signaling socket. High-level connection
 ## handlers therefore claim exclusive ownership while active.
 var _connection_handler_ref: WeakRef
@@ -110,9 +114,9 @@ static func room_id_for_code(code: String) -> String:
 func setup(backend: CouchGamesBackend) -> void:
 	_backend = backend
 	_backend.webrtc_signal_received.connect(signal_received.emit)
-	_backend.webrtc_peer_joined.connect(peer_joined.emit)
-	_backend.webrtc_peer_left.connect(peer_left.emit)
-	_backend.webrtc_peer_exists.connect(peer_exists.emit)
+	_backend.webrtc_peer_joined.connect(_on_backend_peer_joined)
+	_backend.webrtc_peer_left.connect(_on_backend_peer_left)
+	_backend.webrtc_peer_exists.connect(_on_backend_peer_exists)
 	_backend.webrtc_signaling_closed.connect(_on_signaling_closed)
 	_backend.webrtc_ice_servers_updated.connect(_on_ice_servers_updated)
 
@@ -133,6 +137,38 @@ func release_connection_handler(handler: Object) -> void:
 	)
 	if current == handler:
 		_connection_handler_ref = null
+
+
+## Return the live connection state when `requested_room_id` names the same
+## room that is already open. An empty result means the caller must perform a
+## normal connect. This is intentionally separate from connect_signaling(): an
+## explicit low-level connect still replaces the physical backend socket.
+func adopt_signaling(requested_room_id: String = "") -> Dictionary:
+	if not is_signaling_connected or not _wants_signaling \
+			or not _backend_connection_open or _backend_closing:
+		return {}
+	if requested_room_id != _desired_room_id and requested_room_id != room_id:
+		return {}
+	return {
+		"success": true,
+		"peer_id": local_peer_id,
+		"room_id": room_id,
+		"ice_servers": ice_servers.duplicate(true),
+	}
+
+
+## Snapshot peers currently present in the live signaling room. The local peer
+## is never included, even if a backend unexpectedly echoes its own presence.
+func get_present_peers() -> Array[String]:
+	var peers: Array[String] = []
+	if not is_signaling_connected:
+		return peers
+	for peer_id_v in _present_peers.keys():
+		var peer_id := str(peer_id_v)
+		if not peer_id.is_empty() and peer_id != local_peer_id:
+			peers.append(peer_id)
+	peers.sort()
+	return peers
 
 
 ## Join the session's signaling room. Leave `explicit_room_id` empty to use
@@ -382,6 +418,7 @@ func _on_signaling_closed(closed_room_id: String) -> void:
 	_live_backend_attempt = 0
 	_backend_blocked_error = ""
 	is_signaling_connected = false
+	_present_peers.clear()
 	signaling_closed.emit(closed_room_id)
 	if was_expected or _backend_connect_owner != 0 or not auto_reconnect_signaling \
 			or not _wants_signaling or _active_reconnect_loop != 0:
@@ -429,3 +466,20 @@ func _set_ice_servers(servers: Array, publish_update: bool) -> void:
 	ice_servers = servers.duplicate(true)
 	if publish_update:
 		ice_servers_updated.emit(ice_servers.duplicate(true))
+
+
+func _on_backend_peer_exists(peer_id: String) -> void:
+	if not peer_id.is_empty():
+		_present_peers[peer_id] = true
+	peer_exists.emit(peer_id)
+
+
+func _on_backend_peer_joined(peer_id: String) -> void:
+	if not peer_id.is_empty():
+		_present_peers[peer_id] = true
+	peer_joined.emit(peer_id)
+
+
+func _on_backend_peer_left(peer_id: String) -> void:
+	_present_peers.erase(peer_id)
+	peer_left.emit(peer_id)

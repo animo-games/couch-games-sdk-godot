@@ -11,6 +11,7 @@ var _outcomes: Dictionary = {}
 ## success without ever disconnecting a replacement connection.
 class StubBackend extends CouchGamesBackend:
 	var connect_calls := 0
+	var disconnect_calls := 0
 	var joined := false
 	var active_call := 0
 	var active_room := ""
@@ -37,6 +38,7 @@ class StubBackend extends CouchGamesBackend:
 		}}
 
 	func webrtc_disconnect() -> void:
+		disconnect_calls += 1
 		if not joined:
 			return
 		closed_calls.append(active_call)
@@ -66,6 +68,7 @@ func _init() -> void:
 
 func _run() -> void:
 	await _check_cancel_during_initial_connect()
+	await _check_same_room_adoption()
 	await _check_cancel_during_automatic_reconnect()
 	await _check_overlapping_connects()
 	await _check_close_during_in_flight_connect()
@@ -92,6 +95,10 @@ func _new_pair() -> Array:
 
 func _capture_connect(key: String, webrtc: CouchWebRTC, room: String) -> void:
 	_outcomes[key] = await webrtc.connect_signaling(room)
+
+
+func _capture_source_connect(key: String, source: CouchWebRTCSignalingSource) -> void:
+	_outcomes[key] = await source.connect_room()
 
 
 func _wait_until(cond: Callable, what: String, timeout_msec: int = 1000) -> bool:
@@ -124,6 +131,62 @@ func _check_cancel_during_initial_connect() -> void:
 	_expect(backend.joined, false, "late initial success must be disconnected")
 	_expect(backend.closed_calls, [1], "late initial connection must close exactly itself")
 	_expect(webrtc.is_signaling_connected, false, "canceled initial connect must stay disconnected")
+	_free_pair(pair)
+
+
+func _check_same_room_adoption() -> void:
+	var pair := _new_pair()
+	var backend := pair[0] as StubBackend
+	var webrtc := pair[1] as CouchWebRTC
+	var initial_key := "adopt-initial"
+	_capture_connect(initial_key, webrtc, "room-menu")
+	backend.release(1)
+	await _wait_until(func() -> bool: return _outcomes.has(initial_key), "menu signaling result")
+	_expect(bool((_outcomes[initial_key] as Dictionary).get("success", false)), true,
+		"menu signaling must connect")
+
+	# Presence arrived before the gameplay signaling source existed. Departed
+	# peers must not survive in the snapshot that the connection handler adopts.
+	backend.webrtc_peer_exists.emit("peer-present")
+	backend.webrtc_peer_joined.emit("peer-departed")
+	backend.webrtc_peer_left.emit("peer-departed")
+	var source := CouchWebRTCSignalingSource.new(webrtc, "room-menu")
+	var connects_before := backend.connect_calls
+	var disconnects_before := backend.disconnect_calls
+	var closes_before := backend.closed_calls.duplicate()
+	var adopted: Dictionary = await source.connect_room()
+	_expect(bool(adopted.get("success", false)), true,
+		"same-room gameplay source must adopt menu signaling")
+	_expect(backend.connect_calls, connects_before,
+		"same-room adoption must not call backend connect again")
+	_expect(backend.disconnect_calls, disconnects_before,
+		"same-room adoption must not call backend disconnect")
+	_expect(backend.closed_calls, closes_before,
+		"same-room adoption must not close the menu socket")
+	_expect(source.get_present_peers(), ["peer-present"],
+		"adopted source must expose only currently present cached peers")
+
+	# A different room remains a genuine replacement and must close the old
+	# physical socket before its backend connect is allowed to start.
+	var replacement := CouchWebRTCSignalingSource.new(webrtc, "room-other")
+	var replacement_key := "adopt-different-room"
+	_capture_source_connect(replacement_key, replacement)
+	await _wait_until(func() -> bool: return backend.connect_calls == connects_before + 1,
+		"different-room backend connect")
+	_expect(backend.disconnect_calls, disconnects_before + 1,
+		"different-room source must disconnect the old backend socket")
+	_expect(backend.closed_calls, [1],
+		"different-room source must wait for the old socket close")
+	_expect(source.get_present_peers().is_empty(), true,
+		"socket closure must clear cached peers")
+	backend.release(2)
+	await _wait_until(func() -> bool: return _outcomes.has(replacement_key),
+		"different-room signaling result")
+	_expect(bool((_outcomes[replacement_key] as Dictionary).get("success", false)), true,
+		"different-room replacement must still connect")
+	_expect(replacement.get_present_peers().is_empty(), true,
+		"old-room peers must stay cleared after the replacement connects")
+	webrtc.disconnect_signaling()
 	_free_pair(pair)
 
 

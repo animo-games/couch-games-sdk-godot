@@ -4,6 +4,8 @@
 ## `peer_joined`, and `peer_left` signals plus `connect_room()`, `send()`, and
 ## `close()` methods. An optional `connection_config_updated` signal and
 ## `get_connection_config()` method provide refreshed ICE/TURN credentials.
+## An optional `get_present_peers()` method supplies a current room snapshot
+## when signaling was connected before this handler started.
 ##
 ## Add this node at the same path on every peer before start(): the strict
 ## `_identify` RPC is part of the connection protocol and depends on that path.
@@ -142,6 +144,7 @@ func start(signaling_source = null, multiplayer_api: MultiplayerAPI = null) -> v
 	_pending_peer_ids.clear()
 	for pid in pending:
 		_on_peer_discovered(pid)
+	_seed_present_peers(signaling_source)
 
 
 ## Stop signaling and close only the MultiplayerPeer installed by this node.
@@ -485,6 +488,7 @@ func _on_ice_candidate_created(
 
 
 func _on_source_peer_left(pid: String) -> void:
+	_pending_peer_ids.erase(pid)
 	if _ready_peer_set.has(pid) or _recovering_peers.has(pid):
 		return
 	_cancel_timer(pid)
@@ -500,6 +504,17 @@ func _on_source_peer_left(pid: String) -> void:
 	if pc is WebRTCPeerConnection:
 		(pc as WebRTCPeerConnection).close()
 	_pcs.erase(pid)
+
+
+func _seed_present_peers(signaling_source) -> void:
+	if signaling_source == null or not signaling_source.has_method("get_present_peers"):
+		return
+	var peers: Variant = signaling_source.call("get_present_peers")
+	if not (peers is Array):
+		push_warning("WebRTCMultiplayerConnection: get_present_peers() did not return Array")
+		return
+	for peer_id_v in peers:
+		_on_peer_discovered(str(peer_id_v))
 
 
 func _attach_multiplayer_signals() -> void:

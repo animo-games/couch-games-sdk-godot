@@ -24,6 +24,9 @@ func _init(webrtc: CouchWebRTC, explicit_room_id: String = "") -> void:
 
 
 func connect_room() -> Dictionary:
+	var adopted := _webrtc.adopt_signaling(_explicit_room_id)
+	if not adopted.is_empty():
+		return adopted
 	return await _webrtc.connect_signaling(_explicit_room_id)
 
 
@@ -38,6 +41,13 @@ func close() -> void:
 
 func get_connection_config() -> Dictionary:
 	return {"iceServers": _webrtc.ice_servers.duplicate(true)}
+
+
+## Optional signaling-source capability consumed by
+## WebRTCMultiplayerConnection after connect_room(). This preserves presence
+## announcements that arrived before this source existed.
+func get_present_peers() -> Array[String]:
+	return _webrtc.get_present_peers()
 
 
 func get_path_for_peer(peer_id: String) -> Dictionary:
@@ -87,4 +97,3 @@ static func _parse_ice_ufrag(sdp: String) -> String:
 		if normalized.begins_with("a=ice-ufrag:"):
 			return normalized.trim_prefix("a=ice-ufrag:")
 	return ""
-
