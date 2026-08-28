@@ -83,6 +83,9 @@ var _backend_close_expected := false
 var _backend_close_deadline_msec := 0
 var _backend_close_seq := 0
 var _backend_blocked_error := ""
+## The Couch backend owns one physical signaling socket. High-level connection
+## handlers therefore claim exclusive ownership while active.
+var _connection_handler_ref: WeakRef
 
 
 ## Normalize a platform-issued room code: uppercase and strip all whitespace.
@@ -112,6 +115,24 @@ func setup(backend: CouchGamesBackend) -> void:
 	_backend.webrtc_peer_exists.connect(peer_exists.emit)
 	_backend.webrtc_signaling_closed.connect(_on_signaling_closed)
 	_backend.webrtc_ice_servers_updated.connect(_on_ice_servers_updated)
+
+
+func claim_connection_handler(handler: Object) -> bool:
+	var current: Object = (
+		_connection_handler_ref.get_ref() if _connection_handler_ref != null else null
+	)
+	if current != null and is_instance_valid(current) and current != handler:
+		return false
+	_connection_handler_ref = weakref(handler)
+	return true
+
+
+func release_connection_handler(handler: Object) -> void:
+	var current: Object = (
+		_connection_handler_ref.get_ref() if _connection_handler_ref != null else null
+	)
+	if current == handler:
+		_connection_handler_ref = null
 
 
 ## Join the session's signaling room. Leave `explicit_room_id` empty to use

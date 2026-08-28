@@ -26,7 +26,7 @@ loopback socket instead of a faked one.
 core/       the CouchGames autoload and the response wrapper
 backends/   the abstract backend plus the web, mock and local-relay ones
 lobby/      CouchGames.lobby and its player type
-webrtc/     CouchGames.webrtc, the candidate-path probe, the rollback adapter
+webrtc/     signaling, candidate-path probing, and the provider-neutral mesh
 debug/      the mock debug overlay
 editor/     EditorPlugin and the Web export present-path patch
 tools/      build_and_upload and its per-platform launchers
@@ -65,6 +65,35 @@ The plugin registers these under Project Settings (Advanced), all optional:
 `--couch-mock` as a user arg forces the mock for a single run; `--couch-role=host`
 or `--couch-role=guest` pins an instance's role in the loopback lobby.
 
+## WebRTC connections
+
+`CouchGames.webrtc` remains the low-level signaling API. Games that want an
+engine `MultiplayerPeer` can use the additive high-level façade:
+
+```gdscript
+var connection := CouchWebRTCConnection.new(CouchGames.webrtc)
+connection.name = "Transport" # identical RPC path on every peer
+connection.udp_first = true    # optional; defaults false
+add_child(connection)
+connection.connection_ready.connect(func(): print("mesh ready"))
+connection.start()
+```
+
+`WebRTCMultiplayerConnection` is the provider-neutral core. Its signaling
+source is duck typed (`connect_room`, `send`, `close` plus peer/signal events),
+so non-Couch providers can use it without inheriting an SDK class. It owns peer
+discovery, deterministic net ids, SDP/ICE generation and acknowledgement,
+strict identify validation, timeouts, and targeted recovery. Application
+policy—such as when an input stall warrants recovery—stays outside it.
+
+Only one `CouchWebRTCConnection` may own a `CouchWebRTC` instance at a time,
+because the backend exposes one physical signaling socket. Low-level
+`CouchGames.webrtc` users are otherwise unaffected.
+
+`CouchWebRTCSignalingSource` replaces the consumer-specific adapter name.
+`CouchRollbackSignalingAdapter` remains as a compatibility subclass for one
+migration release.
+
 ## WebRTC signaling lifecycle
 
 `CouchGames.webrtc` owns signaling for the SDK. Calls to
@@ -82,6 +111,6 @@ established WebRTC peer connections. `signaling_reconnecting` and
 `signaling_reconnected` expose that lifecycle; an explicit disconnect stops the
 loop. `request_ice_servers()` and successful automatic reconnects update
 `CouchGames.webrtc.ice_servers` and emit `ice_servers_updated`. The bundled
-`CouchRollbackSignalingAdapter` forwards those values through the optional,
+`CouchWebRTCSignalingSource` forwards those values through the optional,
 SDK-neutral `get_connection_config()` / `connection_config_updated` transport
 capability so future peer rebuilds use current TURN credentials.
