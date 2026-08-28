@@ -13,6 +13,7 @@ class StubSource:
 
 	var sent: Array[Dictionary] = []
 	var closed := false
+	var present_peers: Array[String] = []
 
 	func connect_room() -> Dictionary:
 		return {
@@ -31,6 +32,9 @@ class StubSource:
 	func get_connection_config() -> Dictionary:
 		return {"iceServers": []}
 
+	func get_present_peers() -> Array[String]:
+		return present_peers.duplicate()
+
 
 class RecoveryConnection extends WebRTCMultiplayerConnection:
 	var rebuilt: Array[Dictionary] = []
@@ -42,6 +46,14 @@ class RecoveryConnection extends WebRTCMultiplayerConnection:
 			"gen": gen,
 			"config": _connection_config.duplicate(true),
 		})
+		return true
+
+
+class DiscoveryConnection extends WebRTCMultiplayerConnection:
+	var created: Array[String] = []
+
+	func _create_peer_connection(peer_id: String, _gen: int) -> bool:
+		created.append(peer_id)
 		return true
 
 
@@ -57,6 +69,7 @@ func _run() -> void:
 	_check_targeted_and_simultaneous_recovery()
 	_check_refreshed_config_reaches_recovery()
 	_check_safe_multiplayer_detach()
+	_check_cached_peer_discovery()
 	_check_single_couch_handler()
 	_check_compatibility_alias()
 	await process_frame
@@ -244,6 +257,30 @@ func _check_safe_multiplayer_detach() -> void:
 	_expect(api.multiplayer_peer == replacement, true,
 		"stale stop must not replace a newer MultiplayerPeer")
 	connection.free()
+
+
+func _check_cached_peer_discovery() -> void:
+	var source := StubSource.new()
+	source.present_peers.assign(["peer-cached", "local", "peer-cached"])
+	var connection := DiscoveryConnection.new()
+	connection.local_peer_id = "local"
+	connection.local_net_id = WebRTCMultiplayerConnection.derive_net_id("local")
+	connection._peers_ready = true
+	connection._seed_present_peers(source)
+	_expect(connection._known_peers, ["peer-cached"],
+		"startup must discover peers from the source presence snapshot")
+	_expect(connection.created, ["peer-cached"],
+		"cached presence must create one peer connection")
+
+	var pending := DiscoveryConnection.new()
+	pending._peers_ready = false
+	source.present_peers.assign(["peer-departed"])
+	pending._seed_present_peers(source)
+	pending._on_source_peer_left("peer-departed")
+	_expect(pending._pending_peer_ids.is_empty(), true,
+		"a departure before startup completes must remove cached pending presence")
+	connection.free()
+	pending.free()
 
 
 func _check_single_couch_handler() -> void:
