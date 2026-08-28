@@ -25,6 +25,7 @@ var _on_webrtc_peer_left_cb: JavaScriptObject
 var _on_webrtc_peer_exists_cb: JavaScriptObject
 var _on_webrtc_closed_cb: JavaScriptObject
 var _on_webrtc_ice_servers_cb: JavaScriptObject
+var _on_webrtc_peers_cb: JavaScriptObject
 var _on_play_mode_selected_cb: JavaScriptObject
 ## Private cancellation generation for the awaited connect promise. The SDK
 ## coordinator still owns cross-request serialization; this prevents backend
@@ -103,6 +104,12 @@ func _setup_webrtc_bridge() -> void:
 	_webrtc.onPeerExists(_on_webrtc_peer_exists_cb)
 	_webrtc.onSignalingClosed(_on_webrtc_closed_cb)
 	_webrtc.onIceServers(_on_webrtc_ice_servers_cb)
+	# Optional, unlike the probe above: a platform build older than the
+	# request-peers snapshot simply never answers, and callers fall back to the
+	# presence they accumulated from peer_exists/peer_joined/peer_left.
+	if _webrtc.onPeers != null:
+		_on_webrtc_peers_cb = JavaScriptBridge.create_callback(_on_webrtc_peers)
+		_webrtc.onPeers(_on_webrtc_peers_cb)
 
 
 func _setup_play_mode_bridge() -> void:
@@ -322,6 +329,11 @@ func webrtc_request_ice_servers() -> void:
 		_webrtc.requestIceServers()
 
 
+func webrtc_request_peers() -> void:
+	if _webrtc != null and _webrtc.requestPeers != null:
+		_webrtc.requestPeers()
+
+
 func webrtc_disconnect() -> void:
 	# disconnectSignaling, not disconnect: a JS method named "disconnect" is
 	# unreachable through JavaScriptObject (shadowed by Object.disconnect).
@@ -370,6 +382,14 @@ func _on_webrtc_ice_servers(args: Array) -> void:
 	var servers = _js_to_variant(args[0])
 	if servers is Array:
 		webrtc_ice_servers_updated.emit(servers)
+
+
+func _on_webrtc_peers(args: Array) -> void:
+	if args.is_empty():
+		return
+	var peers = _js_to_variant(args[0])
+	if peers is Array:
+		webrtc_peers_updated.emit(peers)
 
 
 # --- Play mode ---

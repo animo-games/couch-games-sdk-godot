@@ -24,6 +24,10 @@ signal webrtc_peer_joined(peer_id: String)
 signal webrtc_peer_left(peer_id: String)
 ## An already-connected peer, reported right after our own connect.
 signal webrtc_peer_exists(peer_id: String)
+## The room's full peer list after a webrtc_request_peers snapshot. Complete
+## and authoritative as of the moment the server sent it: replaces a previous
+## view rather than adding to it. Never includes the local peer.
+signal webrtc_peers_updated(peer_ids: Array)
 ## The signaling socket closed (including after webrtc_disconnect).
 signal webrtc_signaling_closed(room_id: String)
 ## Fresh ICE servers after a webrtc_request_ice_servers refresh.
@@ -147,6 +151,14 @@ func webrtc_send_signal(_target_peer_id: String, _data: Variant) -> void:
 ## Ask for fresh ICE servers (TURN credentials expire after ~1h). Results
 ## arrive via webrtc_ice_servers_updated.
 func webrtc_request_ice_servers() -> void:
+	pass
+
+
+## Ask the signaling room who is present. webrtc_peer_exists is announced once,
+## at connect, so this is the only way back to the truth for a caller that
+## connected earlier or missed an event. Results arrive via
+## webrtc_peers_updated; backends that cannot answer stay silent.
+func webrtc_request_peers() -> void:
 	pass
 
 

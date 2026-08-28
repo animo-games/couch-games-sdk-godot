@@ -12,6 +12,7 @@ var _outcomes: Dictionary = {}
 class StubBackend extends CouchGamesBackend:
 	var connect_calls := 0
 	var disconnect_calls := 0
+	var peers_requests := 0
 	var joined := false
 	var active_call := 0
 	var active_room := ""
@@ -36,6 +37,9 @@ class StubBackend extends CouchGamesBackend:
 			"roomId": requested_room_id,
 			"iceServers": [{"urls": "stun:test-%d.invalid" % call}],
 		}}
+
+	func webrtc_request_peers() -> void:
+		peers_requests += 1
 
 	func webrtc_disconnect() -> void:
 		disconnect_calls += 1
@@ -69,6 +73,7 @@ func _init() -> void:
 func _run() -> void:
 	await _check_cancel_during_initial_connect()
 	await _check_same_room_adoption()
+	await _check_authoritative_presence_snapshot()
 	await _check_cancel_during_automatic_reconnect()
 	await _check_overlapping_connects()
 	await _check_close_during_in_flight_connect()
@@ -186,6 +191,54 @@ func _check_same_room_adoption() -> void:
 		"different-room replacement must still connect")
 	_expect(replacement.get_present_peers().is_empty(), true,
 		"old-room peers must stay cleared after the replacement connects")
+	webrtc.disconnect_signaling()
+	_free_pair(pair)
+
+
+func _check_authoritative_presence_snapshot() -> void:
+	var pair := _new_pair()
+	var backend := pair[0] as StubBackend
+	var webrtc := pair[1] as CouchWebRTC
+	var key := "snapshot"
+
+	# A snapshot arriving while disconnected describes a room we are not in.
+	backend.webrtc_peers_updated.emit(["peer-ghost"])
+	_expect(webrtc.get_present_peers().is_empty(), true,
+		"a snapshot must be ignored while signaling is disconnected")
+
+	_capture_connect(key, webrtc, "room-snapshot")
+	backend.release(1)
+	await _wait_until(func() -> bool: return _outcomes.has(key), "snapshot signaling result")
+
+	backend.webrtc_peer_exists.emit("peer-stale")
+	backend.webrtc_peer_joined.emit("peer-known")
+	_expect(webrtc.get_present_peers(), ["peer-known", "peer-stale"],
+		"live presence events accumulate into the cached view")
+
+	webrtc.request_peers()
+	_expect(backend.peers_requests, 1, "request_peers must reach the backend")
+
+	# The reply is authoritative: peer-stale is gone even though no peer_left
+	# was ever delivered, and peer-fresh appears without a peer_joined. This is
+	# the drift the snapshot exists to correct.
+	# Mutated in place, not reassigned: GDScript lambdas capture by value, so an
+	# assignment inside the closure would never reach this variable.
+	var observed: Array = []
+	webrtc.peers_updated.connect(func(ids: Array) -> void: observed.assign(ids))
+	backend.webrtc_peers_updated.emit(["peer-known", "peer-fresh", "local-peer", ""])
+	_expect(webrtc.get_present_peers(), ["peer-fresh", "peer-known"],
+		"a snapshot must replace the cached view wholesale, not merge into it")
+	_expect(observed, ["peer-fresh", "peer-known"],
+		"peers_updated must carry the same filtered snapshot")
+
+	# Losing the socket clears presence; a stale snapshot cannot resurrect it.
+	backend.drop_unexpectedly()
+	await _wait_until(func() -> bool: return not webrtc.is_signaling_connected,
+		"snapshot socket drop")
+	backend.webrtc_peers_updated.emit(["peer-known"])
+	_expect(webrtc.get_present_peers().is_empty(), true,
+		"a snapshot after a socket drop must not resurrect presence")
+
 	webrtc.disconnect_signaling()
 	_free_pair(pair)
 

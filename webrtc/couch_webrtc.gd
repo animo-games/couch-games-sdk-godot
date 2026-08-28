@@ -38,6 +38,9 @@ signal signaling_reconnecting(room_id: String, attempt: int)
 signal signaling_reconnected(room_id: String)
 ## Fresh ICE servers after a request_ice_servers() refresh.
 signal ice_servers_updated(ice_servers: Array)
+## The room's full peer list after a request_peers() snapshot. Complete and
+## authoritative as of the moment the server sent it; never includes us.
+signal peers_updated(peer_ids: Array)
 
 var is_available: bool:
 	get:
@@ -119,6 +122,7 @@ func setup(backend: CouchGamesBackend) -> void:
 	_backend.webrtc_peer_exists.connect(_on_backend_peer_exists)
 	_backend.webrtc_signaling_closed.connect(_on_signaling_closed)
 	_backend.webrtc_ice_servers_updated.connect(_on_ice_servers_updated)
+	_backend.webrtc_peers_updated.connect(_on_peers_updated)
 
 
 func claim_connection_handler(handler: Object) -> bool:
@@ -357,6 +361,18 @@ func request_ice_servers() -> void:
 		_backend.webrtc_request_ice_servers()
 
 
+## Ask the room who is present. peer_exists is announced once, at connect, so a
+## caller that adopted an already-open socket -- or that missed an event -- has
+## no other way back to the truth. The result arrives via peers_updated and
+## replaces what get_present_peers() reports.
+##
+## Best-effort by design: a platform build without the snapshot never answers,
+## and callers keep the presence they accumulated from the live events.
+func request_peers() -> void:
+	if _backend != null and is_signaling_connected:
+		_backend.webrtc_request_peers()
+
+
 ## Leave the signaling room. Existing WebRTC peer connections stay up; this only
 ## tears down the handshake channel.
 func disconnect_signaling() -> void:
@@ -460,6 +476,20 @@ func _reconnect_signaling(token: int, loop_id: int) -> void:
 
 func _on_ice_servers_updated(servers: Array) -> void:
 	_set_ice_servers(servers, true)
+
+
+## Replace the cached room membership from an authoritative snapshot. Wholesale,
+## not merged: dropping peers the server no longer lists is the only way a
+## missed peer_left is ever corrected.
+func _on_peers_updated(peer_ids: Array) -> void:
+	if not is_signaling_connected:
+		return
+	_present_peers.clear()
+	for peer_id_v in peer_ids:
+		var peer_id := str(peer_id_v)
+		if not peer_id.is_empty() and peer_id != local_peer_id:
+			_present_peers[peer_id] = true
+	peers_updated.emit(get_present_peers())
 
 
 func _set_ice_servers(servers: Array, publish_update: bool) -> void:

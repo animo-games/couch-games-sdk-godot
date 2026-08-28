@@ -225,6 +225,15 @@ func _handle_host_message(sender_id: String, msg: Variant) -> void:
 			if _peers.has(sender_id):
 				_send(_peers[sender_id], {"type": "webrtc-roster", "peers": existing})
 			_webrtc_broadcast({"type": "webrtc-peer-joined", "peerId": sender_id}, sender_id)
+		"webrtc-peers-request":
+			# The snapshot the real signaling DO answers request-peers with:
+			# everyone currently in the room except the asker.
+			if _peers.has(sender_id):
+				var present: Array = []
+				for uid in _webrtc_members.keys():
+					if str(uid) != sender_id:
+						present.append(str(uid))
+				_send(_peers[sender_id], {"type": "webrtc-peers", "peers": present})
 		"webrtc-leave":
 			if _webrtc_members.erase(sender_id):
 				_webrtc_broadcast({"type": "webrtc-peer-left", "peerId": sender_id}, sender_id)
@@ -301,6 +310,10 @@ func _handle_guest_message(msg: Variant) -> void:
 			if webrtc_joined and roster is Array:
 				for uid in roster:
 					webrtc_peer_exists.emit(str(uid))
+		"webrtc-peers":
+			var present = msg.get("peers")
+			if webrtc_joined and present is Array:
+				webrtc_peers_updated.emit(present)
 		"webrtc-peer-joined", "webrtc-peer-left", "webrtc-signal":
 			_deliver_webrtc_local(msg)
 
@@ -389,6 +402,22 @@ func webrtc_connect_signaling(_room_id: String) -> Dictionary:
 	}}
 
 
+func webrtc_request_peers() -> void:
+	if not webrtc_joined:
+		return
+	if _server:
+		# The host already holds the roster, so answer without a round trip.
+		# Deferred to match the real bridge, where the reply is never
+		# synchronous with the request.
+		var present: Array = []
+		for uid in _webrtc_members.keys():
+			if str(uid) != local_user_id:
+				present.append(str(uid))
+		_emit_webrtc_peers_updated.call_deferred(present)
+	elif _guest_ws:
+		_send(_guest_ws, {"type": "webrtc-peers-request"})
+
+
 func webrtc_send_signal(target_peer_id: String, data: Variant) -> void:
 	if not webrtc_joined or target_peer_id == local_user_id:
 		return
@@ -459,6 +488,11 @@ func _deliver_webrtc_local(msg: Dictionary) -> void:
 func _emit_webrtc_peer_exists(peer_id: String) -> void:
 	if webrtc_joined:
 		webrtc_peer_exists.emit(peer_id)
+
+
+func _emit_webrtc_peers_updated(peer_ids: Array) -> void:
+	if webrtc_joined:
+		webrtc_peers_updated.emit(peer_ids)
 
 
 # --- Wire helpers ---

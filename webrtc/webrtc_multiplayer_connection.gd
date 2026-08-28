@@ -507,14 +507,43 @@ func _on_source_peer_left(pid: String) -> void:
 
 
 func _seed_present_peers(signaling_source) -> void:
-	if signaling_source == null or not signaling_source.has_method("get_present_peers"):
+	if signaling_source == null:
 		return
-	var peers: Variant = signaling_source.call("get_present_peers")
-	if not (peers is Array):
-		push_warning("WebRTCMultiplayerConnection: get_present_peers() did not return Array")
-		return
-	for peer_id_v in peers:
-		_on_peer_discovered(str(peer_id_v))
+	if signaling_source.has_method("get_present_peers"):
+		var peers: Variant = signaling_source.call("get_present_peers")
+		if peers is Array:
+			for peer_id_v in peers:
+				_on_peer_discovered(str(peer_id_v))
+		else:
+			push_warning("WebRTCMultiplayerConnection: get_present_peers() did not return Array")
+	# The cache above is what the source happened to overhear, which is all a
+	# source can offer synchronously. Ask for the authoritative room as well;
+	# the answer lands on present_peers_updated, or never, on a platform that
+	# does not implement it. Nothing here waits for it.
+	if signaling_source.has_method("request_present_peers"):
+		signaling_source.call("request_present_peers")
+
+
+## Reconcile against an authoritative room snapshot.
+##
+## Adds peers the local view missed, and drops peers that are merely pending --
+## a peer that left between this node's construction and start() has nothing
+## else to retract it. Established connections are deliberately left alone: a
+## snapshot can race a peer that is joining right now, and tearing down a live
+## or half-formed connection on that evidence costs far more than carrying a
+## stale one until peer_left arrives.
+func _on_present_peers_snapshot(peer_ids: Array) -> void:
+	var present: Dictionary = {}
+	for peer_id_v in peer_ids:
+		var pid := str(peer_id_v)
+		if pid.is_empty() or pid == local_peer_id:
+			continue
+		present[pid] = true
+	for pid in _pending_peer_ids.duplicate():
+		if not present.has(pid):
+			_pending_peer_ids.erase(pid)
+	for pid in present.keys():
+		_on_peer_discovered(pid)
 
 
 func _attach_multiplayer_signals() -> void:
@@ -863,6 +892,9 @@ func _attach_source_signals(source) -> void:
 	if source.has_signal("connection_config_updated") \
 			and not source.connection_config_updated.is_connected(_on_connection_config_updated):
 		source.connection_config_updated.connect(_on_connection_config_updated)
+	if source.has_signal("present_peers_updated") \
+			and not source.present_peers_updated.is_connected(_on_present_peers_snapshot):
+		source.present_peers_updated.connect(_on_present_peers_snapshot)
 
 
 func _detach_source_signals(source) -> void:
@@ -877,6 +909,9 @@ func _detach_source_signals(source) -> void:
 	if source.has_signal("connection_config_updated") \
 			and source.connection_config_updated.is_connected(_on_connection_config_updated):
 		source.connection_config_updated.disconnect(_on_connection_config_updated)
+	if source.has_signal("present_peers_updated") \
+			and source.present_peers_updated.is_connected(_on_present_peers_snapshot):
+		source.present_peers_updated.disconnect(_on_present_peers_snapshot)
 
 
 func _on_connection_config_updated(config: Dictionary) -> void:
