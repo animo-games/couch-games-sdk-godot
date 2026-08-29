@@ -407,13 +407,12 @@ func webrtc_request_peers() -> void:
 		return
 	if _server:
 		# The host already holds the roster, so answer without a round trip.
-		# Deferred to match the real bridge, where the reply is never
-		# synchronous with the request.
-		var present: Array = []
-		for uid in _webrtc_members.keys():
-			if str(uid) != local_user_id:
-				present.append(str(uid))
-		_emit_webrtc_peers_updated.call_deferred(present)
+		# Deferred because the real bridge's reply is never synchronous with
+		# the request -- but the roster is read inside the deferred call, not
+		# captured here. Capturing a frame early would hand consumers a
+		# snapshot older than events they have already applied, which is
+		# exactly what the platform's synchronous compute-and-send rules out.
+		_emit_webrtc_peers_updated.call_deferred()
 	elif _guest_ws:
 		_send(_guest_ws, {"type": "webrtc-peers-request"})
 
@@ -490,9 +489,14 @@ func _emit_webrtc_peer_exists(peer_id: String) -> void:
 		webrtc_peer_exists.emit(peer_id)
 
 
-func _emit_webrtc_peers_updated(peer_ids: Array) -> void:
-	if webrtc_joined:
-		webrtc_peers_updated.emit(peer_ids)
+func _emit_webrtc_peers_updated() -> void:
+	if not webrtc_joined:
+		return
+	var present: Array = []
+	for uid in _webrtc_members.keys():
+		if str(uid) != local_user_id:
+			present.append(str(uid))
+	webrtc_peers_updated.emit(present)
 
 
 # --- Wire helpers ---
