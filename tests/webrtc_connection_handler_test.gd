@@ -329,12 +329,22 @@ func _check_authoritative_peer_snapshot() -> void:
 	_expect(connection._known_peers.has("local"), false,
 		"a snapshot must never discover the local peer")
 
-	# An established peer absent from a later snapshot is deliberately kept:
-	# tearing down a live connection on a possibly-raced snapshot costs more
-	# than carrying a stale peer until peer_left arrives.
+	# Retiring an absent peer runs the ordinary departure path, so it draws the
+	# same distinction peer_left does. A ready peer survives -- its datagram
+	# path is allowed to outlive the signaling room.
+	connection._ready_peer_set["peer-cached"] = true
+	# _create_peer_connection is stubbed here, so seed the map the real one
+	# would have filled -- otherwise the teardown assertion below is vacuous.
+	connection._pcs["peer-missed"] = RefCounted.new()
 	source.present_peers_updated.emit([])
-	_expect(connection._known_peers, ["peer-cached", "peer-missed"],
-		"a snapshot must not tear down established connections")
+	_expect(connection._known_peers, ["peer-cached"],
+		"a snapshot must not retire a peer that is already ready")
+	# peer-missed was still mid-handshake, so the snapshot is what finally
+	# stops its SDP retransmit and restart timers firing at someone gone.
+	_expect(connection._departed.has("peer-missed"), true,
+		"a snapshot must retire a mid-handshake peer the room no longer lists")
+	_expect(connection._pcs.has("peer-missed"), false,
+		"retiring a mid-handshake peer must close and drop its connection")
 
 	# Before startup completes there is nothing established to protect, and a
 	# pending peer the room no longer lists has nothing else to retract it.

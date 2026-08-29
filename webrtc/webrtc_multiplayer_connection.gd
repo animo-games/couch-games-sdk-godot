@@ -526,12 +526,17 @@ func _seed_present_peers(signaling_source) -> void:
 
 ## Reconcile against an authoritative room snapshot.
 ##
-## Adds peers the local view missed, and drops peers that are merely pending --
-## a peer that left between this node's construction and start() has nothing
-## else to retract it. Established connections are deliberately left alone: a
-## snapshot can race a peer that is joining right now, and tearing down a live
-## or half-formed connection on that evidence costs far more than carrying a
-## stale one until peer_left arrives.
+## Adds peers the local view missed, and retires peers the room no longer lists
+## through the ordinary departure path -- exactly as strong as a peer_left and
+## no stronger. _on_source_peer_left keeps ready and recovering peers, because a
+## datagram path is allowed to outlive the signaling room. What it does retire
+## is a peer still mid-handshake, whose SDP retransmit and restart timers would
+## otherwise keep firing at someone already gone, and a peer queued as pending
+## before start() completed, which has nothing else to retract it.
+##
+## Safe to apply on arrival: the server computes and sends a snapshot without an
+## await, so the room it reports always matches its position in the ordered
+## message stream -- a peer joining after it is announced after it.
 func _on_present_peers_snapshot(peer_ids: Array) -> void:
 	var present: Dictionary = {}
 	for peer_id_v in peer_ids:
@@ -539,9 +544,14 @@ func _on_present_peers_snapshot(peer_ids: Array) -> void:
 		if pid.is_empty() or pid == local_peer_id:
 			continue
 		present[pid] = true
-	for pid in _pending_peer_ids.duplicate():
+	# Copied before iterating: _on_source_peer_left mutates both collections.
+	var tracked: Array[String] = _pending_peer_ids.duplicate()
+	for pid in _known_peers:
+		if not tracked.has(pid):
+			tracked.append(pid)
+	for pid in tracked:
 		if not present.has(pid):
-			_pending_peer_ids.erase(pid)
+			_on_source_peer_left(pid)
 	for pid in present.keys():
 		_on_peer_discovered(pid)
 
