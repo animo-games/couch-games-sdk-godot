@@ -178,8 +178,11 @@ func _process_guest() -> void:
 			push_warning("CouchGames SDK: local lobby host disconnected")
 			_guest_ws = null
 			_seed_local_player()  # keep running with a roster of just ourselves
-			if webrtc_joined:
+			var signaling_was_active := _webrtc_connecting or webrtc_joined
+			if signaling_was_active:
 				# The relay is gone, so the signaling room is too.
+				_webrtc_lifecycle += 1
+				_webrtc_connecting = false
 				webrtc_joined = false
 				webrtc_signaling_closed.emit(WEBRTC_LOCAL_ROOM)
 
@@ -222,6 +225,15 @@ func _handle_host_message(sender_id: String, msg: Variant) -> void:
 			if _peers.has(sender_id):
 				_send(_peers[sender_id], {"type": "webrtc-roster", "peers": existing})
 			_webrtc_broadcast({"type": "webrtc-peer-joined", "peerId": sender_id}, sender_id)
+		"webrtc-peers-request":
+			# The snapshot the real signaling DO answers request-peers with:
+			# everyone currently in the room except the asker.
+			if _peers.has(sender_id):
+				var present: Array = []
+				for uid in _webrtc_members.keys():
+					if str(uid) != sender_id:
+						present.append(str(uid))
+				_send(_peers[sender_id], {"type": "webrtc-peers", "peers": present})
 		"webrtc-leave":
 			if _webrtc_members.erase(sender_id):
 				_webrtc_broadcast({"type": "webrtc-peer-left", "peerId": sender_id}, sender_id)
@@ -298,6 +310,10 @@ func _handle_guest_message(msg: Variant) -> void:
 			if webrtc_joined and roster is Array:
 				for uid in roster:
 					webrtc_peer_exists.emit(str(uid))
+		"webrtc-peers":
+			var present = msg.get("peers")
+			if webrtc_joined and present is Array:
+				webrtc_peers_updated.emit(present)
 		"webrtc-peer-joined", "webrtc-peer-left", "webrtc-signal":
 			_deliver_webrtc_local(msg)
 
@@ -360,7 +376,13 @@ func webrtc_connect_signaling(_room_id: String) -> Dictionary:
 	if not _server and not (_guest_ws and _guest_ws.get_ready_state() == WebSocketPeer.STATE_OPEN):
 		# Solo instance: behave like the offline mock.
 		return await super.webrtc_connect_signaling(_room_id)
+	_webrtc_lifecycle += 1
+	var token := _webrtc_lifecycle
+	_webrtc_connecting = true
 	await _tick()
+	if token != _webrtc_lifecycle:
+		return {"success": false, "error": "signaling connect canceled"}
+	_webrtc_connecting = false
 	webrtc_joined = true
 	if _server:
 		var existing: Array = _webrtc_members.keys()
@@ -378,6 +400,21 @@ func webrtc_connect_signaling(_room_id: String) -> Dictionary:
 		"roomId": WEBRTC_LOCAL_ROOM,
 		"iceServers": [],
 	}}
+
+
+func webrtc_request_peers() -> void:
+	if not webrtc_joined:
+		return
+	if _server:
+		# The host already holds the roster, so answer without a round trip.
+		# Deferred because the real bridge's reply is never synchronous with
+		# the request -- but the roster is read inside the deferred call, not
+		# captured here. Capturing a frame early would hand consumers a
+		# snapshot older than events they have already applied, which is
+		# exactly what the platform's synchronous compute-and-send rules out.
+		_emit_webrtc_peers_updated.call_deferred()
+	elif _guest_ws:
+		_send(_guest_ws, {"type": "webrtc-peers-request"})
 
 
 func webrtc_send_signal(target_peer_id: String, data: Variant) -> void:
@@ -405,12 +442,18 @@ func webrtc_send_signal(target_peer_id: String, data: Variant) -> void:
 
 
 func webrtc_disconnect() -> void:
-	if not webrtc_joined:
+	if not _server and not (_guest_ws and _guest_ws.get_ready_state() == WebSocketPeer.STATE_OPEN):
+		super.webrtc_disconnect()
 		return
-	if _server:
+	var was_active := _webrtc_connecting or webrtc_joined
+	_webrtc_lifecycle += 1
+	_webrtc_connecting = false
+	if not was_active:
+		return
+	if webrtc_joined and _server:
 		_webrtc_members.erase(local_user_id)
 		_webrtc_broadcast({"type": "webrtc-peer-left", "peerId": local_user_id}, local_user_id)
-	elif _guest_ws and _guest_ws.get_ready_state() == WebSocketPeer.STATE_OPEN:
+	elif webrtc_joined and _guest_ws and _guest_ws.get_ready_state() == WebSocketPeer.STATE_OPEN:
 		_send(_guest_ws, {"type": "webrtc-leave"})
 	webrtc_joined = false
 	webrtc_signaling_closed.emit(WEBRTC_LOCAL_ROOM)
@@ -444,6 +487,16 @@ func _deliver_webrtc_local(msg: Dictionary) -> void:
 func _emit_webrtc_peer_exists(peer_id: String) -> void:
 	if webrtc_joined:
 		webrtc_peer_exists.emit(peer_id)
+
+
+func _emit_webrtc_peers_updated() -> void:
+	if not webrtc_joined:
+		return
+	var present: Array = []
+	for uid in _webrtc_members.keys():
+		if str(uid) != local_user_id:
+			present.append(str(uid))
+	webrtc_peers_updated.emit(present)
 
 
 # --- Wire helpers ---
