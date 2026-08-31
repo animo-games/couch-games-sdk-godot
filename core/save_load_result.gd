@@ -61,18 +61,35 @@ static func from_dict(result: Dictionary) -> CouchGamesSaveLoadResult:
 		STATUS_FOUND, STATUS_NOT_FOUND, STATUS_UNAVAILABLE
 	] else STATUS_UNAVAILABLE
 
-	res.message = str(result.get("message", ""))
-	if res.status == STATUS_UNAVAILABLE and res.message.is_empty():
-		res.message = "Save could not be loaded"
+	var message: Variant = result.get("message", "")
+	res.message = str(message) if message != null else ""
 
 	# `not_found` carries an explicit null payload, and a rejected call carries
 	# none at all; both land as an empty Dictionary.
 	var payload: Variant = result.get("payload", null)
+	var payload_usable := false
 	if payload is Dictionary:
 		res.payload = payload
+		payload_usable = true
 	elif payload is String and (payload as String).length() > 0:
 		var parsed: Variant = JSON.parse_string(payload)
-		res.payload = parsed if parsed is Dictionary else {}
+		if parsed is Dictionary:
+			res.payload = parsed
+			payload_usable = true
+
+	# A "found" whose payload is not a usable object is the most dangerous
+	# result this class can produce, and it must not be passed through.
+	# Reaching a `found` means the platform ALREADY synced this session's
+	# revision, so both no-clobber guards are down; a game that follows
+	# is_found() into an empty payload would start from nothing and its next
+	# whole-document save WOULD be admitted, over the save it just failed to
+	# read. Degrading to unavailable keeps the game's writes off instead.
+	if res.status == STATUS_FOUND and not payload_usable:
+		res.status = STATUS_UNAVAILABLE
+		res.message = "Stored save could not be read"
+
+	if res.status == STATUS_UNAVAILABLE and res.message.is_empty():
+		res.message = "Save could not be loaded"
 
 	var metadata: Variant = result.get("metadata", null)
 	if metadata is Dictionary:
@@ -85,7 +102,11 @@ static func from_dict(result: Dictionary) -> CouchGamesSaveLoadResult:
 	# Numbers cross the JS bridge through JSON, so an int arrives as a float.
 	res.revision = int(revision) if (revision is int or revision is float) else null
 
-	res.host_authoritative = bool(result.get("hostAuthoritative", false))
+	# Type-tested for the same reason as `revision` above: neither bool(x) nor
+	# `x == true` survives an arbitrary Variant, and an abort here would hand
+	# the game a null object instead of the "unavailable" this class promises.
+	var host_authoritative: Variant = result.get("hostAuthoritative", false)
+	res.host_authoritative = host_authoritative if host_authoritative is bool else false
 
 	return res
 

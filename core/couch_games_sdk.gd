@@ -159,6 +159,16 @@ func save_game(
 	expected_revision: Variant = null,
 	on_conflict: String = "",
 ) -> CouchGamesSDKResponse:
+	if expected_revision != null \
+			and not (expected_revision is int or expected_revision is float):
+		# The platform compares this with a strict ===, so a stringified
+		# revision silently refuses every write. Warn rather than coerce: the
+		# refusal is the platform's real answer, and hiding it here would make
+		# the editor disagree with production.
+		push_warning(
+			"CouchGames: expected_revision must be the number from "
+			+ "load_save_result().revision. The platform will refuse this write."
+		)
 	return CouchGamesSDKResponse.from_dict(
 		await _backend.save_game(save_data, progress, expected_revision, on_conflict)
 	)

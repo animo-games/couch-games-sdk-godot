@@ -58,8 +58,7 @@ new**, and **`save_game()` is judged by `persisted`, not `success`**.
 ### Why `load_latest_save()` cannot tell you
 
 `load_latest_save()` reads the save the platform handed your session at startup.
-It is synchronous and cheap, and its empty payload is ambiguous — it means any
-of:
+It costs no round-trip, but its empty payload is ambiguous — it means any of:
 
 - this player genuinely has no save;
 - the session had not finished starting when you asked;

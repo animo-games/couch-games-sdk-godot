@@ -43,25 +43,42 @@ static func from_dict(response: Dictionary) -> CouchGamesSDKResponse:
 	# The platform reports failures in `message`; the mock backend and this
 	# SDK's own local failures use `error`. Accept either, or a refusal's
 	# explanation would reach games as "Unknown error".
-	res.error = str(response.get("error", response.get("message", "Unknown error")))
-	var payload = response.get('payload', {})
-	if payload is String and (payload as String).length() > 0:
-		res.payload = JSON.parse_string(payload)
-	elif payload is String:
-		res.payload = {}
-	elif payload is Dictionary:
-		res.payload = payload
+	var error_text: Variant = response.get("error", response.get("message", "Unknown error"))
+	res.error = str(error_text) if error_text != null else "Unknown error"
 
-	res.metadata = response.get('metadata', {})
-	if res.metadata is String and (res.metadata as String).length() > 0:
-		res.metadata = JSON.parse_string(res.metadata)
-	if res.metadata is not Dictionary:
-		res.metadata = {}
+	# Every branch below has to survive a value the platform never promised.
+	# This function is the SDK's safety layer, and a runtime error inside a
+	# static function aborts it and hands the game a null response object --
+	# which is worse than any degraded value it could have returned.
+	var payload: Variant = response.get('payload', {})
+	if payload is Dictionary:
+		res.payload = payload
+	elif payload is String and (payload as String).length() > 0:
+		# A save blob that is valid JSON but not an object (an array, a bare
+		# scalar, "null") parses to something unassignable. Degrade rather than
+		# throw.
+		var parsed: Variant = JSON.parse_string(payload)
+		res.payload = parsed if parsed is Dictionary else {}
+
+	var metadata: Variant = response.get('metadata', {})
+	if metadata is Dictionary:
+		res.metadata = metadata
+	elif metadata is String and (metadata as String).length() > 0:
+		var parsed_metadata: Variant = JSON.parse_string(metadata)
+		res.metadata = parsed_metadata if parsed_metadata is Dictionary else {}
 
 	# A missing `persisted` means the platform did not confirm a write, so it
 	# must read as false rather than inheriting `success`.
-	res.persisted = bool(response.get("persisted", false))
-	res.conflict = bool(response.get("conflict", false))
+	# Type-test before use, the way the revision fields below do. Neither
+	# bool(x) nor `x == true` is safe on an arbitrary Variant: the constructor
+	# rejects what it does not recognise and cross-type `==` raises "Invalid
+	# operands", and either would abort this function and hand the game a null
+	# response. A non-boolean here can only mean a response shape the SDK does
+	# not understand, and the fail-safe reading of that is "did not land".
+	var persisted: Variant = response.get("persisted", false)
+	res.persisted = persisted if persisted is bool else false
+	var conflict: Variant = response.get("conflict", false)
+	res.conflict = conflict if conflict is bool else false
 	var revision: Variant = response.get("currentRevision", null)
 	# Numbers cross the JS bridge through JSON, so an int arrives as a float.
 	res.current_revision = int(revision) if (revision is int or revision is float) else null

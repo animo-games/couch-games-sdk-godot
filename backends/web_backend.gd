@@ -303,7 +303,7 @@ func load_save_result() -> Dictionary:
 		)
 	var settled := await _await_promise_settled(sdk.loadSaveResult())
 	if not settled.ok:
-		return _load_result_unavailable(_js_error_message(settled.value))
+		return _load_result_unavailable(_js_error_text(settled.get("value")))
 	# An unrecognised or missing status is normalised to "unavailable" by
 	# CouchGamesSaveLoadResult.from_dict, so a malformed answer cannot reach a
 	# game as "this player is new".
@@ -317,17 +317,6 @@ func _load_result_unavailable(message: String) -> Dictionary:
 		"hostAuthoritative": false,
 	}
 
-
-## Best-effort text for a rejected promise: a JS Error stringifies to "{}", so
-## reach for `message` before falling back to the value itself.
-func _js_error_message(value: Variant) -> String:
-	if typeof(value) == TYPE_OBJECT and value is JavaScriptObject:
-		var message = (value as JavaScriptObject).message
-		if message != null:
-			return str(message)
-	if value == null:
-		return "Save could not be loaded"
-	return str(value)
 
 
 func gameplay_start() -> Dictionary:
