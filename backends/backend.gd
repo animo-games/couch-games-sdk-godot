@@ -78,12 +78,43 @@ func build_root() -> String:
 
 # --- Classic SDK verbs ---
 
-func save_game(_save_data: Dictionary, _progress: float) -> Dictionary:
+## `expected_revision` and `on_conflict` are the game's to set, never the SDK's.
+## Leave them at their defaults and the platform applies its own: a refused
+## write is reported as {success: true, persisted: false, conflict: true}.
+##
+## `expected_revision` (an int from load_save_result()) asserts the revision
+## this write replaces. `on_conflict` is "" (platform default), "no-op", or
+## "error"; "error" turns a refusal into success: false, which only a game with
+## a BOUNDED retry loop should ask for — an uncapped one would spin for the
+## whole session.
+func save_game(
+	_save_data: Dictionary,
+	_progress: float,
+	_expected_revision: Variant = null,
+	_on_conflict: String = "",
+) -> Dictionary:
 	return _not_implemented()
 
 
+## The synchronous cache read. Cannot distinguish "no save" from "not loaded
+## yet" from "withheld from a joined guest" — use load_save_result() to decide
+## whether this is a new player.
 func load_latest_save() -> Dictionary:
 	return _not_implemented()
+
+
+## The awaitable, honest counterpart to load_latest_save(). Returns the
+## platform's shape: {status, message, payload?, metadata?, revision?,
+## hostAuthoritative}. See CouchGamesSaveLoadResult.
+##
+## Unimplemented backends report "unavailable" rather than a generic failure:
+## a game must never read a backend's silence as "this player is new".
+func load_save_result() -> Dictionary:
+	return {
+		"status": CouchGamesSaveLoadResult.STATUS_UNAVAILABLE,
+		"message": "Not implemented",
+		"hostAuthoritative": false,
+	}
 
 
 func gameplay_start() -> Dictionary:
