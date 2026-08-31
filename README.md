@@ -35,6 +35,125 @@ tools/      build_and_upload and its per-platform launchers
 export/     HTML shell for the Web export preset
 ```
 
+## Saves
+
+```gdscript
+var res := await CouchGames.load_save_result()
+if res.is_safe_to_start_fresh():
+    _state = _new_game()          # confirmed: this player has no save
+elif res.is_found():
+    _state = _from_save(res.payload)
+else:
+    _state = _new_game()          # show them something, but do NOT save it
+    _saving_enabled = false
+
+var write := await CouchGames.save_game(_state, 0.25)
+if not write.persisted:
+    push_warning("Save did not land: %s" % write.error)
+```
+
+Two rules carry all of this: **`load_save_result()` decides whether a player is
+new**, and **`save_game()` is judged by `persisted`, not `success`**.
+
+### Why `load_latest_save()` cannot tell you
+
+`load_latest_save()` reads the save the platform handed your session at startup.
+It costs no round-trip, but its empty payload is ambiguous — it means any of:
+
+- this player genuinely has no save;
+- the session had not finished starting when you asked;
+- they joined **someone else's** session, so their own save was withheld on
+  purpose (a co-op guest must see the host's board, not their solo game).
+
+Only the first makes it safe to start fresh. A game that reads the other two as
+"new player" initialises empty state, and its next whole-document save destroys
+real progress — which is exactly the bug this API exists to prevent. Use
+`load_latest_save()` only to re-read state you have already established.
+
+`load_save_result()` awaits the real answer and says which case you are in:
+
+| | Meaning | Safe to start fresh? |
+| --- | --- | --- |
+| `is_new_player()` | Confirmed: no save exists | **Yes** — the only status that is |
+| `is_found()` | `payload` holds the stored save | No — merge into `payload` |
+| `is_unavailable()` | Could not be read; one may well exist | No — and keep writes off |
+
+`is_safe_to_start_fresh()` is `is_new_player()` under a name that says what the
+answer is for. On `unavailable`, put the player somewhere sensible and leave
+saving **disabled** for the session rather than guessing.
+
+It also returns `revision` (what you read, see below), `metadata`, and
+`host_authoritative`.
+
+### Guests: `host_authoritative`
+
+When `host_authoritative` is true you are a player who joined someone else's
+session. `payload` is **your own** save, but the host owns the shared board. Use
+it as a **merge base** — read it, merge this session's contributions into it,
+write that back. Rendering it as live state would show a guest their solo game
+in place of the host's.
+
+### `persisted`, not `success`
+
+The platform refuses a write that would replace a save this session has never
+read, and by default it reports that refusal as:
+
+```gdscript
+{ success = true, persisted = false, conflict = true }
+```
+
+`success: true` on a write that did not happen looks wrong, and it is
+deliberate: this SDK is compiled into your exported build, so games already
+published cannot be updated from the platform, and many of them branch on
+`success` alone with an unbounded retry loop. An honest failure would spin them
+for a whole session.
+
+So **branch on `response.persisted`**. It is accurate whichever mode you ask
+for. `conflict` tells you the write was refused rather than broken, and a
+response that omits `persisted` means the platform took the call as a no-op —
+treat a missing value as "did not land", which is what this SDK does.
+
+If your retry loop is **bounded**, you can ask for an honest failure instead:
+
+```gdscript
+var res := await CouchGames.save_game(state, 0.25, null, "error")
+# a refusal now arrives as success = false, persisted = false, conflict = true
+```
+
+The SDK never sets this for you — only your game knows whether its retry is
+capped.
+
+### Recovering from a refusal
+
+Always the same, and it needs nothing from `current_revision`:
+
+```gdscript
+if write.conflict:
+    var res := await CouchGames.load_save_result()
+    if res.is_found():
+        await CouchGames.save_game(_merge_into(res.payload), progress, res.revision)
+```
+
+Passing `res.revision` as `expected_revision` asserts which state you are
+replacing, and is the reliable way to overwrite deliberately. `current_revision`
+on the response is the revision your write produced (or, on a refusal the server
+made, the one stored) — it is absent when the refusal happened client-side, so
+never require it.
+
+### Trying it without the platform
+
+The mock backend simulates the same guard, so every path above is reachable in
+the editor:
+
+```gdscript
+CouchGames.mock.simulate_unread_save()        # next blind save is refused
+CouchGames.mock.simulate_load_unavailable = true   # load_save_result reports "unavailable"
+CouchGames.mock.simulate_host_authoritative = true # pretend this player joined
+```
+
+`simulate_unread_save()` clears the way the real one does — call
+`load_save_result()`, and the next write is admitted again.
+
 ## Lobby events
 
 `CouchGames.lobby` is the session: the roster of everyone in it, and a tunnel

@@ -246,12 +246,29 @@ func _get_sdk() -> JavaScriptObject:
 
 # --- Classic SDK verbs ---
 
-func save_game(save_data: Dictionary, progress: float) -> Dictionary:
+func save_game(
+	save_data: Dictionary,
+	progress: float,
+	expected_revision: Variant = null,
+	on_conflict: String = "",
+) -> Dictionary:
 	var sdk = _get_sdk()
 	if not sdk:
 		push_error("CouchGames SDK: Not available")
-		return {"success": false, "error": "SDK not available"}
-	var promise = sdk.saveGame(_dict_to_js(save_data), progress)
+		return {"success": false, "error": "SDK not available", "persisted": false}
+	var promise
+	if expected_revision == null and on_conflict.is_empty():
+		# The two-argument call, byte for byte as before. A game that has not
+		# opted in must not start sending an options object to a platform build
+		# that predates one.
+		promise = sdk.saveGame(_dict_to_js(save_data), progress)
+	else:
+		var options := {}
+		if expected_revision != null:
+			options["expectedRevision"] = expected_revision
+		if not on_conflict.is_empty():
+			options["onConflict"] = on_conflict
+		promise = sdk.saveGame(_dict_to_js(save_data), progress, _dict_to_js(options))
 	return _js_to_dict(await _await_promise(promise))
 
 
@@ -259,11 +276,47 @@ func load_latest_save() -> Dictionary:
 	var sdk = _get_sdk()
 	if not sdk:
 		return {"success": false, "error": "SDK not available"}
-	# The SDK returns the save data string or null
+	# The SDK returns the save data string or null.
+	#
+	# The null is ambiguous — no save, session not started, or a joined guest's
+	# save withheld — and reporting it as an empty success is what lets a game
+	# mistake it for a new player. It stays that way ON PURPOSE. This call is a
+	# synchronous read of a cache the platform already handed us; routing it
+	# through loadSaveResult() would tell the platform this game read a save it
+	# then discarded, disarming the very guards that stop a blind overwrite.
+	# Use load_save_result() to decide whether this is a new player.
 	var data = sdk.loadLatestSave()
 	if data == null:
 		return {"success": true, "payload": {}}
 	return {"success": true, "payload": data}
+
+
+func load_save_result() -> Dictionary:
+	var sdk = _get_sdk()
+	if not sdk:
+		return _load_result_unavailable("SDK not available")
+	# A game build can outlive the platform build it was compiled against, and
+	# the reverse. Missing means this page predates loadSaveResult.
+	if sdk.loadSaveResult == null:
+		return _load_result_unavailable(
+			"This platform build does not support loadSaveResult"
+		)
+	var settled := await _await_promise_settled(sdk.loadSaveResult())
+	if not settled.ok:
+		return _load_result_unavailable(_js_error_text(settled.get("value")))
+	# An unrecognised or missing status is normalised to "unavailable" by
+	# CouchGamesSaveLoadResult.from_dict, so a malformed answer cannot reach a
+	# game as "this player is new".
+	return _js_to_dict(settled.value)
+
+
+func _load_result_unavailable(message: String) -> Dictionary:
+	return {
+		"status": CouchGamesSaveLoadResult.STATUS_UNAVAILABLE,
+		"message": message,
+		"hostAuthoritative": false,
+	}
+
 
 
 func gameplay_start() -> Dictionary:

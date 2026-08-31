@@ -140,12 +140,61 @@ func _overlay_enabled() -> bool:
 
 # --- Public API ---
 
-func save_game(save_data: Dictionary, progress: float = 0.0) -> CouchGamesSDKResponse:
-	return CouchGamesSDKResponse.from_dict(await _backend.save_game(save_data, progress))
+## Writes the player's save.
+##
+## Branch on `response.persisted`, NOT `response.success`. The platform reports
+## a refused write as success: true, persisted: false, conflict: true — so a
+## game that trusts `success` believes a save landed when it did not.
+##
+## `expected_revision` (an int from load_save_result()) asserts the revision
+## this write replaces, and is the reliable way to overwrite deliberately.
+##
+## `on_conflict` is left to the game: "" uses the platform default ("no-op"),
+## "error" turns a refusal into success: false. Only pass "error" if your retry
+## loop is BOUNDED — an uncapped one would spin for the whole session. The SDK
+## never sets it for you, precisely because it cannot know that about your game.
+func save_game(
+	save_data: Dictionary,
+	progress: float = 0.0,
+	expected_revision: Variant = null,
+	on_conflict: String = "",
+) -> CouchGamesSDKResponse:
+	if expected_revision != null \
+			and not (expected_revision is int or expected_revision is float):
+		# The platform compares this with a strict ===, so a stringified
+		# revision silently refuses every write. Warn rather than coerce: the
+		# refusal is the platform's real answer, and hiding it here would make
+		# the editor disagree with production.
+		push_warning(
+			"CouchGames: expected_revision must be the number from "
+			+ "load_save_result().revision. The platform will refuse this write."
+		)
+	return CouchGamesSDKResponse.from_dict(
+		await _backend.save_game(save_data, progress, expected_revision, on_conflict)
+	)
 
 
+## The synchronous save the platform handed this session at startup.
+##
+## An empty payload is AMBIGUOUS: this player has no save, the session had not
+## finished starting, or they joined someone else's session and their save was
+## withheld. Do not read it as "new player" — starting fresh and saving on that
+## basis is what destroys real progress.
+##
+## Use it only to re-read state you have already established. To decide whether
+## a player is new, use load_save_result().
 func load_latest_save() -> CouchGamesSDKResponse:
 	return CouchGamesSDKResponse.from_dict(await _backend.load_latest_save())
+
+
+## The awaitable, honest counterpart to load_latest_save(): says WHY there is no
+## save, and serves a joined guest their own save as a merge base.
+##
+## Only `is_safe_to_start_fresh()` (status "not_found") means "new player".
+## "unavailable" means a save may well exist and could not be read — start the
+## player somewhere sensible, but keep writes disabled.
+func load_save_result() -> CouchGamesSaveLoadResult:
+	return CouchGamesSaveLoadResult.from_dict(await _backend.load_save_result())
 
 
 func gameplay_start() -> void:

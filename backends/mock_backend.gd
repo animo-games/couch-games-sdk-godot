@@ -49,6 +49,25 @@ var _players: Array = []  # raw dicts, platform key style
 var _next_guest_index: int = 1
 var _gameplay_started_at_ms: int = -1
 var _save: Dictionary = {}
+## The stored revision this simulated session has seen. Set to the stored
+## revision at startup, the way the platform hands a session its save, so the
+## editor's normal save-without-loading flow keeps working unchanged.
+var _session_known_revision: int = 0
+## A save.json that exists but does not parse. The platform reports that as
+## "unavailable" (a save exists and cannot be read); without this the mock would
+## fall through to "not_found" and tell a game it is safe to start fresh.
+var _save_corrupt := false
+
+# The knobs below, plus simulate_unread_save(), let a game rehearse in the
+# editor the save paths it could otherwise only reach on the live platform.
+
+## Makes load_save_result() report "unavailable" — a save may exist and could
+## not be read, so the game must not treat the player as new.
+var simulate_load_unavailable := false
+## Makes load_save_result() report hostAuthoritative — this player joined
+## someone else's session, so the payload is their own save and the host owns
+## the shared board.
+var simulate_host_authoritative := false
 var _session_stats: Dictionary = {"cumulativeGameplayTimeMs": 0.0, "gameplayCompleted": false}
 var _metadata: Dictionary = {}
 var _achievements: Dictionary = {}  # key -> {"unlockedAt": iso}
@@ -161,6 +180,8 @@ func simulate_event(event: String, data: Variant, sender_user_id: String, target
 ## Deletes all persisted mock data (saves, stats, metadata, achievements).
 func reset_persistence() -> void:
 	_save = {}
+	_session_known_revision = 0
+	_save_corrupt = false
 	_session_stats = {"cumulativeGameplayTimeMs": 0.0, "gameplayCompleted": false}
 	_metadata = {}
 	_achievements = {}
@@ -171,24 +192,125 @@ func reset_persistence() -> void:
 			dir.remove(file_name)
 
 
+## Pretend this session never read the stored save, so the next whole-document
+## save_game() is refused the way the platform refuses a joined guest's blind
+## write. No-op when nothing is stored — the platform always admits a new
+## player's first save, and so does the mock.
+##
+## Recovery works as documented: call load_save_result(), merge into what it
+## returns, and the next write is admitted again.
+func simulate_unread_save() -> void:
+	_session_known_revision = -1
+
+
 # --- Classic SDK verbs ---
 
-func save_game(save_data: Dictionary, progress: float) -> Dictionary:
+func save_game(
+	save_data: Dictionary,
+	progress: float,
+	expected_revision: Variant = null,
+	on_conflict: String = "",
+) -> Dictionary:
 	await _tick()
+	var stored_revision := _stored_revision()
+	if not _admits_save_write(stored_revision, expected_revision):
+		# The platform's shape for a refusal, both modes. Only `success` differs
+		# between them; `persisted` is accurate in both, which is why it is the
+		# field a game should branch on.
+		return {
+			"success": on_conflict != "error",
+			"error": "Save skipped: this session has not loaded the stored save it would replace",
+			"persisted": false,
+			"conflict": true,
+			# A refusal implies something is stored: _admits_save_write always
+			# admits at revision 0.
+			"currentRevision": stored_revision,
+		}
+	var next_revision := stored_revision + 1
 	_save = {
 		"saveData": _round_trip(save_data),
 		"progress": progress,
 		"savedAt": Time.get_datetime_string_from_system(true),
+		"revision": next_revision,
 	}
+	# A session that just wrote knows what is stored: itself. Without this a new
+	# player's SECOND save would be refused as a blind overwrite of their own.
+	_session_known_revision = next_revision
+	_save_corrupt = false
 	_write_json("save.json", _save)
-	return {"success": true}
+	return {"success": true, "persisted": true, "currentRevision": next_revision}
 
 
 func load_latest_save() -> Dictionary:
 	await _tick()
+	# Deliberately does NOT mark the save as read. That matches the platform's
+	# SERVER guard, which this cache read never syncs. The platform's CLIENT
+	# guard is laxer — a non-empty cache read clears its staleness flag — so the
+	# mock refuses a few writes the platform would admit. Erring strict is the
+	# right direction for a simulation whose job is to surface refusals.
 	if _save.is_empty():
 		return {"success": true, "payload": {}}
 	return {"success": true, "payload": _round_trip(_save.get("saveData", {}))}
+
+
+func load_save_result() -> Dictionary:
+	await _tick()
+	if simulate_load_unavailable or _save_corrupt:
+		# Note the deliberate asymmetry with the platform: an unavailable read
+		# does NOT mark the save as read, so a save that follows one is still
+		# refused. That is what makes "unavailable means keep writes off"
+		# testable in the editor.
+		return {
+			"status": CouchGamesSaveLoadResult.STATUS_UNAVAILABLE,
+			"message": "Simulated: save could not be loaded" if simulate_load_unavailable \
+				else "Corrupted save data",
+			"hostAuthoritative": simulate_host_authoritative,
+		}
+	# Both authoritative answers sync the session, exactly as the platform does:
+	# the game has now seen what is stored, or confirmed nothing is, so its next
+	# write is intentional rather than blind. This is what makes the documented
+	# recovery — load, merge, write — work against the mock.
+	_session_known_revision = _stored_revision()
+	if _save.is_empty():
+		return {
+			"status": CouchGamesSaveLoadResult.STATUS_NOT_FOUND,
+			"message": "No save found",
+			"payload": null,
+			"metadata": _round_trip(_metadata),
+			"hostAuthoritative": simulate_host_authoritative,
+		}
+	return {
+		"status": CouchGamesSaveLoadResult.STATUS_FOUND,
+		"message": "",
+		"payload": _round_trip(_save.get("saveData", {})),
+		"metadata": _round_trip(_metadata),
+		"revision": _stored_revision(),
+		"hostAuthoritative": simulate_host_authoritative,
+	}
+
+
+## The stored save's revision, or 0 when nothing is stored. Saves written by an
+## older build of this mock have no revision and count as 1.
+func _stored_revision() -> int:
+	if _save.is_empty():
+		return 0
+	return int(_save.get("revision", 1))
+
+
+## Mirrors the platform's no-clobber guard: a write lands unless it would
+## replace a stored save this session has never seen.
+func _admits_save_write(stored_revision: int, expected_revision: Variant) -> bool:
+	if stored_revision == 0:
+		return true  # Nothing stored, so nothing to destroy.
+	if _session_known_revision == stored_revision:
+		return true
+	# Numeric only, matching the platform's strict `===`. Coercing a String here
+	# would admit in the editor a write the platform refuses, which is the worst
+	# way for a game to learn about expected_revision.
+	if (expected_revision is int or expected_revision is float) \
+			and int(expected_revision) == stored_revision:
+		return true  # The caller asserted what it replaces, and is right.
+	return false
 
 
 func gameplay_start() -> Dictionary:
@@ -506,6 +628,11 @@ func _round_trip(value: Variant) -> Variant:
 
 func _load_persisted() -> void:
 	_save = _read_json("save.json", {})
+	_save_corrupt = _save.is_empty() and FileAccess.file_exists(SAVE_DIR + "save.json")
+	# The platform hands a starting session the save it is in sync with, so the
+	# guard admits its writes. Match that, or every editor run with a save on
+	# disk would start out refusing.
+	_session_known_revision = _stored_revision()
 	_session_stats = _read_json("session_stats.json",
 		{"cumulativeGameplayTimeMs": 0.0, "gameplayCompleted": false})
 	_metadata = _read_json("metadata.json", {})
