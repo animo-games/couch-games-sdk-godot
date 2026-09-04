@@ -3,6 +3,8 @@ extends EditorPlugin
 
 const _MENU_ITEM := "Couch Games: Build & Upload Web…"
 const _SLUG_SETTING := "couch_games/deploy/slug"
+const _PRESET_SETTING := "couch_games/deploy/preset"
+const _DEFAULT_PRESET := "Web"
 const _UPLOAD_SCRIPT := "res://addons/couch-games-sdk/tools/build_and_upload.gd"
 const _AUTOLOAD_SCRIPT := "res://addons/couch-games-sdk/core/couch_games_sdk.gd"
 const _PresentPathExportPlugin := preload(
@@ -23,9 +25,11 @@ const _SETTINGS := [
 	["couch_games/local/enabled", true, TYPE_BOOL, PROPERTY_HINT_NONE, ""],
 	["couch_games/local/port", 8974, TYPE_INT, PROPERTY_HINT_RANGE, "1024,65535,1"],
 	[_SLUG_SETTING, "", TYPE_STRING, PROPERTY_HINT_NONE, ""],
+	[_PRESET_SETTING, _DEFAULT_PRESET, TYPE_STRING, PROPERTY_HINT_NONE, ""],
 ]
 
 var _dialog: ConfirmationDialog
+var _dialog_label: Label
 var _slug_edit: LineEdit
 var _result_dialog: AcceptDialog
 var _thread: Thread
@@ -66,9 +70,11 @@ func _build_dialogs() -> void:
 	_dialog.title = "Couch Games: Build & Upload"
 	_dialog.ok_button_text = "Build & Upload"
 	var box := VBoxContainer.new()
-	var label := Label.new()
-	label.text = "Exports the \"Web\" preset and uploads it as a new dev version.\nGame slug (developer portal):"
-	box.add_child(label)
+	_dialog_label = Label.new()
+	# Filled in on open, not here: the preset is a project setting the user can
+	# change after the plugin loaded, and a stale name in this dialog is exactly
+	# the kind of thing that gets a build deployed from the wrong preset.
+	box.add_child(_dialog_label)
 	_slug_edit = LineEdit.new()
 	_slug_edit.placeholder_text = "my-game-slug"
 	box.add_child(_slug_edit)
@@ -86,6 +92,11 @@ func _open_upload_dialog() -> void:
 	if _running:
 		_show_result("Couch Games", "An upload is already in progress.")
 		return
+	_dialog_label.text = (
+		"Exports the \"%s\" preset and uploads it as a new dev version."
+		% _resolve_preset()
+		+ "\nGame slug (developer portal):"
+	)
 	_slug_edit.text = str(ProjectSettings.get_setting(_SLUG_SETTING, ""))
 	_dialog.popup_centered()
 	_slug_edit.grab_focus()
@@ -136,6 +147,13 @@ func _show_result(title: String, message: String) -> void:
 	_result_dialog.title = title
 	_result_dialog.dialog_text = message
 	_result_dialog.popup_centered()
+
+
+# Mirrors build_and_upload.gd's own resolution, so the dialog names the preset
+# the upload will actually export.
+func _resolve_preset() -> String:
+	var preset := str(ProjectSettings.get_setting(_PRESET_SETTING, _DEFAULT_PRESET)).strip_edges()
+	return preset if preset != "" else _DEFAULT_PRESET
 
 
 # Registers a project setting with its default without clobbering a value the

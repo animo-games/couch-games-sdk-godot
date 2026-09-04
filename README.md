@@ -462,6 +462,13 @@ pipeline on a background thread. Either way you need a "Web" export preset and
 `COUCHGAMES_API_KEY` in the environment or in a `.env` at the project root;
 `DEV_PORTAL_URL` overrides the portal it uploads to.
 
+If the build you ship is a differently-named preset -- an engine/experience
+split, a platform-only preset carrying the Couch HTML shell -- point
+`couch_games/deploy/preset` at it. Nothing else selects the preset, so a project
+that leaves this on the default deploys "Web" no matter which preset it exports
+by hand, and the mismatch surfaces as a build that boots into nothing on the
+platform.
+
 ## Project settings
 
 The plugin registers these under Project Settings (Advanced), all optional:
@@ -480,6 +487,7 @@ The plugin registers these under Project Settings (Advanced), all optional:
 | `couch_games/local/enabled` | `true` | Allow the loopback lobby in debug builds |
 | `couch_games/local/port` | `8974` | Port the loopback lobby binds |
 | `couch_games/deploy/slug` | `""` | Slug remembered by the Build & Upload dialog |
+| `couch_games/deploy/preset` | `"Web"` | Export preset that Build & Upload exports |
 
 `--couch-mock` as a user arg forces the mock for a single run; `--couch-role=host`
 or `--couch-role=guest` pins an instance's role in the loopback lobby.
