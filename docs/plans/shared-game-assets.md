@@ -1,6 +1,6 @@
 # Shared game assets implementation plan
 
-Status: implementation in progress on `feat/shared-game-assets`. Root review confirms the goal and public contract below. The [executable handoff](shared-game-assets-handoff.md) records the concurrency and recovery details required to implement it safely. Local native and Web integration have passed; storage recovery/migration review and deployed acceptance remain open.
+Status: local implementation and source review complete on `feat/shared-game-assets`; final full verification rerun and deployed acceptance remain open. See the [review checkpoint](shared-game-assets-review.md) and [executable handoff](shared-game-assets-handoff.md).
 
 ## Goal and scope
 
