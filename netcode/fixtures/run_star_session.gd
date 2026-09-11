@@ -70,13 +70,13 @@
 ##      peer_joined(host). The guest tears its link down (peer_lost,
 ##      transport_gap "peer-rejoined" -- which reaches the guest SESSION), so
 ##      the restarted host's first offer is an INITIAL adoption on a fresh peer:
-##      no handshake-restart, no follow budget spent. The label it carries is
-##      numerically 1 again -- _epoch_seq starts at 0 in every process -- so
-##      "new incarnation" cannot be asserted as a number here; what is asserted
-##      is that the guest follows the restarted host at all, and that both ends
-##      agree on the label afterwards. The case where signaling does NOT report
-##      the restart (a same-numbered label against a guest that still believes
-##      its old link is up) is G11 F21's territory, not this file's.
+##      no handshake-restart, no follow budget spent. Labels are minted above a
+##      per-instance random seed (CouchStarTransport.INCARNATION_SEED_BITS), so
+##      the restarted host's label is distinct from the dead one's; what is
+##      asserted is that the guest follows the restarted host, that both ends
+##      agree on the label afterwards, and that it differs from the old one.
+##      The case where signaling does NOT report the restart is G11 F24's
+##      territory, not this file's.
 ##
 ## HONESTY RISKS, stated plainly:
 ##   - Section 3's premise ("the reply is in the guest's peer before the
@@ -505,6 +505,7 @@ func _run() -> void:
 	# ======================================================================
 	print("-- 6: host restart mid-session --")
 	var old_epoch := host.session.epoch
+	var old_label := guest.star.incarnation_for("host")
 	var guest_ready_before := guest.star_ready.size()
 	# The dead process: its star closes (which closes its signaling -- the
 	# guest will hear peer_left), its session is never polled again and
@@ -550,9 +551,9 @@ func _run() -> void:
 	_check(reestablished, "peer_ready fires on the restarted host and a second time on the guest")
 	_check(
 		guest.star.incarnation_for("host") != 0
-			and guest.star.incarnation_for("host") == host2.star.incarnation_for("g1"),
-		"the guest operates under the restarted host's incarnation label (%d; a per-process counter -- see header fact 3)"
-			% guest.star.incarnation_for("host")
+			and guest.star.incarnation_for("host") == host2.star.incarnation_for("g1")
+			and guest.star.incarnation_for("host") != old_label,
+		"the guest operates under the restarted host's incarnation label, distinct from the dead host's (see header fact 3)"
 	)
 	_check(
 		_count_gap(guest.star_gaps, "host", "handshake-restart") == 0 and guest.star.handshake_restarts == 0,
