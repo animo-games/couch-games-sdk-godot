@@ -450,6 +450,63 @@ pack`. The real cause is the engine error just above it in the log:
 `Pack version unsupported: <n>`. Exporting the game with an older editor than
 the one that produced the pack is the easy way to do this to yourself.
 
+## Shared game assets
+
+Shared assets are files published separately from a game build: audio, optional
+packs, or large resources that can change without a new export. Address them by
+a logical relative path, never by constructing a URL. At launch, the platform
+selects one immutable manifest snapshot; each name resolves to a content-hashed
+object in that snapshot. Existing launches therefore keep their mapping when a
+new upload replaces or removes the logical name.
+
+```gdscript
+func _ready() -> void:
+    await CouchGames.init()
+
+    # This is a manifest-resolved immutable URL, not root + filename.
+    var url := await CouchGames.game.get_shared_file_url("audio/theme.ogg")
+    var bytes := await CouchGames.game.get_shared_file("audio/theme.ogg")
+
+    if await CouchGames.game.load_shared_pack("packs/common.pck"):
+        var room := load("res://shared/rooms/lobby.tscn")
+```
+
+`shared_root()` returns the explicit platform root for the current launch, or
+an empty string when shared assets are unavailable. It is useful for display or
+diagnostics, but a root plus a filename is not a download URL: use
+`get_shared_file_url()` so the parent SDK applies its manifest mapping. Both
+byte and URL calls are asynchronous. `get_shared_file()` accepts an optional
+`on_progress(downloaded_bytes, total_bytes)` callback with the same 30-second
+no-byte timeout as build-file downloads. Concurrent reads of the same immutable
+file share one transfer; only the caller that starts it receives progress.
+
+Logical paths are decoded text. They may be nested and include spaces, `%`,
+`?`, `#`, and Unicode, but cannot be empty, absolute, URL/scheme-like, contain
+backslashes or control characters, or use empty, `.` or `..` segments. The SDK
+encodes each URL segment exactly once. Empty shared files are valid for raw
+reads; `load_shared_pack()` rejects empty and invalid pack bytes.
+
+Shared packs stage below `user://couch_shared/` with the root identity, content
+hash, and logical path. A mounted pack is process-global and idempotent;
+`is_shared_pack_loaded(path)` is false until that path has been resolved in the
+current launch. Staging paths prevent equal pack filenames from different games
+or revisions aliasing each other. They do not isolate the `res://` paths inside
+packs: choose distinct resource paths and load order deliberately when packs can
+overlap.
+
+The Web parent needs `CouchGames.game.getSharedRoot()` and
+`getSharedFileInfo()`. An older parent reports a clear unsupported-feature error
+only when a shared read is requested. A standalone Web export without a Couch
+Games parent keeps the existing mock behaviour for other APIs, while shared
+assets remain unavailable because it has no launch manifest.
+
+For editor, native, and local-relay runs, the mock reads ordinary files from
+`couch_games/mock/shared_files_dir` (default `res://shared_files`) and hashes
+their bytes for the same immutable identity rules. No local manifest or hashed
+copy is required. If those assets are intended to be remote-only, exclude the
+directory from each export preset (for example, add `shared_files/**` to its
+`exclude_filter`) so they do not ship inside the game build.
+
 ## Deploying a build
 
 ```
@@ -471,6 +528,7 @@ The plugin registers these under Project Settings (Advanced), all optional:
 | `couch_games/mock/force_mock` | `false` | Use the mock even in a platform web export |
 | `couch_games/mock/enable_debug_overlay` | `true` | Show the overlay when the mock is active |
 | `couch_games/mock/overlay_toggle_key` | `F10` | Key that toggles the overlay |
+| `couch_games/mock/shared_files_dir` | `res://shared_files` | Directory used for mock shared assets |
 | `couch_games/mock/latency_ms` | `0` | Artificial delay on every awaited verb |
 | `couch_games/mock/local_username` | `Player 1` | Name of the local player in the mock |
 | `couch_games/mock/experience_name` | project name | Title reported by the mock |

@@ -1,8 +1,9 @@
-# The one way a resource pack gets mounted, shared by both namespaces that have
-# packs: CouchGames.experience (bytes the platform already downloaded) and
-# CouchGames.game (bytes fetched from the build root on demand). Two sourcing
-# strategies, one `bytes -> user:// -> load_resource_pack()` path, so the two
-# cannot drift apart.
+# The one way a resource pack gets mounted, shared by every namespace that has
+# packs: CouchGames.experience (bytes the platform already downloaded), build
+# files (fetched from the build root), and launch-resolved shared assets. The
+# caller supplies a full identity-bearing user:// destination; shared packs use
+# root-identity/content-hash/logical-path, so this process-wide record cannot
+# confuse equal filenames from separate roots or revisions.
 #
 # What is mounted is tracked STATICALLY, because load_resource_pack() is a
 # process-global effect: the pack stays mounted across scene reloads, so a

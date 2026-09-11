@@ -1,0 +1,20 @@
+; This project is linked to the checkout by run_native.sh.  It intentionally
+; contains no vendored addon or downloaded dependency.
+config_version=5
+
+[application]
+config/name="Couch Games shared-assets fixture"
+run/main_scene="res://fixture_main.tscn"
+
+[autoload]
+CouchGames="*res://addons/couch-games-sdk/core/couch_games_sdk.gd"
+
+[display]
+window/size/viewport_width=640
+window/size/viewport_height=360
+window/size/window_width_override=640
+window/size/window_height_override=360
+
+[rendering]
+renderer/rendering_method="gl_compatibility"
+renderer/rendering_method.mobile="gl_compatibility"
