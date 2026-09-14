@@ -21,6 +21,7 @@ const _EXPERIENCE_NAME_SETTING := "couch_games/mock/experience_name"
 const _EXPERIENCE_URL_SETTING := "couch_games/mock/experience_url"
 const _EXPERIENCE_FILES_DIR_SETTING := "couch_games/mock/experience_files_dir"
 const _BUILD_FILES_DIR_SETTING := "couch_games/mock/build_files_dir"
+const _SHARED_FILES_DIR_SETTING := "couch_games/mock/shared_files_dir"
 
 ## Where the mock backend reads experience files from, so packs can be built and
 ## played without uploading them.
@@ -30,6 +31,12 @@ const DEFAULT_EXPERIENCE_FILES_DIR := "res://experience_files"
 ## directory tools/build_and_upload zips and uploads, so the file the game
 ## loads in the editor is the same file that ships.
 const DEFAULT_BUILD_FILES_DIR := "res://build/web"
+
+## Shared assets are ordinary files locally.  The production platform resolves
+## a logical name through a launch manifest to an immutable hashed object; the
+## mock deliberately does not make a developer maintain that manifest just to
+## iterate in the editor.
+const DEFAULT_SHARED_FILES_DIR := "res://shared_files"
 
 ## Every tunnel delivery attempt (both directions), for the debug overlay log.
 ## entry = {direction: "in"|"out", event, data, sender_user_id, target,
@@ -396,6 +403,72 @@ func _experience_files_dir() -> String:
 func build_root() -> String:
 	return str(ProjectSettings.get_setting(
 		_BUILD_FILES_DIR_SETTING, DEFAULT_BUILD_FILES_DIR))
+
+
+# --- Shared game assets ---
+
+func shared_root() -> String:
+	return _shared_files_dir()
+
+
+func resolve_shared_file(relative_path: String) -> Dictionary:
+	# CouchGameFiles has already validated and canonicalized this decoded logical
+	# path. Reuse that one validator here too: backend callers cannot turn a
+	# direct mock resolution into a local path escape. Keep this side-effect free:
+	# a missing file is a normal structured failure, and a zero-byte file is a
+	# successful result.
+	await _tick()
+	if CouchGameFiles.canonical_shared_path(relative_path) != relative_path:
+		return _shared_failure("Invalid shared logical path '%s'" % relative_path)
+	var root := _shared_files_dir()
+	var local_path := root.path_join(relative_path)
+	if not FileAccess.file_exists(local_path):
+		return _shared_failure("No shared file at %s" % local_path)
+	var bytes := FileAccess.get_file_as_bytes(local_path)
+	var open_error := FileAccess.get_open_error()
+	if open_error != OK:
+		return _shared_failure("Cannot read shared file '%s': %s"
+			% [local_path, error_string(open_error)])
+	var canonical_root := ProjectSettings.globalize_path(root).simplify_path()
+	var sha256 := _sha256_hex(bytes)
+	return {
+		"success": true,
+		"error": "",
+		"root_identity": _sha256_hex(canonical_root.to_utf8_buffer()),
+		"file_identity": "%s\n%s\n%s" % [canonical_root, relative_path, sha256],
+		"url": local_path,
+		"sha256": sha256,
+		"size": bytes.size(),
+		"local_path": local_path,
+	}
+
+
+func _shared_files_dir() -> String:
+	return str(ProjectSettings.get_setting(
+		_SHARED_FILES_DIR_SETTING, DEFAULT_SHARED_FILES_DIR))
+
+
+static func _shared_failure(message: String) -> Dictionary:
+	return {
+		"success": false,
+		"error": message,
+		"root_identity": "",
+		"file_identity": "",
+		"url": "",
+		"sha256": "",
+		"size": -1,
+		"local_path": "",
+	}
+
+
+static func _sha256_hex(bytes: PackedByteArray) -> String:
+	var context := HashingContext.new()
+	context.start(HashingContext.HASH_SHA256)
+	# HashingContext rejects a zero-length update, but the SHA-256 digest of an
+	# empty shared file is still a valid immutable identity.
+	if not bytes.is_empty():
+		context.update(bytes)
+	return context.finish().hex_encode()
 
 
 func get_game_metadata() -> Dictionary:

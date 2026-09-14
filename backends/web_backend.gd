@@ -248,6 +248,113 @@ func build_root() -> String:
 	return _build_root
 
 
+# --- Shared game assets ---
+
+## The shared root is supplied by the parent runtime.  It must never be derived
+## from build_root(): standalone experiences and normal builds have different
+## URL depths, and the root is a launch-scoped capability rather than a sibling
+## directory of the exported game.
+func shared_root() -> String:
+	var api := _get_shared_game_api()
+	if api == null or api.getSharedRoot == null:
+		return ""
+	var root = api.getSharedRoot()
+	return str(root) if root != null else ""
+
+
+## Resolves a logical shared path through the platform's immutable launch
+## manifest.  `getSharedFileInfo` is intentionally used instead of the URL-only
+## helper: the SHA-256 and byte count make transfer and mounted-pack identities
+## independent of mutable launch state.
+func resolve_shared_file(relative_path: String) -> Dictionary:
+	if CouchGameFiles.canonical_shared_path(relative_path) != relative_path:
+		return _shared_failure("Invalid shared logical path '%s'" % relative_path)
+	var api := _get_shared_game_api()
+	if api == null or api.getSharedRoot == null or api.getSharedFileInfo == null:
+		return _shared_failure(
+			"Shared assets require a newer Couch Games platform SDK "
+			+ "(game.getSharedRoot and game.getSharedFileInfo are unavailable)")
+
+	var root_value = api.getSharedRoot()
+	if root_value == null or str(root_value).is_empty():
+		return _shared_failure("Shared assets are unavailable for this launch")
+	var root := _normalize_shared_root(str(root_value))
+	if not (root.begins_with("https://") or root.begins_with("http://")):
+		return _shared_failure("Platform returned an invalid shared-assets root")
+
+	var settled: Dictionary = await _await_promise_settled(api.getSharedFileInfo(relative_path))
+	if not settled.get("ok", false):
+		return _shared_failure(_js_error_text(settled.get("value")))
+	var info := _js_to_dict(settled.get("value"))
+	var url := str(info.get("url", ""))
+	var sha256 := str(info.get("sha256", ""))
+	var size_value = info.get("size", -1)
+	if typeof(size_value) != TYPE_INT and typeof(size_value) != TYPE_FLOAT:
+		return _shared_failure("Platform returned an invalid shared-file size")
+	var size := float(size_value)
+	if url.is_empty() or not url.begins_with(root + "/"):
+		return _shared_failure("Platform returned a shared URL outside the current root")
+	if not _is_sha256(sha256):
+		return _shared_failure("Platform returned an invalid shared-file SHA-256")
+	if size < 0.0 or size != floor(size):
+		return _shared_failure("Platform returned an invalid shared-file size")
+
+	return {
+		"success": true,
+		"error": "",
+		"root_identity": _sha256_hex(root.to_utf8_buffer()),
+		"file_identity": "%s\n%s" % [relative_path, sha256],
+		"url": url,
+		"sha256": sha256,
+		"size": int(size),
+		"local_path": "",
+	}
+
+
+func _get_shared_game_api() -> JavaScriptObject:
+	var sdk := _get_sdk()
+	if sdk == null:
+		return null
+	return sdk.game
+
+
+static func _normalize_shared_root(root: String) -> String:
+	var normalized := root
+	while normalized.ends_with("/"):
+		normalized = normalized.substr(0, normalized.length() - 1)
+	return normalized
+
+
+static func _is_sha256(value: String) -> bool:
+	if value.length() != 64:
+		return false
+	for i in value.length():
+		if "0123456789abcdef".find(value.substr(i, 1)) == -1:
+			return false
+	return true
+
+
+static func _sha256_hex(bytes: PackedByteArray) -> String:
+	var context := HashingContext.new()
+	context.start(HashingContext.HASH_SHA256)
+	if not bytes.is_empty():
+		context.update(bytes)
+	return context.finish().hex_encode()
+
+
+static func _shared_failure(message: String) -> Dictionary:
+	return {
+		"success": false,
+		"error": message,
+		"root_identity": "",
+		"file_identity": "",
+		"url": "",
+		"sha256": "",
+		"size": -1,
+		"local_path": "",
+	}
+
+
 func _get_sdk() -> JavaScriptObject:
 	if not _sdk:
 		if not _window:
