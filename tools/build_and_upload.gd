@@ -13,10 +13,14 @@ extends SceneTree
 #     --script res://addons/couch-games-sdk/tools/build_and_upload.gd -- <slug>
 #
 # Expects to live at <project>/addons/couch-games-sdk/ in a project that has a
-# "Web" export preset. Reads COUCHGAMES_API_KEY (required) and DEV_PORTAL_URL
-# (optional) from the environment or from a .env file at the project root.
+# "Web" export preset -- or any other preset named in couch_games/deploy/preset,
+# which is how a project whose platform build is a differently-named preset (an
+# engine/experience split, say) points the deploy at it. Reads
+# COUCHGAMES_API_KEY (required) and DEV_PORTAL_URL (optional) from the
+# environment or from a .env file at the project root.
 
-const PRESET := "Web"
+const PRESET_SETTING := "couch_games/deploy/preset"
+const DEFAULT_PRESET := "Web"
 const DEFAULT_PORTAL := "https://developer.couchgames.com"
 const PRESENT_PATH_PATCH_MARKER := "/*present-path-patch*/"
 
@@ -53,8 +57,9 @@ func _run() -> int:
 		ignore.close()
 
 	var index_path := web_dir.path_join("index.html")
-	print("Exporting \"%s\" preset ..." % PRESET)
-	var export_args := ["--headless", "--path", project_dir, "--export-release", PRESET, index_path]
+	var preset := _resolve_preset()
+	print("Exporting \"%s\" preset ..." % preset)
+	var export_args := ["--headless", "--path", project_dir, "--export-release", preset, index_path]
 	var out := []
 	var rc := OS.execute(OS.get_executable_path(), export_args, out, true)
 	if rc != 0:
@@ -86,6 +91,14 @@ func _run() -> int:
 	var zip_bytes := FileAccess.get_file_as_bytes(zip_path)
 	print("Uploading %s build to %s ..." % [_human_size(zip_bytes.size()), portal])
 	return await _upload(portal, slug, api_key, zip_bytes)
+
+
+# The preset to export, from couch_games/deploy/preset. Blank (or unset, in a
+# project where the plugin never registered the setting) means the "Web" preset
+# every Godot project starts with.
+static func _resolve_preset() -> String:
+	var preset := str(ProjectSettings.get_setting(PRESET_SETTING, DEFAULT_PRESET)).strip_edges()
+	return preset if preset != "" else DEFAULT_PRESET
 
 
 static func _has_present_path_patch(js_path: String) -> bool:
