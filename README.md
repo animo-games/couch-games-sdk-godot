@@ -579,6 +579,26 @@ copy is required. If those assets are intended to be remote-only, exclude the
 directory from each export preset (for example, add `shared_files/**` to its
 `exclude_filter`) so they do not ship inside the game build.
 
+### Publishing shared assets
+
+```
+./addons/couch-games-sdk/tools/upload_shared_assets.sh  <game-slug> [dir] [--overwrite]    macOS/Linux
+.\addons\couch-games-sdk\tools\upload_shared_assets.ps1 <game-slug> [dir] [--overwrite]    Windows
+```
+
+Or use Project > Tools > "Couch Games: Upload Shared Assets…", which runs the
+same pipeline on a background thread. `dir` defaults to
+`couch_games/mock/shared_files_dir` -- the same directory the mock reads in the
+editor, so what you tested locally is what gets published -- and needs
+`COUCHGAMES_API_KEY` in the environment or a `.env` at the project root, same
+as the build upload.
+
+`.import` sidecars and dot-prefixed files/directories (`.gdignore`,
+`.DS_Store`, …) are skipped automatically. A logical path that already exists
+on the platform is left untouched unless `--overwrite` is passed, in which
+case its contents are replaced; either way, remote files that are absent
+locally are never removed.
+
 ## Deploying a build
 
 ```
