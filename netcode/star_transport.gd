@@ -78,23 +78,26 @@
 ## at construction. A role change means a NEW transport, exactly as a transport
 ## change does. There is no mid-session switching anywhere in v1.
 ##
+## Re-establishment (Phase 2). A link that came UP and then died is rebuilt by
+## the HOST, from _on_engine_peer_disconnected, after a backoff: the first
+## death waits REBUILD_BACKOFF_BASE_MS, every consecutive death doubles it up
+## to REBUILD_BACKOFF_MAX_MS, a link that stayed up for REBUILD_STABLE_MS
+## before dying starts the sequence over, and the death after
+## MAX_LINK_REBUILDS consecutive rebuilds is terminal -- the peer is torn down
+## and tombstoned exactly like a terminal connect failure, reported as
+## transport_gap("rebuild-exhausted"), and only a fresh peer_joined revives it.
+## That bound is the whole point: without it a flapping link is a rebuild
+## storm, which is why Phase 1 deferred this. The guest never initiates: it is
+## no longer "established" once its link died (_connected no longer holds it),
+## so it FOLLOWS the new incarnation the rebuild offer carries -- the same
+## adoption rule that already handled a post-death offer in Phase 1, now with
+## a host that actually sends one. Each rebuild is a fresh connect cycle with
+## the usual MAX_CONNECT_ATTEMPTS budget, and a death that signaling has
+## already reported as peer_left is NOT rebuilt (only peer_joined
+## re-authorises). G11 F23 is the gate: delay, doubling, cap, stable reset,
+## exhaustion, revival.
+##
 ## v1 limitations, decided and stated rather than hidden:
-##   - A link that came UP and then died is not automatically rebuilt by this
-##     file reacting to the disconnect itself -- peer_lost fires and that is
-##     all. The rebuild path is armed only by the connect timeout (a link that
-##     never came up) and by a signaling peer_left/peer_joined pair. Automatic
-##     re-establishment needs a backoff policy to avoid a rebuild storm, and that
-##     is design surface Phase 1 did not sanction. Phase 2 adds it in
-##     _on_engine_peer_disconnected. One consequence of the incarnation scheme
-##     below: a link that came up and then died CAN now recover if a post-death
-##     host offer ever arrives, because the guest is no longer "established"
-##     (_connected no longer holds it) and will follow the new incarnation the
-##     offer carries. This is a deliberate, Daniel-approved consequence, not a
-##     backdoor around the Phase-2 boundary: the guest never initiates a
-##     rebuild itself, so the rebuild-storm risk that motivated deferring
-##     re-establishment to Phase 2 does not apply here -- the host's retransmit
-##     interval and its MAX_CONNECT_ATTEMPTS budget already bound how often a
-##     post-death offer can occur.
 ##   - There is no star->lobby fallback SWITCHING. Selecting a transport is the
 ##     caller's job and happens once.
 ##   - A roster player with no signaling presence (an overlay-faked guest) is
@@ -188,6 +191,20 @@ const MAX_GEN := MAX_CONNECT_ATTEMPTS - 1
 const MAX_INCARNATION_FOLLOWS := 8
 const MAX_INC := 1000000                  # hygiene bound on the wire field, not a real budget
 
+## Phase 2 re-establishment (host side only -- see _on_engine_peer_disconnected).
+## A link that came up and then died is rebuilt after a delay that doubles with
+## every consecutive death: BASE, 2*BASE, 4*BASE, ... capped at MAX. A link that
+## stayed up for STABLE_MS before dying starts the sequence over. After
+## MAX_LINK_REBUILDS consecutive rebuilds the peer is torn down and tombstoned
+## exactly like a terminal connect failure. Sized so the whole budget stays
+## inside what a guest will wait through: the guest re-arms
+## GUEST_CONNECT_TIMEOUT_MS only when it ADOPTS a rebuild offer, so the delays
+## between rebuilds never count against it.
+const REBUILD_BACKOFF_BASE_MS := 1000
+const REBUILD_BACKOFF_MAX_MS := 5000
+const MAX_LINK_REBUILDS := 4
+const REBUILD_STABLE_MS := 30000
+
 # ============================================================================
 # Signals -- the four CouchTransport contract signals, verbatim (transport.gd:26-33)
 # ============================================================================
@@ -248,6 +265,13 @@ var ice_rejected: int:
 var decode_mutes: int:
 	get:
 		return _decode_mutes
+
+## Rebuilds ISSUED for links that came up and then died (Phase 2), across every
+## peer. Counts the moment the backoff deadline fires and a fresh offer is
+## built, never the death itself -- peer_lost already reports that.
+var link_rebuilds: int:
+	get:
+		return _link_rebuilds
 
 var logged_reject_kinds: int:
 	get:
@@ -432,6 +456,9 @@ var _deferred_peer_ids: Dictionary = {}    # peer_id -> true, held while the ros
 var _host_resolve_deadline: int = 0        # 0 = disarmed, -1 = arm on next poll(), >0 = absolute ms
 var _decode_failures: Dictionary = {}      # peer_id -> int, consecutive rejects with no accepted frame between
 var _muted_until: Dictionary = {}          # peer_id -> int ms, packets dropped undecoded while now_ms < this
+var _rebuild_at: Dictionary = {}           # peer_id -> int ms, -1 == "arm on the next poll"; host only
+var _rebuild_level: Dictionary = {}        # peer_id -> int, consecutive deaths with no REBUILD_STABLE_MS between
+var _connected_since: Dictionary = {}      # peer_id -> int ms, now_ms at peer_ready; decides the stable reset
 var _send_lane_tally: Dictionary = {}      # MultiplayerPeer.TRANSFER_MODE_* -> int, sender-side lane witness
 var _reject_count: int = 0
 var _oversized_sends: int = 0
@@ -442,6 +469,7 @@ var _stale_generation_drops: int = 0
 var _ice_dropped: int = 0
 var _ice_rejected: int = 0
 var _decode_mutes: int = 0
+var _link_rebuilds: int = 0
 var _logged_ice_sample: bool = false       # true once one full add_ice_candidate rejection has been logged
 
 # ============================================================================
@@ -689,6 +717,19 @@ func poll(now_ms: int) -> void:
 		if now_ms >= deadline:
 			_on_connect_timeout(pid as String)
 
+	# Phase 2 rebuild deadlines. Armed by _on_engine_peer_disconnected with the
+	# -1 convention, so the delay is measured from the poll that observed the
+	# death; _issue_link_rebuild re-checks every precondition at fire time
+	# because signaling can report a departure in between.
+	for pid in _rebuild_at.keys().duplicate():
+		var at: int = int(_rebuild_at[pid])
+		if at == -1:
+			at = now_ms + _rebuild_delay_ms(pid as String)
+			_rebuild_at[pid] = at
+		if now_ms >= at:
+			_rebuild_at.erase(pid)
+			_issue_link_rebuild(pid as String)
+
 	for pid in _sdp_retx.keys().duplicate():
 		var entry: Variant = _sdp_retx.get(pid)
 		if not (entry is Dictionary):
@@ -766,6 +807,9 @@ func close() -> void:
 	_host_resolve_deadline = 0
 	_decode_failures.clear()
 	_muted_until.clear()
+	_rebuild_at.clear()
+	_rebuild_level.clear()
+	_connected_since.clear()
 
 # ============================================================================
 # Public contract (CouchTransport)
@@ -817,6 +861,32 @@ func broadcast(envelope: Dictionary) -> bool:
 
 func is_ready() -> bool:
 	return not _closed and _mp != null and not _connected.is_empty()
+
+# ============================================================================
+# DEBUG-ONLY fault injection -- same gate and same rationale as
+# CouchLobbyTransport's levers: inert in a release build, so an export can never
+# kill its own link no matter what a caller does.
+# ============================================================================
+
+
+## Simulate the network dying under an ESTABLISHED link to `peer_id`: closes the
+## local WebRTCPeerConnection and touches NOTHING else, so the engine reports the
+## death exactly as it would report a real one -- peer_disconnected here on the
+## next poll(), and on the remote side once its own engine notices. Every
+## bookkeeping consequence (peer_lost, _recently_lost, the rebuild this file
+## schedules) then flows through the same code a real death takes. Returns
+## whether a link was actually killed; false in a release build, for an unknown
+## peer, or for one that is not up.
+func fault_kill_link(peer_id: String) -> bool:
+	if not OS.is_debug_build():
+		return false
+	if not _connected.has(peer_id):
+		return false
+	var pc := _pcs.get(peer_id) as WebRTCPeerConnection
+	if pc == null:
+		return false
+	pc.close()
+	return true
 
 # ============================================================================
 # Diagnostics / lookup (not part of the CouchTransport contract, extra methods
@@ -1084,6 +1154,9 @@ func _teardown_peer(pid: String) -> void:
 	_connected.erase(pid)
 	_decode_failures.erase(pid)
 	_muted_until.erase(pid)
+	_rebuild_at.erase(pid)
+	_rebuild_level.erase(pid)
+	_connected_since.erase(pid)
 
 
 ## Arm `pid`'s connect deadline (see poll()'s "unarmed" convention). Called from
@@ -1485,8 +1558,10 @@ func _on_engine_peer_connected(net_id: int) -> void:
 	if _connected.has(pid):
 		return
 	_connected[pid] = true
+	_connected_since[pid] = _now_ms
 	_connect_deadlines.erase(pid)
 	_sdp_retx.erase(pid)
+	_rebuild_at.erase(pid)
 	# A link that came up earns a fresh follow budget -- the ADOPTs it took to
 	# get here paid for themselves; a FUTURE rejoin's straggler traffic must
 	# not inherit whatever was already spent chasing this one.
@@ -1497,10 +1572,15 @@ func _on_engine_peer_connected(net_id: int) -> void:
 		transport_gap.emit(pid, "peer-reconnected")
 
 
-## A link that came UP and then died is not rebuilt here -- peer_lost fires
-## and that is all (see the header's v1 limitations). The rebuild path is
-## armed only by the connect timeout (a link that never came up) and by a
-## signaling peer_left/peer_joined pair.
+## A link that came UP and then died. peer_lost fires first, on both roles;
+## then the HOST schedules a rebuild (see the header's "Re-establishment"):
+## the delay doubles with every consecutive death, a link that stayed up for
+## REBUILD_STABLE_MS starts the sequence over, and the death after
+## MAX_LINK_REBUILDS consecutive rebuilds is terminal. Nothing is scheduled
+## for a peer signaling has already reported gone (`_departed` -- only a fresh
+## peer_joined re-authorises, and that path rebuilds on its own) or one already
+## tombstoned. The guest never initiates -- it follows the offer the host's
+## rebuild sends, because its dead link no longer counts as "established".
 func _on_engine_peer_disconnected(net_id: int) -> void:
 	var pid := str(_net_to_peer.get(net_id, ""))
 	if pid.is_empty():
@@ -1508,8 +1588,54 @@ func _on_engine_peer_disconnected(net_id: int) -> void:
 	if not _connected.has(pid):
 		return
 	_connected.erase(pid)
+	var up_for_ms := _now_ms - int(_connected_since.get(pid, _now_ms))
+	_connected_since.erase(pid)
 	_remember_lost(pid)
 	peer_lost.emit(pid)
+
+	if not _is_host or _closed or _departed.has(pid) or _failed.has(pid):
+		return
+	if up_for_ms >= REBUILD_STABLE_MS:
+		# A link that held for this long was not flapping; whatever it died of
+		# now is a fresh incident and gets the base delay again.
+		_rebuild_level.erase(pid)
+	var level := int(_rebuild_level.get(pid, 0))
+	if level >= MAX_LINK_REBUILDS:
+		# Terminal, same shape as _on_connect_timeout's exhausted budget: torn
+		# down and tombstoned so a stray re-announce cannot resurrect it, loud,
+		# and revivable only by a fresh peer_joined.
+		_connect_failures += 1
+		_teardown_peer(pid)
+		_remember_failed(pid)
+		push_error("CouchStarTransport: link to %s died after %d consecutive rebuilds, giving up" % [pid, level])
+		transport_gap.emit(pid, "rebuild-exhausted")
+		return
+	_rebuild_level[pid] = level + 1
+	_rebuild_at[pid] = -1
+
+
+## The backoff for `pid`'s NEXT rebuild, from the level _on_engine_peer_disconnected
+## already advanced: BASE for the first consecutive death, doubling, capped.
+func _rebuild_delay_ms(pid: String) -> int:
+	var level := maxi(int(_rebuild_level.get(pid, 1)), 1)
+	return mini(REBUILD_BACKOFF_BASE_MS << (level - 1), REBUILD_BACKOFF_MAX_MS)
+
+
+## Fire a scheduled rebuild. Re-checks every precondition at fire time -- the
+## backoff is long enough for signaling to have reported the peer gone
+## (_teardown_peer already cancels the deadline, this is belt-and-braces) or
+## for close() to have run. A rebuild is a fresh connect cycle: the attempt
+## budget starts over, the new WebRTCPeerConnection gets a new incarnation
+## from _build_connection, and the guest -- no longer established -- adopts it.
+func _issue_link_rebuild(pid: String) -> void:
+	if _closed or not _is_host or _mp == null:
+		return
+	if _connected.has(pid) or not _pcs.has(pid) or _departed.has(pid) or _failed.has(pid):
+		return
+	_attempts[pid] = 0
+	_link_rebuilds += 1
+	_rebuild_connection(pid, 0)
+	transport_gap.emit(pid, "link-rebuild")
 
 
 ## Host: spends the retry budget -- one rebuild, then a terminal failure
