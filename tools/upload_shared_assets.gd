@@ -190,7 +190,9 @@ func _upload_all(prepared: Dictionary) -> int:
 	for r in results:
 		if r.success:
 			var verb := "recovered" if r.get("replayed", false) else "uploaded"
-			print("%s: %s → %s" % [verb, r.logical_path, r.get("url", "")])
+			# Logical path only: the platform's url is a developer-portal address
+			# behind auth, and games resolve by path through the launch manifest.
+			print("%s: %s" % [verb, r.logical_path])
 		else:
 			printerr("failed: %s — %s" % [r.logical_path, r.message])
 			failures += 1
@@ -422,7 +424,6 @@ func _upload_file(
 	return {
 		"logical_path": logical_path,
 		"success": true,
-		"url": str(complete_data.get("url", "")),
 		"replayed": bool(complete_data.get("replayed", false)),
 	}
 
