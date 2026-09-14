@@ -82,6 +82,10 @@
 ##     "genuine host restart" narrative) would produce on both ends. Flagged here
 ##     as an explicit extension beyond the setup cell's literal text, not a
 ##     silent deviation. CONFIRMED working by actually running this gate.
+##   - F23 (link death, backoff, exhaustion) kills links with the debug-only
+##     CouchStarTransport.fault_kill_link and depends on the far side's engine
+##     noticing a real closure -- the same real-engine dependence as F21. Every
+##     DELAY assertion, by contrast, is on the virtual clock and exact.
 ##   - F7 and F8 are SEPARATE dedicated pairs, not one combined flow. F7 proves
 ##     the clean rejoin-recovery path end to end with no interference; F8
 ##     deliberately injects a stale, dead-incarnation replay into the same kind
@@ -1654,6 +1658,382 @@ func _run_f21_asymmetric_reconnect(pair: _Pair) -> void:
 
 
 # ============================================================================
+# F23 -- a link that came UP and then DIED is rebuilt by the host, with backoff
+# (Phase 2 re-establishment). The header's v1 limitation said peer_lost fires
+# and that is all; this case is what turns the rebuild, its backoff, the
+# stable-link reset and the exhaustion tombstone into assertions that can
+# fail. Written BEFORE the rebuild existed: under Phase 1 every assertion past
+# "both sides report peer_lost" is red.
+#
+# Deaths are injected with CouchStarTransport.fault_kill_link (debug-only,
+# same gate as CouchLobbyTransport's levers): it closes the local
+# WebRTCPeerConnection and touches nothing else, so the death reaches this
+# file's bookkeeping through the engine's own peer_disconnected on the killing
+# side and through a REAL remote closure on the other -- F23a kills on the
+# guest so the host's rebuild is triggered by remote detection; every later
+# death is killed on the host so its own detection is exercised too.
+#
+# Timing discipline is the virtual clock's: the rebuild deadline is armed at
+# the poll that observes the death (dt 0, so `_virtual_now` is exactly where
+# the wait left it), a step of delay-1 plus a few dt-0 holds proves nothing was
+# issued early, and a step of 1 proves it is issued exactly at the deadline.
+# "Issued" is observed two ways: link_rebuilds (the counter) and a fresh SDP
+# blob in the host signaling's captured log (the wire).
+#
+# HONESTY RISK, same family as F21: remote death detection is real engine
+# timing -- libdatachannel's close reaching the far side's connection state
+# within WAIT_TIMEOUT_MS. Confirmed by running this gate; a slow machine shows
+# up as a TIMEOUT on a peer_lost wait, never as a silent pass.
+# ============================================================================
+
+
+## Kill the live link from `killer`'s side, wait for BOTH sides to report the
+## death, and return the host-side offer count at that moment. The rebuild
+## deadline is armed inside the poll that observed the death, at the current
+## virtual time.
+func _f23_kill_and_wait_lost(pair: _Pair, kill_on_host: bool, label: String) -> bool:
+	var host_lost_before := pair.host_lost.size()
+	var guest_lost_before := pair.guest_lost.size()
+	var killed: bool
+	if kill_on_host:
+		killed = pair.host_star.fault_kill_link(pair.guest_id)
+	else:
+		killed = pair.guest_star.fault_kill_link(pair.host_id)
+	_check(killed, "%s: fault_kill_link on the %s returns true (a live link was killed)" % [label, "host" if kill_on_host else "guest"])
+	var lost_predicate := func() -> bool:
+		return pair.host_lost.size() > host_lost_before and pair.guest_lost.size() > guest_lost_before
+	var both_lost := await _wait_until(pair.stars(), lost_predicate, "%s: both sides to report peer_lost" % label)
+	_check(both_lost, "%s: both sides report peer_lost for the dead link" % label)
+	return both_lost
+
+
+## Prove the host issues exactly one rebuild for `pair` at `delay_ms` after the
+## death it just observed -- none before, one at the deadline, a fresh offer on
+## the wire -- then wait for the rebuilt link to come up on both sides.
+func _f23_expect_rebuild_after(pair: _Pair, delay_ms: int, label: String) -> void:
+	var rebuilds_before := pair.host_star.link_rebuilds
+	var offers_before := _count_captured(pair.host_signaling.captured, CouchStarTransport.SIGNAL_KIND_SDP)
+	var host_ready_before := pair.host_ready.size()
+	var guest_ready_before := pair.guest_ready.size()
+	var gaps_before := pair.host_gaps.size()
+
+	await _step(pair.stars(), delay_ms - 1)
+	for i in range(3):
+		await _step(pair.stars())
+	_check(
+		pair.host_star.link_rebuilds == rebuilds_before
+			and _count_captured(pair.host_signaling.captured, CouchStarTransport.SIGNAL_KIND_SDP) == offers_before,
+		"%s: nothing is issued %d ms after the death (one short of the %d ms deadline): link_rebuilds and the offer count are unchanged"
+			% [label, delay_ms - 1, delay_ms]
+	)
+	await _step(pair.stars(), 1)
+	_check(
+		pair.host_star.link_rebuilds == rebuilds_before + 1,
+		"%s: link_rebuilds goes up by exactly 1 at the %d ms deadline" % [label, delay_ms]
+	)
+	var rebuild_gap := false
+	for g in pair.host_gaps.slice(gaps_before):
+		if g["peer_id"] == pair.guest_id and g["reason"] == "link-rebuild":
+			rebuild_gap = true
+	_check(rebuild_gap, "%s: the host fires transport_gap(guest, \"link-rebuild\") when the rebuild is issued" % label)
+
+	var offer_predicate := func() -> bool:
+		return _count_captured(pair.host_signaling.captured, CouchStarTransport.SIGNAL_KIND_SDP) > offers_before
+	var offered := await _wait_until(pair.stars(), offer_predicate, "%s: a fresh offer to leave the host" % label)
+	_check(offered, "%s: a fresh SDP offer leaves the host after the rebuild is issued" % label)
+
+	var ready_predicate := func() -> bool:
+		return pair.host_ready.size() > host_ready_before and pair.guest_ready.size() > guest_ready_before
+	var ready_again := await _wait_until(pair.stars(), ready_predicate, "%s: the rebuilt link to come up on both sides" % label)
+	_check(ready_again, "%s: peer_ready fires again on both sides once the rebuilt link establishes" % label)
+
+
+func _run_f23_link_rebuild(pair: _Pair) -> void:
+	print("-- F23: a link that came up and then died is rebuilt by the host, with backoff --")
+	var host_start: Dictionary = await pair.host_star.start()
+	var guest_start: Dictionary = await pair.guest_star.start()
+	_check(
+		bool(host_start.get("success", false)) and bool(guest_start.get("success", false)),
+		"F23: setup -- both sides start()"
+	)
+	var established := await _wait_until(
+		pair.stars(),
+		func() -> bool: return pair.host_ready.has(pair.guest_id) and pair.guest_ready.has(pair.host_id),
+		"F23: setup -- the clean link to establish"
+	)
+	_check(established, "F23: setup -- the pair reaches a live link")
+	if not established:
+		return
+
+	# --- F23a: the GUEST's side dies; the host notices remotely and rebuilds ---
+	# after REBUILD_BACKOFF_BASE_MS under a NEW incarnation.
+	var inc_before := pair.host_star.incarnation_for(pair.guest_id)
+	if not await _f23_kill_and_wait_lost(pair, false, "F23a"):
+		return
+	_check(
+		pair.host_star.incarnation_for(pair.guest_id) == inc_before,
+		"F23a: the death itself mints nothing -- the host's incarnation for the guest is unchanged until the rebuild"
+	)
+	await _f23_expect_rebuild_after(pair, CouchStarTransport.REBUILD_BACKOFF_BASE_MS, "F23a")
+	_check(
+		pair.host_star.incarnation_for(pair.guest_id) != inc_before
+			and pair.guest_star.incarnation_for(pair.host_id) == pair.host_star.incarnation_for(pair.guest_id),
+		"F23a: the rebuilt link runs under a NEW incarnation that both ends agree on"
+	)
+	var host_reconnected := false
+	for g in pair.host_gaps:
+		if g["peer_id"] == pair.guest_id and g["reason"] == "peer-reconnected":
+			host_reconnected = true
+	var guest_reconnected := false
+	for g in pair.guest_gaps:
+		if g["peer_id"] == pair.host_id and g["reason"] == "peer-reconnected":
+			guest_reconnected = true
+	_check(
+		host_reconnected and guest_reconnected,
+		"F23a: both sides fire transport_gap(peer, \"peer-reconnected\") -- the rebuild is reported as a reconnect, not a first connect"
+	)
+	_check(
+		pair.guest_star.handshake_restarts == 1,
+		"F23a: the guest counts exactly one handshake-restart -- it ADOPTED the rebuild offer over its dead description (got %d)"
+			% pair.guest_star.handshake_restarts
+	)
+	var pre_frame := pair.host_received.size()
+	pair.guest_star.send_to_authority(CouchEnvelope.make(CouchEnvelope.KIND_INTENT, 1, 2301, {}))
+	var frame_crossed := await _wait_until(
+		pair.stars(), func() -> bool: return pair.host_received.size() > pre_frame, "F23a: a frame to cross the rebuilt link"
+	)
+	_check(frame_crossed, "F23a: a frame crosses the rebuilt link")
+
+	# --- F23b: a second death right away doubles the delay. ---
+	if not await _f23_kill_and_wait_lost(pair, true, "F23b"):
+		return
+	await _f23_expect_rebuild_after(pair, CouchStarTransport.REBUILD_BACKOFF_BASE_MS * 2, "F23b")
+
+	# --- F23c: a link that stayed up for REBUILD_STABLE_MS starts over at BASE. ---
+	await _step(pair.stars(), CouchStarTransport.REBUILD_STABLE_MS)
+	_check(
+		pair.host_star.link_rebuilds == 2 and pair.host_lost.size() == 2,
+		"F23c: REBUILD_STABLE_MS of virtual time on a live link issues nothing and loses nothing"
+	)
+	if not await _f23_kill_and_wait_lost(pair, true, "F23c"):
+		return
+	await _f23_expect_rebuild_after(pair, CouchStarTransport.REBUILD_BACKOFF_BASE_MS, "F23c")
+
+	# --- F23d: flapping -- consecutive deaths climb to the cap, then exhaust. ---
+	# After F23c's reset the sequence is BASE (spent), 2*BASE, 4*BASE, then the
+	# cap; the death after MAX_LINK_REBUILDS consecutive rebuilds is terminal.
+	var delays: Array = []
+	for level in range(1, CouchStarTransport.MAX_LINK_REBUILDS):
+		delays.append(mini(CouchStarTransport.REBUILD_BACKOFF_BASE_MS << level, CouchStarTransport.REBUILD_BACKOFF_MAX_MS))
+	_check(
+		delays[delays.size() - 1] == CouchStarTransport.REBUILD_BACKOFF_MAX_MS,
+		"F23d: setup -- the constants make the cap observable (the last consecutive delay is REBUILD_BACKOFF_MAX_MS: %s)" % [delays]
+	)
+	for i in range(delays.size()):
+		var label := "F23d.%d" % (i + 1)
+		if not await _f23_kill_and_wait_lost(pair, true, label):
+			return
+		await _f23_expect_rebuild_after(pair, int(delays[i]), label)
+
+	var failures_before := pair.host_star.connect_failures
+	var rebuilds_at_exhaustion := pair.host_star.link_rebuilds
+	var offers_at_exhaustion := _count_captured(pair.host_signaling.captured, CouchStarTransport.SIGNAL_KIND_SDP)
+	if not await _f23_kill_and_wait_lost(pair, true, "F23d.exhaust"):
+		return
+	await _step(pair.stars())
+	_check(
+		pair.host_star.connect_failures == failures_before + 1,
+		"F23d: the death after MAX_LINK_REBUILDS consecutive rebuilds is terminal -- connect_failures goes up by exactly 1"
+	)
+	var exhausted_gap := false
+	for g in pair.host_gaps:
+		if g["peer_id"] == pair.guest_id and g["reason"] == "rebuild-exhausted":
+			exhausted_gap = true
+	_check(exhausted_gap, "F23d: transport_gap(guest, \"rebuild-exhausted\") fired")
+	_check(
+		pair.host_star.net_id_for(pair.guest_id) == 0 and pair.host_star.generation_for(pair.guest_id) == -1,
+		"F23d: the exhausted peer is torn down completely -- net id released, generation -1"
+	)
+	await _step(pair.stars(), CouchStarTransport.REBUILD_BACKOFF_MAX_MS * 4)
+	for i in range(3):
+		await _step(pair.stars())
+	_check(
+		pair.host_star.link_rebuilds == rebuilds_at_exhaustion
+			and _count_captured(pair.host_signaling.captured, CouchStarTransport.SIGNAL_KIND_SDP) == offers_at_exhaustion,
+		"F23d: no rebuild is ever issued for the tombstoned peer, however much time passes"
+	)
+
+	# Only a fresh peer_joined revives it -- the same tombstone rule F4 proves
+	# for a terminal connect failure.
+	var host_ready_before := pair.host_ready.size()
+	var guest_ready_before := pair.guest_ready.size()
+	pair.host_signaling.announce(pair.guest_id)
+	var revived := await _wait_until(
+		pair.stars(),
+		func() -> bool: return pair.host_ready.size() > host_ready_before and pair.guest_ready.size() > guest_ready_before,
+		"F23d: a fresh peer_joined to clear the tombstone and re-establish"
+	)
+	_check(revived, "F23d: a fresh peer_joined clears the tombstone and the link comes back on both sides")
+
+	# --- F23e: a peer signaling reported GONE while its link was still up is ---
+	# not rebuilt when that link then dies -- only a fresh peer_joined
+	# re-authorises, and that path rebuilds on its own. This is the order a
+	# guest's close() produces (its signaling close lands before the engine
+	# notices the dead link), made deterministic.
+	pair.host_signaling.announce_left(pair.guest_id)
+	await _step(pair.stars())
+	_check(
+		pair.host_star.connected_peer_ids().has(pair.guest_id),
+		"F23e: setup -- peer_left with the link up keeps the link (an established link outlives room presence)"
+	)
+	var rebuilds_before_departed := pair.host_star.link_rebuilds
+	if not await _f23_kill_and_wait_lost(pair, true, "F23e"):
+		return
+	await _step(pair.stars(), CouchStarTransport.REBUILD_BACKOFF_MAX_MS * 4)
+	for i in range(3):
+		await _step(pair.stars())
+	_check(
+		pair.host_star.link_rebuilds == rebuilds_before_departed,
+		"F23e: the death of a link whose peer already LEFT signaling schedules no rebuild, however much time passes"
+	)
+	host_ready_before = pair.host_ready.size()
+	guest_ready_before = pair.guest_ready.size()
+	pair.host_signaling.announce(pair.guest_id)
+	var rejoined := await _wait_until(
+		pair.stars(),
+		func() -> bool: return pair.host_ready.size() > host_ready_before and pair.guest_ready.size() > guest_ready_before,
+		"F23e: the rejoin to rebuild the link"
+	)
+	_check(rejoined, "F23e: the peer's rejoin (peer_joined) rebuilds the link on both sides, through the rejoin path and not the backoff")
+	_check(
+		pair.host_star.link_rebuilds == rebuilds_before_departed,
+		"F23e: link_rebuilds is still unchanged -- the rejoin path is not counted as a backoff rebuild"
+	)
+
+
+# ============================================================================
+# F24 -- a host RESTART that signaling never reports as peer_left. The real
+# server dedups by peerId: a new socket with the same id REPLACES the old one
+# and re-announces presence, so the guest sees peer_joined(host) with no
+# peer_left before it -- _on_signaling_peer_joined finds nothing departed and
+# _discover_peer is a no-op. The only things the guest has to go on are its
+# dead link (engine-detected) and the new host's offer.
+#
+# Before the incarnation seed, every CouchStarTransport minted labels from
+# the same counter starting at 0, so the restarted host's FIRST offer carried
+# the very label the guest still held from the dead host: PROCESS, and
+# _handle_sdp dropped it as a retransmit of a description already installed.
+# The guest healed only when the new host's CONNECT_TIMEOUT_MS rebuild minted
+# a second label -- ten virtual seconds this case never advances, so under
+# the old code it TIMES OUT here. The scheme needs no ORDERING between labels,
+# only distinctness across transport instances; a per-instance seed gives
+# exactly that, and this case is what proves the first offer now suffices.
+#
+# Modelled as G9's restart is, minus the signaling report: the old host's
+# link is killed (fault_kill_link, the engine death a dead process produces)
+# and the old host is then simply abandoned -- never polled, never closed, so
+# nothing it owns can emit peer_left. A new host over a new signaling is
+# linked to the OLD guest.
+# ============================================================================
+
+
+func _run_f24_unreported_host_restart(pair: _Pair) -> void:
+	print("-- F24: a host restart signaling never reports is followed on the FIRST offer --")
+	var host_start: Dictionary = await pair.host_star.start()
+	var guest_start: Dictionary = await pair.guest_star.start()
+	_check(
+		bool(host_start.get("success", false)) and bool(guest_start.get("success", false)),
+		"F24: setup -- both sides start()"
+	)
+	var established := await _wait_until(
+		pair.stars(),
+		func() -> bool: return pair.host_ready.has(pair.guest_id) and pair.guest_ready.has(pair.host_id),
+		"F24: setup -- the clean link to establish"
+	)
+	_check(established, "F24: setup -- the pair reaches a live link")
+	if not established:
+		return
+	var dead_label := pair.guest_star.incarnation_for(pair.host_id)
+
+	# The old host process dies: its link goes down, and that is ALL the guest
+	# will ever hear about it.
+	_check(pair.host_star.fault_kill_link(pair.guest_id), "F24: setup -- the old host's link is killed")
+	var guest_lost := await _wait_until(
+		[pair.guest_star], func() -> bool: return pair.guest_lost.has(pair.host_id), "F24: the guest to notice the dead link"
+	)
+	_check(guest_lost, "F24: the guest reports peer_lost(host) for the dead link")
+	_check(
+		pair.guest_star.incarnation_for(pair.host_id) == dead_label,
+		"F24: the guest still holds the dead host's label after the death (nothing told it otherwise)"
+	)
+
+	# The new host process, over a fresh signaling socket that REPLACES the old
+	# one for the same peer id: the guest gets peer_joined(host), never peer_left.
+	var host2_signaling := CouchScriptedSignaling.new(pair.host_id)
+	CouchScriptedSignaling.link(host2_signaling, pair.guest_signaling)
+	var host_player := {"user_id": pair.host_id}
+	var host2_star := CouchStarTransport.new(host2_signaling, _StarRoster.new(host_player, host_player, true))
+	var host2_ready: Array = []
+	var host2_gaps: Array = []
+	host2_star.peer_ready.connect(func(pid: String) -> void: host2_ready.append(pid))
+	host2_star.transport_gap.connect(
+		func(pid: String, reason: String) -> void: host2_gaps.append({"peer_id": pid, "reason": reason})
+	)
+	var host2_start: Dictionary = await host2_star.start()
+	_check(bool(host2_start.get("success", false)), "F24: the restarted host's start() succeeds")
+
+	var guest_ready_before := pair.guest_ready.size()
+	var guest_gaps_before := pair.guest_gaps.size()
+	# dt 0 throughout: the host's CONNECT_TIMEOUT_MS rebuild can never fire, so
+	# if the link comes back it came back on the FIRST offer.
+	var reestablished := await _wait_until(
+		[host2_star, pair.guest_star],
+		func() -> bool: return host2_ready.has(pair.guest_id) and pair.guest_ready.size() > guest_ready_before,
+		"F24: the guest to follow the restarted host WITHOUT any connect-timeout rebuild (frozen clock)"
+	)
+	_check(
+		reestablished,
+		"F24: the guest follows the restarted host's FIRST offer -- the link is back on both sides with the clock frozen"
+	)
+	_check(
+		host2_star.handshake_restarts == 0 and host2_star.generation_for(pair.guest_id) == 0,
+		"F24: the restarted host never needed its connect-timeout rebuild (handshake_restarts 0, generation 0)"
+	)
+	_check(
+		host2_star.incarnation_for(pair.guest_id) != dead_label
+			and pair.guest_star.incarnation_for(pair.host_id) == host2_star.incarnation_for(pair.guest_id),
+		"F24: the restarted host minted a label DISTINCT from the dead host's, and the guest now holds it"
+	)
+	var peer_rejoined := false
+	for g in pair.guest_gaps.slice(guest_gaps_before):
+		if g["reason"] == "peer-rejoined":
+			peer_rejoined = true
+	_check(
+		not peer_rejoined,
+		"F24: the guest never saw a rejoin (no peer_left) -- it recovered on the label alone"
+	)
+	_check(
+		pair.guest_star.handshake_restarts == 1,
+		"F24: the guest counts exactly one handshake-restart: the ADOPT over its dead description (got %d)"
+			% pair.guest_star.handshake_restarts
+	)
+	var pre_frame := pair.host_received.size()
+	var host2_received: Array = []   # an Array, not an int: a lambda captures a primitive by value
+	host2_star.envelope_received.connect(
+		func(env: Dictionary, sender: String) -> void: host2_received.append({"envelope": env, "sender": sender})
+	)
+	pair.guest_star.send_to_authority(CouchEnvelope.make(CouchEnvelope.KIND_INTENT, 1, 2401, {}))
+	var frame_crossed := await _wait_until(
+		[host2_star, pair.guest_star], func() -> bool: return not host2_received.is_empty(), "F24: a frame to reach the restarted host"
+	)
+	_check(
+		frame_crossed and pair.host_received.size() == pre_frame,
+		"F24: a frame reaches the RESTARTED host and not the dead one"
+	)
+	host2_star.close()
+
+
+# ============================================================================
 # F22 -- strict numeric field validation is observable (C7, finding 5). Each
 # case supplies a VALID value for every field EXCEPT the one under test (same
 # discipline as run_star_unit.gd's default-field checks), so a mutated
@@ -1797,6 +2177,12 @@ func _run() -> void:
 	await _run_f21_asymmetric_reconnect(p21)
 
 	await _run_f22_field_validation(main)
+
+	var p23 := _Pair.new("host23", "g23")
+	await _run_f23_link_rebuild(p23)
+
+	var p24 := _Pair.new("host24", "g24")
+	await _run_f24_unreported_host_restart(p24)
 
 	print("")
 	print("total assertions: %d failed" % failures)
