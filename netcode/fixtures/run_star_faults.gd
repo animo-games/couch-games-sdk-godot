@@ -1912,6 +1912,128 @@ func _run_f23_link_rebuild(pair: _Pair) -> void:
 
 
 # ============================================================================
+# F24 -- a host RESTART that signaling never reports as peer_left. The real
+# server dedups by peerId: a new socket with the same id REPLACES the old one
+# and re-announces presence, so the guest sees peer_joined(host) with no
+# peer_left before it -- _on_signaling_peer_joined finds nothing departed and
+# _discover_peer is a no-op. The only things the guest has to go on are its
+# dead link (engine-detected) and the new host's offer.
+#
+# Before the incarnation seed, every CouchStarTransport minted labels from
+# the same counter starting at 0, so the restarted host's FIRST offer carried
+# the very label the guest still held from the dead host: PROCESS, and
+# _handle_sdp dropped it as a retransmit of a description already installed.
+# The guest healed only when the new host's CONNECT_TIMEOUT_MS rebuild minted
+# a second label -- ten virtual seconds this case never advances, so under
+# the old code it TIMES OUT here. The scheme needs no ORDERING between labels,
+# only distinctness across transport instances; a per-instance seed gives
+# exactly that, and this case is what proves the first offer now suffices.
+#
+# Modelled as G9's restart is, minus the signaling report: the old host's
+# link is killed (fault_kill_link, the engine death a dead process produces)
+# and the old host is then simply abandoned -- never polled, never closed, so
+# nothing it owns can emit peer_left. A new host over a new signaling is
+# linked to the OLD guest.
+# ============================================================================
+
+
+func _run_f24_unreported_host_restart(pair: _Pair) -> void:
+	print("-- F24: a host restart signaling never reports is followed on the FIRST offer --")
+	var host_start: Dictionary = await pair.host_star.start()
+	var guest_start: Dictionary = await pair.guest_star.start()
+	_check(
+		bool(host_start.get("success", false)) and bool(guest_start.get("success", false)),
+		"F24: setup -- both sides start()"
+	)
+	var established := await _wait_until(
+		pair.stars(),
+		func() -> bool: return pair.host_ready.has(pair.guest_id) and pair.guest_ready.has(pair.host_id),
+		"F24: setup -- the clean link to establish"
+	)
+	_check(established, "F24: setup -- the pair reaches a live link")
+	if not established:
+		return
+	var dead_label := pair.guest_star.incarnation_for(pair.host_id)
+
+	# The old host process dies: its link goes down, and that is ALL the guest
+	# will ever hear about it.
+	_check(pair.host_star.fault_kill_link(pair.guest_id), "F24: setup -- the old host's link is killed")
+	var guest_lost := await _wait_until(
+		[pair.guest_star], func() -> bool: return pair.guest_lost.has(pair.host_id), "F24: the guest to notice the dead link"
+	)
+	_check(guest_lost, "F24: the guest reports peer_lost(host) for the dead link")
+	_check(
+		pair.guest_star.incarnation_for(pair.host_id) == dead_label,
+		"F24: the guest still holds the dead host's label after the death (nothing told it otherwise)"
+	)
+
+	# The new host process, over a fresh signaling socket that REPLACES the old
+	# one for the same peer id: the guest gets peer_joined(host), never peer_left.
+	var host2_signaling := CouchScriptedSignaling.new(pair.host_id)
+	CouchScriptedSignaling.link(host2_signaling, pair.guest_signaling)
+	var host_player := {"user_id": pair.host_id}
+	var host2_star := CouchStarTransport.new(host2_signaling, _StarRoster.new(host_player, host_player, true))
+	var host2_ready: Array = []
+	var host2_gaps: Array = []
+	host2_star.peer_ready.connect(func(pid: String) -> void: host2_ready.append(pid))
+	host2_star.transport_gap.connect(
+		func(pid: String, reason: String) -> void: host2_gaps.append({"peer_id": pid, "reason": reason})
+	)
+	var host2_start: Dictionary = await host2_star.start()
+	_check(bool(host2_start.get("success", false)), "F24: the restarted host's start() succeeds")
+
+	var guest_ready_before := pair.guest_ready.size()
+	var guest_gaps_before := pair.guest_gaps.size()
+	# dt 0 throughout: the host's CONNECT_TIMEOUT_MS rebuild can never fire, so
+	# if the link comes back it came back on the FIRST offer.
+	var reestablished := await _wait_until(
+		[host2_star, pair.guest_star],
+		func() -> bool: return host2_ready.has(pair.guest_id) and pair.guest_ready.size() > guest_ready_before,
+		"F24: the guest to follow the restarted host WITHOUT any connect-timeout rebuild (frozen clock)"
+	)
+	_check(
+		reestablished,
+		"F24: the guest follows the restarted host's FIRST offer -- the link is back on both sides with the clock frozen"
+	)
+	_check(
+		host2_star.handshake_restarts == 0 and host2_star.generation_for(pair.guest_id) == 0,
+		"F24: the restarted host never needed its connect-timeout rebuild (handshake_restarts 0, generation 0)"
+	)
+	_check(
+		host2_star.incarnation_for(pair.guest_id) != dead_label
+			and pair.guest_star.incarnation_for(pair.host_id) == host2_star.incarnation_for(pair.guest_id),
+		"F24: the restarted host minted a label DISTINCT from the dead host's, and the guest now holds it"
+	)
+	var peer_rejoined := false
+	for g in pair.guest_gaps.slice(guest_gaps_before):
+		if g["reason"] == "peer-rejoined":
+			peer_rejoined = true
+	_check(
+		not peer_rejoined,
+		"F24: the guest never saw a rejoin (no peer_left) -- it recovered on the label alone"
+	)
+	_check(
+		pair.guest_star.handshake_restarts == 1,
+		"F24: the guest counts exactly one handshake-restart: the ADOPT over its dead description (got %d)"
+			% pair.guest_star.handshake_restarts
+	)
+	var pre_frame := pair.host_received.size()
+	var host2_received: Array = []   # an Array, not an int: a lambda captures a primitive by value
+	host2_star.envelope_received.connect(
+		func(env: Dictionary, sender: String) -> void: host2_received.append({"envelope": env, "sender": sender})
+	)
+	pair.guest_star.send_to_authority(CouchEnvelope.make(CouchEnvelope.KIND_INTENT, 1, 2401, {}))
+	var frame_crossed := await _wait_until(
+		[host2_star, pair.guest_star], func() -> bool: return not host2_received.is_empty(), "F24: a frame to reach the restarted host"
+	)
+	_check(
+		frame_crossed and pair.host_received.size() == pre_frame,
+		"F24: a frame reaches the RESTARTED host and not the dead one"
+	)
+	host2_star.close()
+
+
+# ============================================================================
 # F22 -- strict numeric field validation is observable (C7, finding 5). Each
 # case supplies a VALID value for every field EXCEPT the one under test (same
 # discipline as run_star_unit.gd's default-field checks), so a mutated
@@ -2058,6 +2180,9 @@ func _run() -> void:
 
 	var p23 := _Pair.new("host23", "g23")
 	await _run_f23_link_rebuild(p23)
+
+	var p24 := _Pair.new("host24", "g24")
+	await _run_f24_unreported_host_restart(p24)
 
 	print("")
 	print("total assertions: %d failed" % failures)

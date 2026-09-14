@@ -115,10 +115,12 @@
 ##     incarnation it last heard, bounded by MAX_INCARNATION_FOLLOWS. Being
 ##     wrong is transient -- the host's SDP_RETRANSMIT_INTERVAL_MS retransmit
 ##     brings a guest that followed a straggler back to the live incarnation
-##     within one retransmit -- where being frozen was permanent. A host
-##     restart that signaling does not report as peer_left/peer_joined heals
-##     only when the dead link finally dies -- loud (stale_generation_drops) and
-##     diagnosable, not silent.
+##     within one retransmit -- where being frozen was permanent. Labels are
+##     minted above a per-instance random seed (INCARNATION_SEED_BITS), so a
+##     restarted host never re-mints the dead one's label: a restart that
+##     signaling does not report as peer_left/peer_joined heals on the new
+##     host's first offer once the guest's engine has noticed the dead link
+##     (G11 F24).
 ##   - The guest now arms its OWN connect deadline (GUEST_CONNECT_TIMEOUT_MS,
 ##     deliberately longer than the host's whole retry budget) instead of
 ##     waiting forever: it never rebuilds unilaterally -- only the host mints
@@ -189,7 +191,21 @@ const MAX_GEN := MAX_CONNECT_ATTEMPTS - 1
 ## this is generous; it exists to bound a hostile signaling peer's ability to
 ## make a guest ADOPT forever, not to constrain a real one.
 const MAX_INCARNATION_FOLLOWS := 8
-const MAX_INC := 1000000                  # hygiene bound on the wire field, not a real budget
+## Incarnation labels are minted from _epoch_seq, which starts at a per-INSTANCE
+## random seed of this many bits rather than at 0. The scheme needs no ORDERING
+## between labels, only DISTINCTNESS -- and a counter that starts at 0 in every
+## process hands a restarted host the very label the dead one used, so a guest
+## whose link died but whose signaling never reported the restart (the real
+## server replaces a socket with the same peer id in place, re-announcing
+## presence without a peer_left) classified the new host's first offer as
+## PROCESS and dropped it as a retransmit. It healed only when the host's
+## CONNECT_TIMEOUT_MS rebuild minted a second label, ten seconds later, and not
+## at all if the guest's engine took longer than the host's whole budget to
+## notice the death. G11 F24 is the gate. 30 bits: a collision between two
+## instances is ~1e-9, and MAX_INC leaves room above the seed for a lifetime of
+## minting.
+const INCARNATION_SEED_BITS := 30
+const MAX_INC := 1 << 31                  # hygiene bound on the wire field, not a real budget
 
 ## Phase 2 re-establishment (host side only -- see _on_engine_peer_disconnected).
 ## A link that came up and then died is rebuilt after a delay that doubles with
@@ -438,7 +454,7 @@ var _net_to_peer: Dictionary = {}          # int -> peer_id
 var _connected: Dictionary = {}            # peer_id -> true, engine-level link is UP
 var _gens: Dictionary = {}                 # peer_id -> int, handshake generation (host retry budget, wire-visible)
 var _pc_epochs: Dictionary = {}            # peer_id -> int, identity of the live connection; never reused
-var _epoch_seq: int = 0
+var _epoch_seq: int = _fresh_incarnation_seed()   # see INCARNATION_SEED_BITS
 var _inc: Dictionary = {}                  # peer_id -> int, the incarnation THIS transport operates under for that peer
 var _incarnation_follows: Dictionary = {}  # peer_id -> int, ADOPTs spent since the follow budget last reset
 var _remote_desc_set: Dictionary = {}      # peer_id -> true
@@ -1053,8 +1069,8 @@ func _build_connection(pid: String, gen: int) -> bool:
 	var epoch := _next_epoch()
 	if _is_host:
 		# The host mints one incarnation per (re)build attempt -- _epoch_seq is
-		# already strictly increasing and never reused, exactly the identity an
-		# incarnation label needs. A guest never mints; it ADOPTs the host's
+		# already strictly increasing, never reused and seeded per instance,
+		# exactly the identity an incarnation label needs. A guest never mints; it ADOPTs the host's
 		# label when the offer arrives (classify_incarnation / _adopt_incarnation)
 		# because it cannot know its incarnation before then.
 		_inc[pid] = epoch
@@ -1176,10 +1192,18 @@ func _connect_timeout_ms() -> int:
 
 ## Next connection epoch. Strictly increasing for the lifetime of this
 ## transport and never reset by peer churn -- that is the whole point, see
-## `_pc_epochs`.
+## `_pc_epochs`. Starts above a per-instance random seed so two transports
+## never mint the same label -- see INCARNATION_SEED_BITS.
 func _next_epoch() -> int:
 	_epoch_seq += 1
 	return _epoch_seq
+
+
+## A fresh RandomNumberGenerator is randomly seeded at construction, so this
+## needs no randomize() call and never touches the global RNG a game may have
+## seeded deterministically for its own purposes.
+static func _fresh_incarnation_seed() -> int:
+	return RandomNumberGenerator.new().randi() & ((1 << INCARNATION_SEED_BITS) - 1)
 
 # ============================================================================
 # SDP / ICE callbacks (local descriptions/candidates -> signaling)
