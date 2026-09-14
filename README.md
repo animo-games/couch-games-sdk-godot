@@ -28,6 +28,8 @@ backends/   the abstract backend plus the web, mock and local-relay ones
 lobby/      CouchGames.lobby and its player type
 webrtc/     signaling, candidate-path probing, the rollback adapter, and the
             provider-neutral mesh
+netcode/    CouchSession and the transports it rides on (the lobby tunnel and
+            the WebRTC star), plus their headless gates
 experience/ CouchGames.experience, the uploaded files for the current drop
 game/       CouchGames.game, the files that shipped inside your build
 debug/      the mock debug overlay
@@ -214,8 +216,8 @@ func _on_lobby_event(event: String, data: Variant, sender_user_id: String) -> vo
 Event names are yours to choose, with one reservation: `couch-net` belongs to
 `CouchSession`, which frames its own netcode over the same tunnel. If you are
 sending state at frame rate, use that instead of hand-rolling it on top of
-`send_event` — the tunnel is a relay through the platform, fine for lobby
-traffic and turn-based moves, not a rollback transport.
+`send_event` — see [Sessions](#sessions). The tunnel is a relay through the
+platform, fine for lobby traffic and turn-based moves, not a rollback transport.
 
 ### The roster
 
@@ -354,6 +356,76 @@ several real instances instead (Debug > Run Multiple Instances) and they form an
 actual lobby over a loopback socket, events and all, with `--couch-role=host` or
 `--couch-role=guest` pinning which is which. Only the host instance can change
 the roster or simulate events; the others will warn if you try.
+
+## Sessions
+
+`CouchSession` is a host-authoritative session on top of the lobby: the host is
+the only machine that advances the game, one guest is pinned as the player that
+sends `input` and `intent`, everyone else spectates, and the host broadcasts
+`snapshot`s. It owns the epoch, per-kind sequence tracking, the authorized-guest
+pin and the hello handshake, and it rides on a `CouchTransport` — either the
+**lobby tunnel** (`CouchLobbyTransport`, every envelope relayed through the
+platform as a `couch-net` event) or the **WebRTC star** (`CouchStarTransport`,
+each guest holding one datagram link to the host). Which one is a decision the
+game makes **once, at boot**, and `CouchSessionTransport` is where it is made:
+
+```gdscript
+var _transport: Object
+var _session: CouchSession
+
+
+func _ready() -> void:
+    await CouchGames.init()
+    var picked: Dictionary = await CouchSessionTransport.pick(CouchGames.lobby, CouchGames.webrtc)
+    if picked.transport == null:
+        push_error("no session transport: " + picked.error)   # refused -- see below
+        return
+    _transport = picked.transport
+    _session = CouchSession.new(CouchGames.lobby, _transport)
+    _session.session_started.connect(_on_session_started)
+    _session.session_stopped.connect(_on_session_stopped)
+    _session.input_received.connect(_on_input)
+    _session.snapshot_received.connect(_on_snapshot)
+    CouchGames.lobby.players_changed.connect(func(_p): _session.evaluate(Time.get_ticks_msec()))
+    _session.evaluate(Time.get_ticks_msec())
+
+
+func _process(_delta: float) -> void:
+    var now := Time.get_ticks_msec()
+    _transport.poll(now)   # always first: this frame's arrivals, then the session's timers
+    _session.poll(now)
+```
+
+`pick(lobby, webrtc, prefer)` returns `{transport, kind, error}`. `prefer` is
+one of `CouchSessionTransport.PREFER_AUTO` (the default), `PREFER_STAR` or
+`PREFER_LOBBY`; `kind` reports what was built (`"star"`, `"lobby"`, or `"none"`
+on a refusal). `resolve_kind(prefer)` answers the same question without
+building anything.
+
+**The choice is a function of the build, never of the moment.** `PREFER_AUTO`
+picks the star when the build has a WebRTC implementation
+(`CouchStarTransport.is_webrtc_available()` — install `webrtc_native` for
+native exports; the browser supplies it on the web) and the tunnel otherwise,
+so a project that never installs one gets the tunnel with no configuration.
+Nothing that can differ between two players in one lobby — signaling being
+reachable, a roster that has not settled, an ICE failure — ever changes the
+kind: every player must land on the **same** wire, and two peers on different
+ones both stay engaged, each sending frames the other has no link for, with no
+error anywhere. Those conditions are **refusals** instead: `transport` is
+null, `error` says why, and a `push_error` names it. Retry with the same
+preference if you like; never fall back to the other kind. For the same
+reason, ship every export of a game with the same addons — a web build and a
+`webrtc_native`-less desktop build would resolve differently.
+
+There is no switching mid-session. A different transport means a new session,
+constructed the same way.
+
+Two things the star does that the tunnel does not, both proven by
+`netcode/fixtures/run_star_session.gd`: `_transport.poll()` **must** run every
+frame, before `_session.poll()` (the tunnel's `poll()` is a documented no-op so
+the loop above is unconditional); and `CouchSession` does not treat a dropped
+link as a departure — `evaluate()` on `players_changed` is what stops the
+session when the pinned guest leaves, on either transport.
 
 ## Experience files
 
