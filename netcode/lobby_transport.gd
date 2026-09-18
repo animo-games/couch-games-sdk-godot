@@ -123,6 +123,20 @@ func is_ready() -> bool:
 	return not _closed and _lobby != null and bool(_lobby.get("is_available"))
 
 
+## Deliberate no-op. The tunnel is push-driven -- the lobby delivers into
+## _on_lobby_event the moment the backend does, and nothing here owns a timer
+## -- so there is nothing to advance. It exists so a driver can call
+## `transport.poll(now_ms)` before `session.poll(now_ms)` on EVERY frame
+## without asking which transport it holds: CouchStarTransport MUST be polled
+## (it owns a WebRTCMultiplayerPeer and every deadline it keeps), and a driver
+## that only polls "when the transport has a poll()" is one has_method check
+## away from never polling the star at all. See netcode/transport.gd's note on
+## the optional poll() and CouchSessionTransport, which is where that driver
+## loop is documented.
+func poll(_now_ms: int) -> void:
+	pass
+
+
 ## The lobby knows the local role; the transport does not need to be told it.
 ## `is_host` is part of REQUIRED_LOBBY_METHODS so this can never silently
 ## degrade to "assume guest" against a lobby that does not expose it.

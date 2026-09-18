@@ -52,6 +52,19 @@
 ## `epoch` and `seq` are `int()`-coerced on decode and must stay under 2^53-1 to survive
 ## exactly. Godot types (Vector2, null in arrays) do not survive JSON, so on the lobby
 ## tunnel the body is base64'd uniformly for every kind -- see `to_json_frame`.
+##
+## There are now TWO wires, and this file owns the codec for both while knowing which
+## transport rides which only by the explicit names `to_json_frame`/`from_json_frame` and
+## `to_bytes`/`from_bytes`. The JSON pair frames for a tunnel that can only carry JSON;
+## the binary pair frames for a datagram link (Phase 1's WebRTC star) and pays neither
+## the base64 nor the JSON tax -- the whole envelope, header and body together, is one
+## `var_to_bytes`, so Godot types (Vector2, null inside an Array) survive intact with no
+## per-kind branch and no marshalling at all. The two decoders share ONE rejection
+## taxonomy on purpose: an envelope that is legal on one wire must be legal on the other,
+## and `run_star_unit.gd` asserts that error-string parity case by case. In particular
+## the `MAX_SAFE_INT` bound on `epoch` and `seq` is kept on the binary wire even though
+## `var_to_bytes` would carry a full int64 -- a value the lobby tunnel would mangle must
+## not be mintable on the star.
 class_name CouchEnvelope
 extends RefCounted
 
@@ -94,6 +107,29 @@ const MAX_SAFE_INT := 9007199254740991
 ## enforced, and it is enforced BEFORE base64 decoding so a hostile frame cannot force a
 ## large allocation.
 const MAX_FRAME_BODY_CHARS := 262144
+
+## Hard ceiling on a BINARY frame, in BYTES -- the whole encoded envelope, header
+## and body together. MAX_FRAME_BODY_CHARS is a CHAR cap on a base64 string
+## covering the body alone; this is its exact counterpart in the unit the binary
+## wire actually uses: MAX_BINARY_FRAME_BYTES * 4 / 3 == MAX_FRAME_BODY_CHARS, so
+## base64 of a body this large is exactly MAX_FRAME_BODY_CHARS characters. The
+## binary cap is therefore very slightly STRICTER than the JSON one, by the ~70
+## bytes the encoded header costs -- deliberate: a cap must never be looser than
+## its sibling. Enforced BEFORE decoding, so a hostile frame cannot force a large
+## allocation, and enforced on the SEND side too (CouchStarTransport._send), which
+## is the only side that can do anything about it. 192 KiB also sits comfortably
+## under the 256 KiB max-message-size that SCTP data channels negotiate, so a
+## frame this codec accepts is one the link can actually carry.
+const MAX_BINARY_FRAME_BYTES := 196608
+
+## Smallest byte count that could possibly encode a Dictionary: a Variant needs a
+## 4-byte type header and a Dictionary a 4-byte element count. Checked before
+## bytes_to_var purely to keep a flood of empty or stub packets from reaching a
+## decoder that writes an engine ERROR line on every malformed input. Not a magic
+## number and not a format assumption -- anything shorter than 8 bytes cannot be a
+## Dictionary under any encoding, so the check can only ever reject frames the
+## decoder would reject anyway.
+const MIN_BINARY_FRAME_BYTES := 8
 
 
 static func make(kind: String, epoch: int, seq: int, body: Dictionary) -> Dictionary:
@@ -140,6 +176,32 @@ static func to_json_frame(envelope: Dictionary) -> Dictionary:
 		KEY_SEQ: envelope.get(KEY_SEQ, 0),
 		KEY_BODY: Marshalls.raw_to_base64(var_to_bytes(envelope.get(KEY_BODY, {}))),
 	}
+
+
+## Frame an envelope for a BINARY transport. Transport-specific ON PURPOSE -- the
+## name says so, exactly as to_json_frame's does.
+##
+## A FRESH five-key Dictionary is built rather than encoding `envelope` directly.
+## That is the same normalisation to_json_frame performs and it is load-bearing
+## for the same reason: extra top-level keys never reach the wire, so a caller
+## that stuffs a `from` field into an envelope cannot put a spoofable sender on
+## the link. Sender identity is stamped by the LINK (netcode/transport.gd) -- on
+## the star, by the net id WE bound to that connection with add_peer().
+##
+## var_to_bytes() is the object-DISALLOWING encoder. Its with-objects sibling is
+## intentionally never used here and its name deliberately does not appear
+## anywhere in this package; see from_json_frame's note, which is the single most
+## security-critical line in the file. A body that somehow contains an Object
+## fails closed: it encodes to something the object-disallowing decoder rejects,
+## and the far side reports "not-a-dictionary".
+static func to_bytes(envelope: Dictionary) -> PackedByteArray:
+	return var_to_bytes({
+		KEY_VERSION: envelope.get(KEY_VERSION, PROTOCOL_VERSION),
+		KEY_EPOCH: envelope.get(KEY_EPOCH, UNKNOWN_EPOCH),
+		KEY_KIND: envelope.get(KEY_KIND, ""),
+		KEY_SEQ: envelope.get(KEY_SEQ, 0),
+		KEY_BODY: envelope.get(KEY_BODY, {}),
+	})
 
 
 ## Decode and VALIDATE a frame off a JSON-only tunnel.
@@ -214,6 +276,91 @@ static func from_json_frame(frame: Variant) -> Dictionary:
 		KEY_KIND: (kind as String),
 		KEY_SEQ: seq,
 		KEY_BODY: decoded,
+	}
+	return {"envelope": envelope, "error": ""}
+
+
+## Decode and VALIDATE a frame off a BINARY link.
+## Returns {"envelope": Dictionary, "error": String}. `error` empty means accepted.
+## Never raises; never returns a partially-populated envelope alongside an error.
+##
+## Rejects, IN THIS ORDER, each with a `error` string that matches from_json_frame's
+## for the same defect:
+##   1. bytes.size() > MAX_BINARY_FRAME_BYTES (checked BEFORE decoding) -> "oversized-body"
+##   2. bytes.size() < MIN_BINARY_FRAME_BYTES                           -> "not-a-dictionary"
+##   3. bytes_to_var(bytes) is not a Dictionary                         -> "not-a-dictionary"
+##   4. `v` missing / not int-or-float / int(v) != PROTOCOL_VERSION     -> "bad-version"
+##   5. `kind` missing / not a String / not in KINDS                    -> "unknown-kind"
+##   6. `epoch` missing / not int-or-float / out of [0, MAX_SAFE_INT]   -> "bad-epoch"
+##   7. `seq` missing / not int-or-float / out of [1, MAX_SAFE_INT]     -> "bad-seq"
+##   8. `body` not a Dictionary                                         -> "bad-body"
+##
+## The taxonomy is a strict SUBSET of from_json_frame's: there is no
+## "undecodable-body", because there is no base64 step to fail. Everything else
+## maps one-to-one, and run_star_unit.gd asserts that parity defect by defect --
+## the two decoders must never drift into reporting different names for the same
+## malformed frame.
+##
+## Unknown *extra* top-level keys are ignored, not rejected, and are dropped from
+## the returned envelope, exactly as on the JSON wire: `v` already gates
+## compatibility.
+##
+## Known, accepted noise: bytes_to_var() writes an engine ERROR line ("Not enough
+## bytes for decoding bytes, or invalid format.") for any input it cannot decode.
+## That is unavoidable through the public API, and identical in kind to the
+## CryptoCore::b64_decode ERROR the JSON path already produces on a hostile body.
+## The MIN_BINARY_FRAME_BYTES prefilter removes the cheapest way to provoke it in
+## bulk. Sniffing the leading type tag to avoid the rest was considered and
+## REJECTED: it would hard-code an engine-internal Variant type id. What remains
+## of the flood past that prefilter is bounded one layer up, at the application
+## level: CouchStarTransport._receive mutes a peer -- dropping its packets
+## unread, with no call into this decoder at all -- once it has produced
+## MAX_DECODE_FAILURES consecutive rejects with no accepted frame in between.
+##
+## bytes_to_var() is the object-disallowing decoder; see to_bytes.
+static func from_bytes(bytes: PackedByteArray) -> Dictionary:
+	if bytes.size() > MAX_BINARY_FRAME_BYTES:
+		return {"envelope": {}, "error": "oversized-body"}
+	if bytes.size() < MIN_BINARY_FRAME_BYTES:
+		return {"envelope": {}, "error": "not-a-dictionary"}
+
+	var decoded: Variant = bytes_to_var(bytes)
+	if not (decoded is Dictionary):
+		return {"envelope": {}, "error": "not-a-dictionary"}
+	var f: Dictionary = decoded
+
+	var v: Variant = f.get(KEY_VERSION)
+	if not _is_number(v) or int(v) != PROTOCOL_VERSION:
+		return {"envelope": {}, "error": "bad-version"}
+
+	var kind: Variant = f.get(KEY_KIND)
+	if not (kind is String) or not (kind in KINDS):
+		return {"envelope": {}, "error": "unknown-kind"}
+
+	var epoch_v: Variant = f.get(KEY_EPOCH)
+	if not _is_number(epoch_v):
+		return {"envelope": {}, "error": "bad-epoch"}
+	var epoch: int = int(epoch_v)
+	if epoch < 0 or epoch > MAX_SAFE_INT:
+		return {"envelope": {}, "error": "bad-epoch"}
+
+	var seq_v: Variant = f.get(KEY_SEQ)
+	if not _is_number(seq_v):
+		return {"envelope": {}, "error": "bad-seq"}
+	var seq: int = int(seq_v)
+	if seq < 1 or seq > MAX_SAFE_INT:
+		return {"envelope": {}, "error": "bad-seq"}
+
+	var body_v: Variant = f.get(KEY_BODY)
+	if not (body_v is Dictionary):
+		return {"envelope": {}, "error": "bad-body"}
+
+	var envelope := {
+		KEY_VERSION: PROTOCOL_VERSION,
+		KEY_EPOCH: epoch,
+		KEY_KIND: (kind as String),
+		KEY_SEQ: seq,
+		KEY_BODY: (body_v as Dictionary),
 	}
 	return {"envelope": envelope, "error": ""}
 

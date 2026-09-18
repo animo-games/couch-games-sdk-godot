@@ -22,6 +22,18 @@
 ## `seq` advancing at the other end -- that distinction is the whole reason
 ## `CouchOnlineSession.send_action` returning `true` was a defect.
 ##
+## Optional method -- not in REQUIRED_METHODS, so missing_methods() never demands
+## it, but BOTH shipped implementations have it and a session driver should call
+## it unconditionally:
+##   poll(now_ms: int) -> void
+##       Advance the link: dispatch this frame's arrivals and every deadline the
+##       transport owns. Call it BEFORE CouchSession.poll(now_ms) on every frame,
+##       so arrivals are dispatched before the session's timers advance over
+##       them -- CouchStarTransport's header states the rule and G9
+##       (netcode/fixtures/run_star_session.gd) proves it matters. On the lobby
+##       tunnel it is a documented no-op. A third-party implementation should
+##       supply one, even as a no-op, so the driver loop never has to ask.
+##
 ## Required signals
 ##   envelope_received(envelope: Dictionary, sender_peer_id: String)
 ##       sender_peer_id is stamped by the LINK, never read out of the envelope.

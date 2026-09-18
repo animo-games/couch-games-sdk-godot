@@ -80,6 +80,37 @@ func build_root() -> String:
 	return ""
 
 
+# --- Shared game assets ---
+#
+# Shared files are a separate, launch-scoped catalog.  Unlike build files, a
+# logical shared path is first resolved by the platform (or the local mock) to
+# an immutable object before CouchGameFiles starts a read.  Backends return the
+# same shape so the downloader and pack installer never need to infer a root
+# from a build URL:
+# {success, error, root_identity, file_identity, url, sha256, size, local_path}
+#
+# `local_path` is populated by the mock/local backend.  Web backends return an
+# absolute immutable `url` instead.  These methods are deliberately optional:
+# an older parent SDK can still run every pre-existing API, and only a shared
+# read reports that the capability is unavailable.
+
+func shared_root() -> String:
+	return ""
+
+
+func resolve_shared_file(_relative_path: String) -> Dictionary:
+	return {
+		"success": false,
+		"error": "Shared game assets are not available here",
+		"root_identity": "",
+		"file_identity": "",
+		"url": "",
+		"sha256": "",
+		"size": -1,
+		"local_path": "",
+	}
+
+
 # --- Classic SDK verbs ---
 
 ## `expected_revision` and `on_conflict` are the game's to set, never the SDK's.
