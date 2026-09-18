@@ -521,6 +521,14 @@ because the backend exposes one physical signaling socket. Low-level
 `CouchRollbackSignalingAdapter` remains as a compatibility subclass for one
 migration release.
 
+### Verbose logging
+
+The WebRTC layer's console lines (connection lifecycle, `NETPATH STATE`
+transitions) are off by default so a release build never writes to the
+player's browser console. Call `CouchGames.set_verbose_logging(true)` from
+the game's own diagnostics flag to turn them on; diagnostic/recording APIs
+like `state_events()` keep working either way.
+
 ## WebRTC signaling lifecycle
 
 `CouchGames.webrtc` owns signaling for the SDK. Calls to

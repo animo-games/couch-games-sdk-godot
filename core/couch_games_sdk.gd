@@ -115,6 +115,15 @@ func init() -> void:
 	_initialized = true
 
 
+## Developer-facing console logging for the WebRTC layer (connection
+## lifecycle lines, NETPATH state transitions). Off by default so a release
+## build never writes to a player's console; games turn it on from their own
+## diagnostics flag. Recording/diagnostic APIs are unaffected.
+func set_verbose_logging(enabled: bool) -> void:
+	WebRTCMultiplayerConnection.verbose_logging = enabled
+	_PathProbe.set_console_logging(enabled)
+
+
 func _create_backend() -> CouchGamesBackend:
 	var force_mock: bool = ProjectSettings.get_setting(_FORCE_MOCK_SETTING, false) \
 		or OS.get_cmdline_user_args().has("--couch-mock")

@@ -40,10 +40,11 @@ const _PROBE_JS := """
   // connectionState is what Godot's WebRTCMultiplayerPeer acts on, while
   // iceConnectionState is what distinguishes a blip from a hard ICE failure.
   //
-  // Deliberately NOT gated behind __couchNetPathDebug, unlike the periodic
-  // NETPATH line. Transitions are a handful per session, and the reason this
-  // exists is a session that died on a build where nobody had thought to turn a
-  // debug flag on beforehand.
+  // Transitions are always RECORDED here regardless of __couchNetPathDebug --
+  // state_events() survives the connection, so the game can fold them into its
+  // own diagnostic buffer / telemetry after the fact. The console print below
+  // is opt-in via __couchNetPathDebug because a release build must not write
+  // to the player's console.
   function ufragOfDesc(pc) {
     try {
       var d = pc.localDescription;
@@ -67,8 +68,10 @@ const _PROBE_JS := """
     events.push(e);
     if (events.length > EVENT_CAP) { events.shift(); }
     try {
-      console.log("NETPATH STATE " + kind + "=" + state +
-        " ufrag=" + (e.ufrag || "?") + " t=" + e.ms + "ms");
+      if (window.__couchNetPathDebug) {
+        console.log("NETPATH STATE " + kind + "=" + state +
+          " ufrag=" + (e.ufrag || "?") + " t=" + e.ms + "ms");
+      }
     } catch (err) {}
   }
 
@@ -217,6 +220,13 @@ static func install() -> void:
 
 static func is_available() -> bool:
 	return _installed
+
+## Console echo of connection-state transitions (NETPATH STATE lines) and the
+## periodic NETPATH readout. Off by default; recording is unaffected.
+static func set_console_logging(enabled: bool) -> void:
+	if not OS.has_feature("web"):
+		return
+	JavaScriptBridge.eval("window.__couchNetPathDebug = %s;" % ("true" if enabled else "false"), true)
 
 ## Snapshot of live peer connections. Reads a ~1s-stale JS cache; cheap but not
 ## free (a JSON round-trip), so call at diagnostics rate, never per frame.
