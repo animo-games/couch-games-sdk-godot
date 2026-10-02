@@ -321,6 +321,11 @@ var send_lane_tally: Dictionary:
 ## known-good ones. The web platform's implementation class name has NOT been
 ## verified (no web export was run), and an unverified web build must come out
 ## AVAILABLE, not silently disabled.
+##
+## A BUILD fact, nothing more. On web it reports Godot's browser-backed class and
+## (believed, NOT verified on a web build) says nothing about whether this
+## browser allows WebRTC -- the preflight probe in webrtc/webrtc_probe.gd
+## (CouchWebRTCProbe, run by CouchSessionTransport.pick()) is what catches that.
 static func is_webrtc_available() -> bool:
 	return WebRTCPeerConnection.new().get_class() != "WebRTCPeerConnectionExtension"
 
