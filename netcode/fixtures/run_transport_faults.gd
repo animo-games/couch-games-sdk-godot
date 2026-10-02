@@ -200,10 +200,195 @@ func _initialize() -> void:
 		"exactly one drop counted for the fault_kinds-restricted send (got %d)" % guest_transport.fault_drops
 	)
 
+	_run_delay_cases()
+
 	print("")
 	print("total assertions: %d failed" % _failures)
 	quit(_failures if _failures > 0 else 0)
 	return
+
+
+## A fresh transport pair (no sessions) for the delay-injection cases: the delay
+## queue is keyed off the `now_ms` handed to poll(), so every case below drives
+## its own virtual clock explicitly and observes receipt on the far transport's
+## envelope_received -- never a send's return value, which is "accepted for send".
+func _delay_pair() -> Dictionary:
+	var host_lobby := CouchScriptedLobby.new("host", true)
+	var guest_lobby := CouchScriptedLobby.new("g1", false)
+	CouchScriptedLobby.link(host_lobby, guest_lobby)
+	var host_t := CouchLobbyTransport.new(host_lobby)
+	var guest_t := CouchLobbyTransport.new(guest_lobby)
+	var received: Array = []
+	var host_received: Array = []
+	guest_t.envelope_received.connect(func(env: Dictionary, _sender: String) -> void: received.append(env))
+	host_t.envelope_received.connect(func(env: Dictionary, _sender: String) -> void: host_received.append(env))
+	return {"host": host_t, "guest": guest_t, "received": received, "host_received": host_received, "lobbies": [host_lobby, guest_lobby]}
+
+
+## Tear a pair down so it does not leak at exit: close() drops the transport <->
+## lobby signal connection, and CouchScriptedLobby.link() wires the two doubles
+## to each other (a RefCounted cycle) which only clearing `_other` breaks.
+func _delay_close(pair: Dictionary) -> void:
+	(pair["host"] as CouchLobbyTransport).close()
+	(pair["guest"] as CouchLobbyTransport).close()
+	for lobby in pair["lobbies"]:
+		(lobby as CouchScriptedLobby)._other = null
+
+
+func _delay_env(n: int) -> Dictionary:
+	return CouchEnvelope.make(CouchEnvelope.KIND_INTENT, 1, n + 1, {"n": n})
+
+
+func _received_ns(received: Array) -> Array:
+	var out: Array = []
+	for env in received:
+		out.append(int((env["body"] as Dictionary)["n"]))
+	return out
+
+
+## One 20-envelope jittered run on a fresh pair; returns the receive timeline
+## [[now_ms, n], ...] sampled by polling every 1 ms from t=0 to t=300.
+func _jitter_timeline(seed_value: int) -> Array:
+	var p := _delay_pair()
+	var host_t: CouchLobbyTransport = p["host"]
+	var guest_t: CouchLobbyTransport = p["guest"]
+	var received: Array = p["received"]
+	host_t.poll(0)
+	host_t.fault_seed = seed_value
+	host_t.fault_delay_ms = 100
+	host_t.fault_jitter_ms = 80
+	for i in range(20):
+		host_t.broadcast(_delay_env(i))
+	var timeline: Array = []
+	var seen := 0
+	for t in range(0, 301):
+		host_t.poll(t)
+		while seen < received.size():
+			timeline.append([t, int((received[seen]["body"] as Dictionary)["n"])])
+			seen += 1
+	_delay_close(p)
+	return timeline
+
+
+func _run_delay_cases() -> void:
+	print("-- D: delay / jitter injection (lobby) --")
+
+	# D1: a delayed envelope is held until its due time, observed at the far end.
+	var p := _delay_pair()
+	var host_t: CouchLobbyTransport = p["host"]
+	var received: Array = p["received"]
+	host_t.poll(0)
+	host_t.fault_delay_ms = 100
+	host_t.broadcast(_delay_env(1))
+	host_t.poll(99)
+	_check(received.is_empty(), "D1: delay=100 -- nothing received after polling at t=99 (got %d)" % received.size())
+	host_t.poll(100)
+	_check(received.size() == 1, "D1: delay=100 -- received at t=100 (got %d)" % received.size())
+	_check(host_t.fault_delayed == 1, "D1: fault_delayed == 1 (got %d)" % host_t.fault_delayed)
+	_delay_close(p)
+
+	# D2: order preserved under jitter, and the seed makes the timeline reproducible.
+	var timeline_a := _jitter_timeline(1234)
+	var timeline_b := _jitter_timeline(1234)
+	var order_ok := timeline_a.size() == 20
+	for i in range(timeline_a.size()):
+		if int(timeline_a[i][1]) != i:
+			order_ok = false
+	_check(order_ok, "D2: 20 envelopes under delay=100 jitter=80 arrive in send order (got %d)" % timeline_a.size())
+	_check(timeline_a == timeline_b, "D2: the same seed reproduces the identical receive timeline")
+	var spread := timeline_a.size() > 0 and int(timeline_a[0][0]) >= 100 and int(timeline_a[-1][0]) > int(timeline_a[0][0])
+	_check(spread, "D2: jitter actually spread the arrivals (first t>=100, last later than first)")
+	# The order claim is vacuous unless raw jitter WOULD have reordered something.
+	var raw := RandomNumberGenerator.new()
+	raw.seed = 1234
+	var would_reorder := false
+	var prev_raw := -1
+	for i in range(20):
+		var raw_due := raw.randi_range(0, 80)
+		if raw_due < prev_raw:
+			would_reorder = true
+		prev_raw = raw_due
+	_check(would_reorder, "D2: the seed's raw jitter sequence is NOT monotonic (the ordering assertion is not vacuous)")
+
+	# D3: sends refused today are still refused immediately, and never queued.
+	var p3 := _delay_pair()
+	var host3: CouchLobbyTransport = p3["host"]
+	var guest3: CouchLobbyTransport = p3["guest"]
+	host3.poll(0)
+	host3.fault_delay_ms = 100
+	_check(not host3.send_to_authority(_delay_env(1)), "D3: send_to_authority on the host is still refused with delay on")
+	_check(host3.fault_delayed == 0, "D3: the refused authority send did not enter the delay queue (got %d)" % host3.fault_delayed)
+	host3.close()
+	_check(not host3.broadcast(_delay_env(2)), "D3: a send on a closed transport is still refused with delay on")
+	_check(host3.fault_delayed == 0, "D3: the closed-transport send did not enter the delay queue")
+	_delay_close(p3)
+
+	# D4: close() discards the queue; nothing arrives later; discards are counted.
+	var p4 := _delay_pair()
+	var host4: CouchLobbyTransport = p4["host"]
+	var received4: Array = p4["received"]
+	host4.poll(0)
+	host4.fault_delay_ms = 100
+	for i in range(5):
+		host4.broadcast(_delay_env(i))
+	host4.close()
+	host4.poll(1000)
+	_check(received4.is_empty(), "D4: nothing is delivered after close() with 5 queued (got %d)" % received4.size())
+	_check(host4.fault_delay_dropped == 5, "D4: fault_delay_dropped == 5 (got %d)" % host4.fault_delay_dropped)
+	_delay_close(p4)
+
+	# D5: delay 0/0 is today's path -- delivered inside the same send, no queue.
+	var p5 := _delay_pair()
+	var host5: CouchLobbyTransport = p5["host"]
+	var received5: Array = p5["received"]
+	host5.poll(0)
+	host5.broadcast(_delay_env(1))
+	_check(received5.size() == 1, "D5: delay 0/0 delivers synchronously, before any poll (got %d)" % received5.size())
+	_check(host5.fault_delayed == 0, "D5: delay 0/0 leaves fault_delayed at 0 (got %d)" % host5.fault_delayed)
+	_delay_close(p5)
+
+	# D6: fault_reset() zeroes the levers but does NOT drop what is already queued.
+	var p6 := _delay_pair()
+	var host6: CouchLobbyTransport = p6["host"]
+	var received6: Array = p6["received"]
+	host6.poll(0)
+	host6.fault_delay_ms = 100
+	host6.broadcast(_delay_env(1))
+	host6.fault_reset()
+	host6.broadcast(_delay_env(2))
+	_check(_received_ns(received6) == [2], "D6: after fault_reset() a new send is immediate and the queued one is still held (got %s)" % [_received_ns(received6)])
+	host6.poll(99)
+	_check(_received_ns(received6) == [2], "D6: the pre-reset envelope is still held at t=99")
+	host6.poll(100)
+	_check(_received_ns(received6) == [2, 1], "D6: the pre-reset envelope still arrives at its due time (got %s)" % [_received_ns(received6)])
+	_check(host6.fault_delay_dropped == 0, "D6: nothing was counted as delay-dropped by fault_reset()")
+	_delay_close(p6)
+
+	# D7: ONE ordered pipe. A client has a single WebSocket, so authority-, peer-
+	# and broadcast-addressed sends share one global FIFO under jitter. The guest
+	# interleaves all three; the host (which every one of them reaches) must see
+	# them in exact send order.
+	var p7 := _delay_pair()
+	var guest7: CouchLobbyTransport = p7["guest"]
+	var host7: CouchLobbyTransport = p7["host"]
+	var received7: Array = p7["host_received"]
+	guest7.poll(0)
+	guest7.fault_seed = 99
+	guest7.fault_delay_ms = 100
+	guest7.fault_jitter_ms = 80
+	for i in range(30):
+		match i % 3:
+			0:
+				guest7.send_to_authority(_delay_env(i))
+			1:
+				guest7.send_to_peer("host", _delay_env(i))
+			_:
+				guest7.broadcast(_delay_env(i))
+	for t in range(0, 301):
+		guest7.poll(t)
+	var expect7: Array = range(30)
+	_check(_received_ns(received7) == expect7, "D7: mixed-target sends under jitter arrive in global send order (got %s)" % [_received_ns(received7)])
+	_delay_close(p7)
 
 
 func _check(condition: bool, message: String) -> void:

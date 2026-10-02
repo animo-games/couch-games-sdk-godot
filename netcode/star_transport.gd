@@ -293,6 +293,18 @@ var logged_reject_kinds: int:
 	get:
 		return _seen_reject_errors.size()
 
+## DEBUG-ONLY delay injection counters -- see the fault-injection block near
+## fault_kill_link(). `fault_delayed`: envelopes that went through the delay
+## queue. `fault_delay_dropped`: queued envelopes discarded because the target
+## link was gone at flush, or the transport closed first.
+var fault_delayed: int:
+	get:
+		return _fault_delayed
+
+var fault_delay_dropped: int:
+	get:
+		return _fault_delay_dropped
+
 ## Count of frames handed to put_packet, per TRANSFER MODE, as READ BACK FROM
 ## THE PEER after set_transfer_mode(). The lane is a property of the link and
 ## cannot be recovered from an envelope after the fact, so this is the only way
@@ -481,6 +493,11 @@ var _rebuild_at: Dictionary = {}           # peer_id -> int ms, -1 == "arm on th
 var _rebuild_level: Dictionary = {}        # peer_id -> int, consecutive deaths with no REBUILD_STABLE_MS between
 var _connected_since: Dictionary = {}      # peer_id -> int ms, now_ms at peer_ready; decides the stable reset
 var _send_lane_tally: Dictionary = {}      # MultiplayerPeer.TRANSFER_MODE_* -> int, sender-side lane witness
+var _fault_delayed: int = 0
+var _fault_delay_dropped: int = 0
+var _fault_rng := RandomNumberGenerator.new()   # jitter only; reseeded by fault_seed
+var _delay_queue: Array = []               # {due_ms, payload, kind, target}, in send order
+var _delay_last_due: Dictionary = {}       # lane -> last due_ms handed out
 var _reject_count: int = 0
 var _oversized_sends: int = 0
 var _net_id_collisions: int = 0
@@ -686,6 +703,11 @@ func poll(now_ms: int) -> void:
 		var bytes := _mp.get_packet()
 		_receive(from_net, bytes)
 
+	# DEBUG-ONLY delay injection: hand every queued envelope that is now due to
+	# the real send path. After the receive loop so _connected is current.
+	if not _delay_queue.is_empty():
+		_flush_delayed()
+
 	# Retry resolving the host's platform user id whenever a guest still has
 	# none -- not only while an announcement sits in _deferred_peer_ids, so a
 	# guest whose roster never names a host AND which receives no signaling
@@ -794,6 +816,10 @@ func close() -> void:
 		return
 	_closed = true
 	_lifecycle_seq += 1
+	# Queued-but-undelivered envelopes die with the transport, and are counted.
+	_fault_delay_dropped += _delay_queue.size()
+	_delay_queue.clear()
+	_delay_last_due.clear()
 	_detach_signaling()
 
 	if _mp != null:
@@ -887,7 +913,47 @@ func is_ready() -> bool:
 # DEBUG-ONLY fault injection -- same gate and same rationale as
 # CouchLobbyTransport's levers: inert in a release build, so an export can never
 # kill its own link no matter what a caller does.
+#
+# Latency and jitter: fault_delay_ms / fault_jitter_ms hold each outgoing
+# envelope for fault_delay_ms + randi_range(0, fault_jitter_ms) before the real
+# put_packet. _send() validates EXACTLY as today first (ready, target mapped and
+# connected, oversize); only an envelope that would have been sent is queued,
+# and the send still returns true ("accepted for send", never delivery). At
+# flush the link is re-validated: a target that went away meanwhile, or a closed
+# transport, discards the envelope and counts fault_delay_dropped.
+#
+# ORDER IS PRESERVED per LANE: due = max(now + delay + jitter, last due on that
+# lane). A broadcast and a unicast to peer X on one lane share X's channel, so a
+# finer (target, lane) key could reorder them, which the wire never does; keying
+# by lane alone is stricter than reality across different peers (it never yields
+# an impossible order) and exact for the same peer. Different lanes are
+# independent streams with no cross-lane order, so they may interleave. A
+# REORDERING lever for the UNRELIABLE lane, where reordering is real, is a
+# possible later addition.
+#
+# TIME: this file reads no clock; `now` at send time is the now_ms of the last
+# poll(), so delay injection REQUIRES poll(now_ms) to be driven every frame
+# (the session driver already does). With delay and jitter both 0 nothing is
+# queued and _send() is today's path.
 # ============================================================================
+
+var fault_delay_ms: int = 0
+var fault_jitter_ms: int = 0
+var fault_seed: int = 0: set = _set_fault_seed   # reseeds the jitter RNG; reproducible
+
+
+func _set_fault_seed(value: int) -> void:
+	fault_seed = value
+	_fault_rng.seed = value
+
+
+## Clear the delay levers and counters. Envelopes ALREADY queued are NOT
+## discarded: they were accepted for send and still flush at their due time.
+func fault_reset() -> void:
+	fault_delay_ms = 0
+	fault_jitter_ms = 0
+	_fault_delayed = 0
+	_fault_delay_dropped = 0
 
 
 ## Simulate the network dying under an ESTABLISHED link to `peer_id`: closes the
@@ -1773,6 +1839,14 @@ func _send(envelope: Dictionary, target_net_id: int) -> bool:
 		_oversized_sends += 1
 		_reject("oversized-send:" + kind, _local_peer_id)
 		return false
+	if OS.is_debug_build() and (fault_delay_ms > 0 or fault_jitter_ms > 0):
+		_enqueue_delayed(payload, kind, target_net_id)
+		return true
+	return _send_now(payload, kind, target_net_id)
+
+
+## The real put_packet path, shared by an immediate send and a delay-queue flush.
+func _send_now(payload: PackedByteArray, kind: String, target_net_id: int) -> bool:
 	_mp.set_target_peer(target_net_id)
 	_mp.set_transfer_mode(lane_for_kind(kind))
 	# Read back from the peer, not from a second call to lane_for_kind(): the
@@ -1781,6 +1855,48 @@ func _send(envelope: Dictionary, target_net_id: int) -> bool:
 	var lane := _mp.get_transfer_mode()
 	_send_lane_tally[lane] = int(_send_lane_tally.get(lane, 0)) + 1
 	return _mp.put_packet(payload) == OK
+
+
+## DEBUG-ONLY (caller checks the gate). Queue an already-validated payload.
+func _enqueue_delayed(payload: PackedByteArray, kind: String, target_net_id: int) -> void:
+	var extra := maxi(fault_delay_ms, 0)
+	if fault_jitter_ms > 0:
+		extra += _fault_rng.randi_range(0, fault_jitter_ms)
+	var lane := lane_for_kind(kind)
+	var due := maxi(_now_ms + extra, int(_delay_last_due.get(lane, 0)))
+	_delay_last_due[lane] = due
+	_delay_queue.append({"due_ms": due, "payload": payload, "kind": kind, "target": target_net_id})
+	_fault_delayed += 1
+
+
+func _flush_delayed() -> void:
+	# Due order; equal due times keep send order (select manually rather than
+	# rely on sort stability).
+	while true:
+		var best := -1
+		for i in range(_delay_queue.size()):
+			var due := int(_delay_queue[i]["due_ms"])
+			if due <= _now_ms and (best < 0 or due < int(_delay_queue[best]["due_ms"])):
+				best = i
+		if best < 0:
+			return
+		var item: Dictionary = _delay_queue[best]
+		_delay_queue.remove_at(best)
+		if not _delay_target_still_valid(int(item["target"])):
+			_fault_delay_dropped += 1
+			continue
+		_send_now(item["payload"], str(item["kind"]), int(item["target"]))
+
+
+## Flush-time re-validation: the same readiness and target checks _send() and
+## broadcast() make, applied again because the link may have died while queued.
+func _delay_target_still_valid(target_net_id: int) -> bool:
+	if not is_ready():
+		return false
+	if target_net_id == MultiplayerPeer.TARGET_PEER_BROADCAST:
+		return not _connected.is_empty()
+	var pid := str(_net_to_peer.get(target_net_id, ""))
+	return not pid.is_empty() and _connected.has(pid)
 
 # ============================================================================
 # Helpers

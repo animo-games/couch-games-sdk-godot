@@ -31,8 +31,10 @@
 ##       so arrivals are dispatched before the session's timers advance over
 ##       them -- CouchStarTransport's header states the rule and G9
 ##       (netcode/fixtures/run_star_session.gd) proves it matters. On the lobby
-##       tunnel it is a documented no-op. A third-party implementation should
-##       supply one, even as a no-op, so the driver loop never has to ask.
+##       tunnel it is a documented no-op unless debug delay injection is active
+##       (CouchLobbyTransport.fault_delay_ms), where it flushes the delay
+##       queue. A third-party implementation should supply one, even as a
+##       no-op, so the driver loop never has to ask.
 ##
 ## Required signals
 ##   envelope_received(envelope: Dictionary, sender_peer_id: String)
