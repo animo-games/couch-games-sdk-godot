@@ -447,6 +447,30 @@ the loop above is unconditional); and `CouchSession` does not treat a dropped
 link as a departure — `evaluate()` on `players_changed` is what stops the
 session when the pinned guest leaves, on either transport.
 
+### Multiple input players
+
+By default one guest sends input. To let more do so, pass a policy:
+
+```gdscript
+var policy := CouchSessionPolicy.new()
+policy.max_input_players = 4   # guests with an input slot; the host is slot 0 and is not counted
+_session = CouchSession.new(CouchGames.lobby, _transport, policy)
+_session.player_joined.connect(_on_player_joined)   # (peer_id, slot), host side
+_session.player_left.connect(_on_player_left)       # (peer_id, slot), host side
+```
+
+The first `max_input_players` guests (lowest `controller_slot`, then
+`user_id`) get slots `1..N`, and the rest spectate at `-1`. A slotted guest
+leaving no longer stops the session. The host emits `player_left`, and the freed
+slot goes to the next waiting spectator or newcomer (lowest slot first), which
+fires `player_joined`. That guest's own session emits
+`local_slot_changed(old, new)`. After `session_started` the host emits
+`player_joined` for every starting player, so a game can spawn and despawn
+player entities from these two signals alone. Every change of the slot map is
+re-broadcast in the host's hello, and `session.slots` returns a copy of it. A
+host restart is still a new epoch, which every guest sees as `session_stopped`
+then `session_started`. Proven by `netcode/fixtures/run_session_players.gd`.
+
 ## Experience files
 
 An experience is a dated content drop — a level pack, a room, a puzzle set —

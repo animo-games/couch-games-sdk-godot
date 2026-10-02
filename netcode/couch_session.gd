@@ -52,16 +52,32 @@
 ## cycle. The observable cost, accepted: the guest is briefly inactive
 ## mid-match, so a role indicator blanks for about one RTT.
 ##
-## Authorized guest: picked once, when the host's session starts (lowest
-## controller_slot, ties broken by ascending user_id -- the pre-session pick,
-## preserved verbatim). It is pinned for the life of the session: a roster
-## change never repicks it. If the pinned guest leaves, the session STOPS
-## (`stop("authorized-peer-left")`); the very next `evaluate()` may start a
-## FRESH session with a NEW epoch and, if the pinned guest is gone, a newly
-## picked one. That restart is announced through `session_stopped` +
-## `session_started`, never a silent takeover. The addon must not assume the
-## platform bounces a departing player anywhere -- stop+restart is correct
-## either way.
+## Authorized guest (max_input_players == 1, the default): picked once, when the
+## host's session starts (lowest controller_slot, ties broken by ascending
+## user_id -- the pre-session pick, preserved verbatim). It is pinned for the
+## life of the session: a roster change never repicks it. If the pinned guest
+## leaves, the session STOPS (`stop("authorized-peer-left")`); the very next
+## `evaluate()` may start a FRESH session with a NEW epoch and, if the pinned
+## guest is gone, a newly picked one. That restart is announced through
+## `session_stopped` + `session_started`, never a silent takeover. The addon must
+## not assume the platform bounces a departing player anywhere -- stop+restart is
+## correct either way. Every other guest is a spectator (slot -1) whose hello is
+## rejected as `unauthorized-sender`.
+##
+## Input slots (max_input_players > 1): the host's `_slots` map is the authority
+## for who may send, and the pin is gone. At mint the first N guests in the same
+## order (controller_slot, then user_id) get slots 1..N and the rest of the
+## roster is -1; `authorized_peer_id` / session_started's peer are the slot-1
+## guest AT SESSION START only and are never updated. On every evaluate() while
+## engaged, `_reconcile_slots` follows the roster WITHOUT stopping or re-minting:
+## a departing guest frees its slot (`player_left`, and its tracker is dropped
+## so a rejoiner restarting at seq 1 is not rejected as a duplicate); freed
+## slots go to waiting spectators and newcomers by that one ordering, lowest
+## slot first (`player_joined`); the host re-broadcasts its hello whenever the
+## map changed, and a guest whose slot changed mid-session reports it through
+## `local_slot_changed`. A roster below two players still stops the session
+## ("roster-too-small"), with no `player_left`. N is fixed per session object and
+## a guest never needs to know it: it only reads its own slot from the hello.
 ##
 ## Reserved kinds (`resync-request` / `resync-response`) are accepted
 ## vocabulary, not implemented in Phase 0: a message of one of those kinds is
@@ -89,9 +105,12 @@ signal snapshot_received(body: Dictionary)
 signal sequence_gap(kind: String, sender_id: String, missing: int)
 signal transport_gap(peer_id: String, reason: String)
 signal rejected(reason: String, sender_id: String)  # observability for malformed/unauthorised
+signal player_joined(peer_id: String, slot: int)    # host side, multi-player mode: a guest took an input slot
+signal player_left(peer_id: String, slot: int)      # host side, multi-player mode: a slotted guest left
+signal local_slot_changed(old_slot: int, new_slot: int)  # guest side: host moved my slot mid-session
 
 const SLOT_HOST := 0
-const SLOT_GUEST := 1
+const SLOT_GUEST := 1   # the first guest slot; multi mode uses 1..max_input_players
 const SLOT_SPECTATOR := -1
 const HELLO_RETRY_MS := 500
 const HELLO_STATE_REQUEST_MIN_INTERVAL_MS := 250
@@ -116,6 +135,14 @@ var authorized_peer_id: String:
 	get:
 		return _authorized_peer_id
 
+var max_input_players: int:   # guests that may hold an input slot; fixed at construction
+	get:
+		return _max_input_players
+
+var slots: Dictionary:   # copy of the host-assigned user_id -> slot map
+	get:
+		return _slots.duplicate()
+
 var host_id: String:
 	get:
 		return _host_id
@@ -139,6 +166,7 @@ var _engaged: bool = false   # true from the moment a role is committed until st
 var _active: bool = false
 var _epoch: int = CouchEnvelope.UNKNOWN_EPOCH
 var _is_host: bool = false
+var _max_input_players: int = 1
 var _local_slot: int = SLOT_SPECTATOR
 var _authorized_peer_id: String = ""
 var _host_id: String = ""
@@ -157,9 +185,12 @@ var _last_hello_state_request_ms: Dictionary = {}   # sender_id -> int, host-sid
 var _warned_reserved_kind: bool = false             # at most one push_warning per session
 
 
-func _init(roster: Object, transport: Object) -> void:
+func _init(roster: Object, transport: Object, policy: CouchSessionPolicy = null) -> void:
 	_roster = roster
 	_transport = transport
+	if policy == null:
+		policy = CouchSessionPolicy.default_policy()
+	_max_input_players = maxi(1, policy.max_input_players)
 	if not _implements_roster(roster):
 		push_error("CouchSession: roster does not satisfy the required duck contract")
 		return
@@ -199,8 +230,11 @@ func evaluate(now_ms: int) -> void:
 		# never name the wrong cause. The guard lives here rather than in a
 		# reorder of the role dispatch below: moving the size check after the
 		# dispatch would leave a roster of [guest-only] failing to stop at all.
+		# Legacy-only: with max_input_players > 1 no single peer is "the" pin,
+		# so a roster that shrinks below two stops as "roster-too-small".
 		if (
-			_engaged
+			_max_input_players == 1
+			and _engaged
 			and _is_host
 			and not _authorized_peer_id.is_empty()
 			and _has_player(players, _host_id)
@@ -266,7 +300,11 @@ func broadcast_snapshot(body: Dictionary) -> bool:
 
 
 func _evaluate_as_host(players: Array) -> void:
-	if _engaged and not _has_player(players, _authorized_peer_id):
+	if _max_input_players > 1:
+		if _engaged:
+			_reconcile_slots(players)
+			return
+	elif _engaged and not _has_player(players, _authorized_peer_id):
 		stop("authorized-peer-left")
 
 	if _engaged:
@@ -297,13 +335,25 @@ func _evaluate_as_host(players: Array) -> void:
 	# it is the only sender whose envelopes can reach a tracker on a host (the
 	# _authorized_peer_id check in _on_envelope_received runs first), and the
 	# tracker records what a sender has sent -- it never grants authority.
-	var pinned_tracker := CouchEnvelope.ReceiveTracker.new()
-	pinned_tracker.reset(_epoch)
-	_trackers[_authorized_peer_id] = pinned_tracker
-
+	# With max_input_players > 1 the same applies to EVERY slotted guest (each
+	# can send input and each would be wedged identically), so all of them are
+	# pre-seeded; a spectator is not, it can only hello and that bootstraps.
+	var slotted: Array[String] = []
 	_slots.clear()
 	_slots[host_id] = SLOT_HOST
-	_slots[_authorized_peer_id] = SLOT_GUEST
+	if _max_input_players > 1:
+		var sorted_guests := _sorted_guests()
+		for n in mini(_max_input_players, sorted_guests.size()):
+			var gid := _field_string(sorted_guests[n], "user_id")
+			_slots[gid] = SLOT_GUEST + n
+			slotted.append(gid)
+	else:
+		_slots[_authorized_peer_id] = SLOT_GUEST
+		slotted.append(_authorized_peer_id)
+	for slotted_id in slotted:
+		var pinned_tracker := CouchEnvelope.ReceiveTracker.new()
+		pinned_tracker.reset(_epoch)
+		_trackers[slotted_id] = pinned_tracker
 	for player in players:
 		var uid := _field_string(player, "user_id")
 		if not _slots.has(uid):
@@ -319,6 +369,71 @@ func _evaluate_as_host(players: Array) -> void:
 
 	_active = true
 	session_started.emit(_epoch, true, SLOT_HOST, _authorized_peer_id, _peer_name)
+
+	if _max_input_players > 1:
+		for gid in slotted:
+			player_joined.emit(gid, int(_slots[gid]))
+
+
+## Multi mode only (host, engaged). Brings `_slots` in line with the roster
+## without ever stopping the session or changing the epoch; see the "Input
+## slots" paragraph in the header for the rules and the reasoning.
+func _reconcile_slots(players: Array) -> void:
+	var changed := false
+
+	# 1. Departures, ascending slot order (spectators, at -1, sort first and
+	# are silent). A leaver's tracker and hello rate-limit entry go with it: a
+	# rejoiner restarts its seqs at 1, so a stale tracker would reject it.
+	var departed: Array = []
+	for uid in _slots:
+		if uid != _host_id and not _has_player(players, uid):
+			departed.append(uid)
+	departed.sort_custom(func(a, b): return int(_slots[a]) < int(_slots[b]))
+	for uid in departed:
+		var old_slot := int(_slots[uid])
+		_slots.erase(uid)
+		_trackers.erase(uid)
+		_last_hello_state_request_ms.erase(uid)
+		changed = true
+		if old_slot >= SLOT_GUEST:
+			player_left.emit(uid, old_slot)
+
+	# 2. Fill freed slots from waiting spectators and newcomers, one ordering.
+	var held: Dictionary = {}
+	for uid in _slots:
+		if int(_slots[uid]) >= SLOT_GUEST:
+			held[int(_slots[uid])] = true
+	var free_slots: Array[int] = []
+	for s in range(SLOT_GUEST, SLOT_GUEST + _max_input_players):
+		if not held.has(s):
+			free_slots.append(s)
+	var waiting: Array = []   # newcomers (absent from _slots) and spectators, sorted
+	for guest in _sorted_guests():
+		var gid := _field_string(guest, "user_id")
+		if not _slots.has(gid) or int(_slots[gid]) == SLOT_SPECTATOR:
+			waiting.append(gid)
+	for gid in waiting:
+		if free_slots.is_empty():
+			# 3. No slot left: a newcomer becomes a spectator.
+			if not _slots.has(gid):
+				_slots[gid] = SLOT_SPECTATOR
+				changed = true
+			continue
+		var slot: int = free_slots.pop_front()
+		_slots[gid] = slot
+		changed = true
+		# A spectator that already helloed keeps its seq history; anything else
+		# is pre-seeded for the same reason as at mint.
+		var tracker: CouchEnvelope.ReceiveTracker = _trackers.get(gid)
+		if tracker == null or tracker.epoch != _epoch:
+			var fresh := CouchEnvelope.ReceiveTracker.new()
+			fresh.reset(_epoch)
+			_trackers[gid] = fresh
+		player_joined.emit(gid, slot)
+
+	# 4. Everyone, the newcomer included, learns the new map.
+	if changed:
+		_send_host_hello("")
 
 
 func _evaluate_as_guest(now_ms: int, _players: Array) -> void:
@@ -350,9 +465,15 @@ func _evaluate_as_guest(now_ms: int, _players: Array) -> void:
 ## Lowest controller_slot, ties broken by ascending user_id -- preserved
 ## verbatim from the pre-session pick so this is not a behaviour change.
 func _pick_authorized_guest() -> Variant:
-	var guests: Array = _roster.get_guests()
+	var guests := _sorted_guests()
 	if guests.is_empty():
 		return null
+	return guests[0]
+
+
+## The guest ordering shared by the legacy pick and multi-mode slot assignment.
+func _sorted_guests() -> Array:
+	var guests: Array = _roster.get_guests()
 	guests.sort_custom(func(a, b):
 		var slot_a := _field_int(a, "controller_slot", -1)
 		var slot_b := _field_int(b, "controller_slot", -1)
@@ -360,7 +481,7 @@ func _pick_authorized_guest() -> Variant:
 			return _field_string(a, "user_id") < _field_string(b, "user_id")
 		return slot_a < slot_b
 	)
-	return guests[0]
+	return guests
 
 
 func _has_player(players: Array, user_id: String) -> bool:
@@ -428,8 +549,12 @@ func _on_hello_at_host(sender_id: String) -> void:
 func _on_hello_at_guest(body: Dictionary) -> void:
 	var my_id := _field_string(_roster.get_me(), "user_id")
 	var slots: Dictionary = body.get("slots", {})
-	_local_slot = int(slots.get(my_id, SLOT_SPECTATOR))
+	var new_slot := int(slots.get(my_id, SLOT_SPECTATOR))
+	var old_slot := _local_slot
+	_local_slot = new_slot
 	_peer_name = str(body.get("name", ""))
+	if _active and new_slot != old_slot:
+		local_slot_changed.emit(old_slot, new_slot)
 	if not _active:
 		_active = true
 		session_started.emit(_epoch, false, _local_slot, _host_id, _peer_name)
@@ -456,7 +581,18 @@ func _on_envelope_received(envelope: Dictionary, sender_id: String) -> void:
 	if _is_host:
 		match kind:
 			CouchEnvelope.KIND_HELLO, CouchEnvelope.KIND_INTENT, CouchEnvelope.KIND_INPUT:
-				if sender_id != _authorized_peer_id:
+				if _max_input_players > 1:
+					# The slots map is the authority. A hello is welcome from any
+					# member (a spectator needs its map); intent/input only from
+					# a slotted guest.
+					var sender_slot := int(_slots.get(sender_id, SLOT_SPECTATOR))
+					var allowed := _slots.has(sender_id) and sender_slot != SLOT_HOST
+					if kind != CouchEnvelope.KIND_HELLO:
+						allowed = sender_slot >= SLOT_GUEST
+					if not allowed:
+						_reject(sender_id, "unauthorized-sender")
+						return
+				elif sender_id != _authorized_peer_id:
 					_reject(sender_id, "unauthorized-sender")
 					return
 			CouchEnvelope.KIND_SNAPSHOT:
@@ -635,17 +771,19 @@ func _send(kind: String, body: Dictionary, requires_host: bool) -> bool:
 		return false
 	if requires_host != _is_host:
 		return false
-	# Only the ONE guest the host pinned may send a participant kind. A
-	# spectator's intent/input is rejected by the host as `unauthorized-sender`
-	# without exception -- this layer pins exactly one guest for the life of a
-	# session -- so putting it on the wire is guaranteed-wasted tunnel bandwidth
-	# on the platform's metered cost driver, and returning true would claim
-	# "accepted for send" for a message that provably cannot be applied.
+	# Only a guest the host gave an input slot (>= SLOT_GUEST, the first guest
+	# slot) may send a participant kind. A spectator's intent/input is rejected
+	# by the host as `unauthorized-sender` without exception -- the host's slots
+	# map decides, and a guest never needs to know how many slots there are --
+	# so putting it on the wire is guaranteed-wasted tunnel bandwidth on the
+	# platform's metered cost driver, and returning true would claim "accepted
+	# for send" for a message that provably cannot be applied.
 	# `_local_slot` is authoritative here: it is assigned from the host's own
-	# `slots` map by the same hello that sets _active, so it can never be stale
-	# at this point. Scoped to participant kinds -- a host is SLOT_HOST and its
-	# snapshot broadcast must not be caught by this.
-	if not requires_host and _local_slot != SLOT_GUEST:
+	# `slots` map by the hello that sets _active (and kept current by later
+	# hellos in multi mode), so it can never be stale at this point. Scoped to
+	# participant kinds -- a host is SLOT_HOST and its snapshot broadcast must
+	# not be caught by this.
+	if not requires_host and _local_slot < SLOT_GUEST:
 		return false
 	_out_seq[kind] = int(_out_seq.get(kind, 0)) + 1
 	var envelope := CouchEnvelope.make(kind, _epoch, _out_seq[kind], body)

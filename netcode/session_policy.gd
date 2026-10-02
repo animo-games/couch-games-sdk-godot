@@ -8,6 +8,10 @@ var max_backoff_ms: int = 8000
 var backoff_shift_cap: int = 3
 var max_attempts: int = 6
 var no_baseline_ms: int = 1000
+## The number of GUESTS that may hold an input slot. The host is always slot 0
+## and is not counted; 1 = today's single pinned guest (legacy behaviour).
+## CouchSession reads this once at construction (floored at 1).
+var max_input_players: int = 1
 
 
 static func default_policy() -> CouchSessionPolicy:
