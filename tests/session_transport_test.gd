@@ -62,6 +62,8 @@ func _run() -> void:
 	await _check_unknown_preference()
 	await _check_star_refusals(available)
 	await _check_star_success(available)
+	await _check_star_blocked(available)
+	await _check_star_probe_disabled(available)
 	await _check_auto(available)
 
 	print("")
@@ -75,6 +77,14 @@ func _run() -> void:
 
 
 # ---------------------------------------------------------------------------
+
+# ICE servers nothing listens on (the discard port): a network that blocks
+# WebRTC as far as TURN looks exactly like this to the probe.
+const UNREACHABLE_ICE := [{
+	"urls": ["stun:127.0.0.1:9", "turn:127.0.0.1:9?transport=udp"],
+	"username": "u",
+	"credential": "c",
+}]
 
 
 ## The pure decision table. Both availability branches are spelled out so the
@@ -99,6 +109,8 @@ func _check_lobby_pick() -> void:
 	var picked: Dictionary = await CouchSessionTransport.pick(pair.lobby, pair.webrtc, CouchSessionTransport.PREFER_LOBBY)
 	_expect(picked.kind, CouchSessionTransport.KIND_LOBBY, "pick(lobby): kind == lobby")
 	_expect(picked.error, "", "pick(lobby): no error")
+	_expect(picked.has("probe"), true, "pick(lobby): result carries a probe key")
+	_expect(picked.probe, {}, "pick(lobby): no probe ran")
 	_expect(picked.transport is CouchLobbyTransport, true, "pick(lobby): transport is a CouchLobbyTransport")
 	_expect(CouchTransport.implements(picked.transport), true, "pick(lobby): the transport satisfies CouchTransport")
 	_expect(picked.transport.has_method("poll"), true, "pick(lobby): the tunnel has poll() so the driver loop is unconditional")
@@ -117,6 +129,8 @@ func _check_unknown_preference() -> void:
 	_expect(picked.kind, CouchSessionTransport.KIND_NONE, "pick(<unknown>): kind == none")
 	_expect(picked.transport, null, "pick(<unknown>): no transport")
 	_expect(picked.error, "unknown-preference:mesh", "pick(<unknown>): error names the preference")
+	_expect(picked.has("probe"), true, "pick(<unknown>): refusal carries a probe key")
+	_expect(picked.probe, {}, "pick(<unknown>): no probe ran on a refusal")
 	_expect(pair.backend.connect_calls, 0, "pick(<unknown>): signaling was never touched")
 	_free_pair(pair)
 
@@ -157,6 +171,7 @@ func _check_star_refusals(available: bool) -> void:
 	_expect(picked.kind, CouchSessionTransport.KIND_NONE, "star, peer id != lobby me: kind == none")
 	_expect(picked.transport, null, "star, peer id != lobby me: no transport")
 	_expect(picked.error, "peer-id-mismatch", "star, peer id != lobby me: the star's own error")
+	_expect(picked.probe, {}, "star, peer id != lobby me: no probe ran")
 	_expect(mismatch.webrtc.is_signaling_connected, false, "star, peer id != lobby me: the signaling membership the attempt opened was released")
 	_expect(mismatch.backend.disconnect_calls >= 1, true, "star, peer id != lobby me: the backend saw a disconnect")
 	_free_pair(mismatch)
@@ -178,12 +193,48 @@ func _check_star_success(available: bool) -> void:
 	_expect(picked.transport.local_peer_id, "host", "star: the local peer id is the signaling peer id == lobby user id")
 	_expect(pair.webrtc.is_signaling_connected, true, "star: signaling is connected after pick()")
 	_expect(pair.backend.connect_calls, 1, "star: exactly one connect")
+	_expect(picked.probe.ok, true, "star: the preflight probe passed (no ICE servers: host candidate suffices)")
+	_expect(picked.probe.servers, 0, "star: the probe saw zero ICE servers")
 	var session := CouchSession.new(pair.lobby, picked.transport)
 	_expect(session != null, true, "star: CouchSession.new() accepts the transport")
 	picked.transport.poll(0)
 	session.poll(0)
 	picked.transport.close()
 	_expect(pair.webrtc.is_signaling_connected, false, "star: close() releases signaling")
+	_free_pair(pair)
+
+
+## A star whose signaling joined but whose machine cannot reach the configured
+## ICE servers is REFUSED -- never demoted to the tunnel -- and releases signaling.
+func _check_star_blocked(available: bool) -> void:
+	if not available:
+		_expect(false, true, "star blocked case needs a WebRTC implementation (FAIL, not skip)")
+		return
+	var pair := _new_pair({"userId": "host", "username": "Host", "role": "host"})
+	pair.backend.connect_result = {"success": true, "payload": {"peerId": "host", "roomId": "room", "iceServers": UNREACHABLE_ICE}}
+	var picked: Dictionary = await CouchSessionTransport.pick(pair.lobby, pair.webrtc, CouchSessionTransport.PREFER_STAR, 1500)
+	_expect(picked.kind, CouchSessionTransport.KIND_NONE, "star blocked: kind == none")
+	_expect(picked.transport, null, "star blocked: no transport (not a lobby tunnel either)")
+	_expect(picked.error, "webrtc-blocked:no-route", "star blocked: error == webrtc-blocked:no-route")
+	_expect(picked.probe.reason, "no-route", "star blocked: the probe result rides on the refusal")
+	_expect(pair.webrtc.is_signaling_connected, false, "star blocked: signaling was released")
+	_expect(pair.backend.disconnect_calls >= 1, true, "star blocked: the backend saw a disconnect")
+	_free_pair(pair)
+
+
+## probe_timeout_ms <= 0 skips the preflight: the same blocked machine gets a star.
+func _check_star_probe_disabled(available: bool) -> void:
+	if not available:
+		_expect(false, true, "star probe-disabled case needs a WebRTC implementation (FAIL, not skip)")
+		return
+	var pair := _new_pair({"userId": "host", "username": "Host", "role": "host"})
+	pair.backend.connect_result = {"success": true, "payload": {"peerId": "host", "roomId": "room", "iceServers": UNREACHABLE_ICE}}
+	var picked: Dictionary = await CouchSessionTransport.pick(pair.lobby, pair.webrtc, CouchSessionTransport.PREFER_STAR, 0)
+	_expect(picked.kind, CouchSessionTransport.KIND_STAR, "probe disabled: star built despite unreachable servers")
+	_expect(picked.error, "", "probe disabled: no error")
+	_expect(picked.probe, {}, "probe disabled: no probe ran")
+	if picked.transport != null:
+		picked.transport.close()
 	_free_pair(pair)
 
 

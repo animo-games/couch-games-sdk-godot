@@ -26,8 +26,9 @@ loopback socket instead of a faked one.
 core/       the CouchGames autoload and the response wrapper
 backends/   the abstract backend plus the web, mock and local-relay ones
 lobby/      CouchGames.lobby and its player type
-webrtc/     signaling, candidate-path probing, the rollback adapter, and the
-            provider-neutral mesh
+webrtc/     signaling, candidate-path probing, the preflight WebRTC probe
+            (webrtc_probe.gd), the rollback adapter, and the provider-neutral
+            mesh
 netcode/    CouchSession and the transports it rides on (the lobby tunnel and
             the WebRTC star), plus their headless gates
 experience/ CouchGames.experience, the uploaded files for the current drop
@@ -379,6 +380,8 @@ func _ready() -> void:
     var picked: Dictionary = await CouchSessionTransport.pick(CouchGames.lobby, CouchGames.webrtc)
     if picked.transport == null:
         push_error("no session transport: " + picked.error)   # refused -- see below
+        if picked.error.begins_with(CouchSessionTransport.ERROR_WEBRTC_BLOCKED):
+            show_message(CouchWebRTCProbe.describe(picked.probe.reason))
         return
     _transport = picked.transport
     _session = CouchSession.new(CouchGames.lobby, _transport)
@@ -396,7 +399,7 @@ func _process(_delta: float) -> void:
     _session.poll(now)
 ```
 
-`pick(lobby, webrtc, prefer)` returns `{transport, kind, error}`. `prefer` is
+`pick(lobby, webrtc, prefer, probe_timeout_ms)` returns `{transport, kind, error, probe}`. `prefer` is
 one of `CouchSessionTransport.PREFER_AUTO` (the default), `PREFER_STAR` or
 `PREFER_LOBBY`; `kind` reports what was built (`"star"`, `"lobby"`, or `"none"`
 on a refusal). `resolve_kind(prefer)` answers the same question without
@@ -419,6 +422,23 @@ reason, ship every export of a game with the same addons — a web build and a
 
 There is no switching mid-session. A different transport means a new session,
 constructed the same way.
+
+**Preflight probe.** Starting a star only joins signaling, so a player whose
+browser or network blocks WebRTC so thoroughly that even TURN fails would get a
+star whose links silently time out. After the star starts, `pick()` therefore
+runs `CouchWebRTCProbe` against the ICE servers signaling returned: it opens a
+throwaway peer connection and checks that this machine can gather a candidate
+that reaches a STUN or TURN server. If not, `pick()` refuses with
+`webrtc-blocked:<reason>` (`webrtc-unavailable`, `no-candidates` or `no-route`)
+and the probe result in `picked.probe` (`ok`, `reason`, `host`, `srflx`,
+`relay`, `servers`, `elapsed_ms`; `{}` when no probe ran).
+`CouchWebRTCProbe.describe(picked.probe.reason)` is a sentence you can show the
+player. Like every other refusal it is per-machine and never a fallback to the
+tunnel. A pass means "not obviously blocked", not "will connect": it does not
+test the remote peer. `relay` reports whether a TURN allocation succeeded, if
+your game wants to be stricter. Pass `probe_timeout_ms <= 0` to skip the probe
+(the default is `CouchWebRTCProbe.DEFAULT_TIMEOUT_MS`, 5 seconds, and it ends
+early when it has what it needs).
 
 Two things the star does that the tunnel does not, both proven by
 `netcode/fixtures/run_star_session.gd`: `_transport.poll()` **must** run every

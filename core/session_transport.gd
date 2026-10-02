@@ -7,6 +7,8 @@
 ##   var picked: Dictionary = await CouchSessionTransport.pick(CouchGames.lobby, CouchGames.webrtc)
 ##   if picked.transport == null:
 ##       push_error(picked.error)     # refused -- see below; do NOT retry with the other kind
+##       if picked.error.begins_with(CouchSessionTransport.ERROR_WEBRTC_BLOCKED):
+##           show_message(CouchWebRTCProbe.describe(picked.probe.reason))
 ##       return
 ##   var session := CouchSession.new(CouchGames.lobby, picked.transport)
 ##   ...
@@ -27,6 +29,16 @@
 ## REFUSALS: a loud push_error, `transport` null, `kind` "none", the reason in
 ## `error`. The caller may retry pick() with the same preference; it must never
 ## "try the other one".
+##
+## The preflight probe is one more refusal, not a fallback. start() only joins
+## signaling, so a player whose browser or network blocks WebRTC so thoroughly
+## that even TURN fails would otherwise get a star whose links silently time
+## out. After start() succeeds, pick() runs CouchWebRTCProbe against the ICE
+## servers signaling handed back; if this machine reaches none of them it
+## refuses with "webrtc-blocked:<reason>" and the probe result in `probe`. It
+## is per-machine, so it can differ between peers of one lobby -- which is
+## exactly why it may only refuse: the others resolved the star, and this
+## player switching to the tunnel would be the split THE RULE forbids.
 ##
 ## PREFER_AUTO is the sensible default: the star when this build can run one,
 ## the lobby tunnel otherwise. A project that never installs webrtc_native
@@ -56,6 +68,11 @@ const KIND_NONE := "none"
 const ERROR_NO_WEBRTC := "no-webrtc-implementation"
 const ERROR_SIGNALING_UNAVAILABLE := "signaling-unavailable"
 const ERROR_UNKNOWN_PREFERENCE := "unknown-preference"
+## The preflight probe found this machine cannot reach the ICE servers (or
+## cannot do WebRTC at all). The refusal error is "webrtc-blocked:<reason>",
+## <reason> being a CouchWebRTCProbe REASON_* string; picked.probe has the
+## full probe result and CouchWebRTCProbe.describe(reason) a player-facing line.
+const ERROR_WEBRTC_BLOCKED := "webrtc-blocked"
 
 
 ## The kind THIS BUILD selects for `prefer`. Pure: a function of the preference
@@ -78,7 +95,10 @@ static func resolve_kind(prefer: String = PREFER_AUTO) -> String:
 ## `await` this: the star's start() joins signaling and costs real frames, and
 ## a coroutine returns the same shape on every path.
 ##
-## Returns {"transport": Object|null, "kind": String, "error": String}.
+## Returns {"transport": Object|null, "kind": String, "error": String,
+## "probe": Dictionary}. `probe` is CouchWebRTCProbe.probe()'s result when the
+## star path ran it, and {} on every other path (lobby tunnel, an earlier
+## refusal, probe disabled).
 ## `transport` is ready to hand to CouchSession.new() -- a lobby tunnel needs
 ## no start; a star has already been started and its is_host/local_net_id are
 ## latched. On refusal `transport` is null, `kind` is KIND_NONE and `error`
@@ -88,7 +108,9 @@ static func resolve_kind(prefer: String = PREFER_AUTO) -> String:
 ## `lobby` is duck-typed exactly as the transports and the session type it:
 ## CouchGames.lobby in a game, a double in a test. `webrtc` is the SDK's
 ## signaling node (CouchGames.webrtc); it is only touched on the star path.
-static func pick(lobby: Object, webrtc: CouchWebRTC, prefer: String = PREFER_AUTO) -> Dictionary:
+##
+## `probe_timeout_ms` bounds the star's preflight probe; <= 0 skips it.
+static func pick(lobby: Object, webrtc: CouchWebRTC, prefer: String = PREFER_AUTO, probe_timeout_ms: int = CouchWebRTCProbe.DEFAULT_TIMEOUT_MS) -> Dictionary:
 	var kind := resolve_kind(prefer)
 	match kind:
 		KIND_LOBBY:
@@ -110,17 +132,29 @@ static func pick(lobby: Object, webrtc: CouchWebRTC, prefer: String = PREFER_AUT
 				# started later.
 				star.close()
 				return _refuse(str(res.get("error", "start-failed")))
-			return _picked(star, KIND_STAR)
+			var probe: Dictionary = {}
+			if probe_timeout_ms > 0:
+				# AFTER start(): the ICE servers arrive with the signaling join.
+				# close() tears down the star's pre-built guest PC and releases
+				# signaling. This refusal is per-machine and NOT a reason to try
+				# the lobby tunnel -- the rest of the lobby resolved the star,
+				# and this player switching would be the split the header
+				# forbids.
+				probe = await CouchWebRTCProbe.probe(webrtc.ice_servers, probe_timeout_ms)
+				if not bool(probe.get("ok", false)):
+					star.close()
+					return _refuse("%s:%s" % [ERROR_WEBRTC_BLOCKED, probe.get("reason", "")], probe)
+			return _picked(star, KIND_STAR, probe)
 		_:
 			if prefer == PREFER_STAR:
 				return _refuse(ERROR_NO_WEBRTC)
 			return _refuse("%s:%s" % [ERROR_UNKNOWN_PREFERENCE, prefer])
 
 
-static func _picked(transport: Object, kind: String) -> Dictionary:
-	return {"transport": transport, "kind": kind, "error": ""}
+static func _picked(transport: Object, kind: String, probe: Dictionary = {}) -> Dictionary:
+	return {"transport": transport, "kind": kind, "error": "", "probe": probe}
 
 
-static func _refuse(error: String) -> Dictionary:
+static func _refuse(error: String, probe: Dictionary = {}) -> Dictionary:
 	push_error("CouchSessionTransport: refused (%s) -- no transport constructed" % error)
-	return {"transport": null, "kind": KIND_NONE, "error": error}
+	return {"transport": null, "kind": KIND_NONE, "error": error, "probe": probe}
