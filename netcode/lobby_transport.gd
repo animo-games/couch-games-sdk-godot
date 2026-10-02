@@ -53,14 +53,45 @@ signal transport_gap(peer_id: String, reason: String)
 #   fault_drop_next()    -- deterministic queue, for assertions
 # A test drives the DETERMINISTIC lever, so no assertion depends on an RNG sequence
 # that a future Godot build could legitimately change.
+#
+# Two more levers add LATENCY and JITTER to the same outgoing path:
+#   fault_delay_ms / fault_jitter_ms -- each outgoing envelope is held for
+#       fault_delay_ms + randi_range(0, fault_jitter_ms) (the same _fault_rng the
+#       drop lever uses) before the real send_event happens.
+# A send is validated and drop-tested EXACTLY as today first; only an envelope
+# that would have been sent is queued, and the send still returns true ("accepted
+# for send", never delivery -- netcode/transport.gd). ORDER IS PRESERVED
+# GLOBALLY: due = max(now + delay, last due), ONE key for every send. A client
+# has exactly one WebSocket, an ordered pipe for ALL its sends whatever the
+# target, so authority-, peer- and broadcast-addressed envelopes can never
+# overtake one another on the real wire, and a lever that let them would test a
+# network this transport never sees. (A reordering lever is a possible later
+# addition for the star's UNRELIABLE lane, where reordering is real.) Due times
+# are therefore monotone in send order and the queue is a plain FIFO.
+#
+# TIME: this file reads no clock. `now` at send time is the `now_ms` of the last
+# poll(), so delay injection REQUIRES poll(now_ms) to be driven every frame
+# (the session driver already does). With delay and jitter both 0 nothing is
+# ever queued and the send path is byte-for-byte the pre-delay one.
 
 var fault_drop_permille: int = 0          # 0..1000; 0 disables
 var fault_kinds: PackedStringArray = []   # empty = every kind is eligible
 var fault_seed: int = 0: set = _set_fault_seed   # reseeds _fault_rng; reproducible
 
+var fault_delay_ms: int = 0               # base added delay per outgoing envelope; 0 disables
+var fault_jitter_ms: int = 0              # extra uniform 0..jitter per envelope, from _fault_rng
+
 var fault_drops: int:  # total dropped, for evidence
 	get:
 		return _fault_drops
+
+var fault_delayed: int:  # envelopes that went through the delay queue
+	get:
+		return _fault_delayed
+
+var fault_delay_dropped: int:  # queued envelopes discarded because the transport closed
+	get:
+		return _fault_delay_dropped
 
 var _lobby: Object
 var _event_name: String
@@ -75,6 +106,11 @@ var _reject_count: int = 0
 var _fault_rng := RandomNumberGenerator.new()
 var _fault_pending: Dictionary = {}       # kind -> count
 var _fault_drops: int = 0
+var _fault_delayed: int = 0
+var _fault_delay_dropped: int = 0
+var _now_ms: int = 0                      # cached from the last poll(); this file never reads a clock
+var _delay_queue: Array = []              # {due_ms, frame, target}, FIFO; due_ms is monotone
+var _delay_last_due: int = 0              # last due_ms handed out (the single ordering key)
 
 
 func _init(lobby: Object, event_name: String = DEFAULT_EVENT_NAME) -> void:
@@ -123,18 +159,25 @@ func is_ready() -> bool:
 	return not _closed and _lobby != null and bool(_lobby.get("is_available"))
 
 
-## Deliberate no-op. The tunnel is push-driven -- the lobby delivers into
-## _on_lobby_event the moment the backend does, and nothing here owns a timer
-## -- so there is nothing to advance. It exists so a driver can call
-## `transport.poll(now_ms)` before `session.poll(now_ms)` on EVERY frame
-## without asking which transport it holds: CouchStarTransport MUST be polled
-## (it owns a WebRTCMultiplayerPeer and every deadline it keeps), and a driver
-## that only polls "when the transport has a poll()" is one has_method check
-## away from never polling the star at all. See netcode/transport.gd's note on
-## the optional poll() and CouchSessionTransport, which is where that driver
+## A no-op UNLESS delay injection is active. The tunnel is push-driven -- the
+## lobby delivers into _on_lobby_event the moment the backend does, and nothing
+## here owns a timer -- so ordinarily there is nothing to advance. It exists so a
+## driver can call `transport.poll(now_ms)` before `session.poll(now_ms)` on EVERY
+## frame without asking which transport it holds: CouchStarTransport MUST be
+## polled (it owns a WebRTCMultiplayerPeer and every deadline it keeps), and a
+## driver that only polls "when the transport has a poll()" is one has_method
+## check away from never polling the star at all. See netcode/transport.gd's note
+## on the optional poll() and CouchSessionTransport, which is where that driver
 ## loop is documented.
-func poll(_now_ms: int) -> void:
-	pass
+##
+## With the DEBUG-ONLY fault_delay_ms / fault_jitter_ms levers it also caches
+## `now_ms` (the send-time clock for due times) and flushes every queued envelope
+## whose due time has arrived, in due order, by performing the real send_event.
+func poll(now_ms: int) -> void:
+	_now_ms = now_ms
+	if _delay_queue.is_empty():
+		return
+	_flush_delayed()
 
 
 ## The lobby knows the local role; the transport does not need to be told it.
@@ -148,6 +191,10 @@ func close() -> void:
 	if _closed:
 		return
 	_closed = true
+	# Queued-but-undelivered envelopes die with the transport, and are counted.
+	_fault_delay_dropped += _delay_queue.size()
+	_delay_queue.clear()
+	_delay_last_due = 0
 	if _lobby != null:
 		if _lobby.event_received.is_connected(_on_lobby_event):
 			_lobby.event_received.disconnect(_on_lobby_event)
@@ -160,12 +207,18 @@ func fault_drop_next(kind: String, count: int = 1) -> void:
 	_fault_pending[kind] = int(_fault_pending.get(kind, 0)) + count
 
 
-## Clear both levers and the counters.
+## Clear all levers and the counters. Delay/jitter go to 0 but envelopes ALREADY
+## queued are NOT discarded: they were accepted for send, and still flush at
+## their due time.
 func fault_reset() -> void:
 	fault_drop_permille = 0
 	fault_kinds = PackedStringArray()
+	fault_delay_ms = 0
+	fault_jitter_ms = 0
 	_fault_pending.clear()
 	_fault_drops = 0
+	_fault_delayed = 0
+	_fault_delay_dropped = 0
 
 
 func _send(envelope: Dictionary, target: Dictionary) -> bool:
@@ -176,8 +229,32 @@ func _send(envelope: Dictionary, target: Dictionary) -> bool:
 		_fault_drops += 1
 		return true
 	var frame := CouchEnvelope.to_json_frame(envelope)
+	if OS.is_debug_build() and (fault_delay_ms > 0 or fault_jitter_ms > 0):
+		_enqueue_delayed(frame, target)
+		return true
 	_lobby.send_event(_event_name, frame, target)
 	return true
+
+
+## DEBUG-ONLY (caller checks the gate). Queue an already-validated frame.
+func _enqueue_delayed(frame: Dictionary, target: Dictionary) -> void:
+	var extra := maxi(fault_delay_ms, 0)
+	if fault_jitter_ms > 0:
+		extra += _fault_rng.randi_range(0, fault_jitter_ms)
+	# max() with the last due keeps the one ordered pipe ordered under jitter.
+	var due := maxi(_now_ms + extra, _delay_last_due)
+	_delay_last_due = due
+	_delay_queue.append({"due_ms": due, "frame": frame, "target": target})
+	_fault_delayed += 1
+
+
+func _flush_delayed() -> void:
+	while not _delay_queue.is_empty() and int(_delay_queue[0]["due_ms"]) <= _now_ms:
+		var item: Dictionary = _delay_queue.pop_front()
+		if _closed or _lobby == null:
+			_fault_delay_dropped += 1
+			continue
+		_lobby.send_event(_event_name, item["frame"], item["target"])
 
 
 func _should_drop(kind: String) -> bool:

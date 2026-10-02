@@ -2118,6 +2118,234 @@ func _run_f22_field_validation(pair: _Pair) -> void:
 # ============================================================================
 
 
+# ============================================================================
+# F25 -- DEBUG-ONLY delay / jitter injection (fault_delay_ms, fault_jitter_ms).
+# Time is the file's virtual clock, which is exactly what the delay queue keys
+# off (poll(now_ms)). Receipt needs REAL frames on the loopback link, so the
+# pattern is: step virtual time with dt_ms, then spin dt=0 frames (virtual time
+# frozen) and look at the far end. The flush TIMELINE (which virtual ms an
+# envelope was handed to put_packet) is read from the sender's send_lane_tally
+# total, which moves in exactly the call that does the real put -- deterministic
+# where receipt latency is not.
+# ============================================================================
+
+
+func _f25_env(n: int) -> Dictionary:
+	return CouchEnvelope.make(CouchEnvelope.KIND_INTENT, 1, n + 1, {"n": n})
+
+
+func _f25_tally_total(star: CouchStarTransport) -> int:
+	var total := 0
+	var tally := star.send_lane_tally
+	for lane in tally:
+		total += int(tally[lane])
+	return total
+
+
+func _f25_ns(received: Array) -> Array:
+	var out: Array = []
+	for r in received:
+		out.append(int(((r["envelope"] as Dictionary)["body"] as Dictionary)["n"]))
+	return out
+
+
+## Spin `frames` real frames at a frozen virtual clock.
+func _f25_spin(stars: Array, frames: int) -> void:
+	for i in range(frames):
+		await _step(stars)
+
+
+func _f25_established_pair(host_id: String, guest_id: String, label: String) -> _Pair:
+	var pair := _Pair.new(host_id, guest_id)
+	var host_start: Dictionary = await pair.host_star.start()
+	var guest_start: Dictionary = await pair.guest_star.start()
+	_check(
+		bool(host_start.get("success", false)) and bool(guest_start.get("success", false)),
+		"%s: setup -- both sides start()" % label
+	)
+	var up := await _wait_until(
+		pair.stars(),
+		func() -> bool: return pair.host_ready.has(pair.guest_id) and pair.guest_ready.has(pair.host_id),
+		"%s: setup -- the link to establish" % label
+	)
+	_check(up, "%s: setup -- the pair reaches a live link" % label)
+	if up:
+		await _step(pair.stars())  # cache _now_ms inside both transports
+	return pair
+
+
+## Sends 20 envelopes at one virtual instant under delay=100 jitter=80 and a
+## fixed seed. Returns the per-virtual-ms flush counts (200 entries) and leaves
+## the receipts in pair.guest_received.
+func _f25_jitter_run(pair: _Pair, seed_value: int, first_n: int) -> Array:
+	pair.host_star.fault_seed = seed_value
+	pair.host_star.fault_delay_ms = 100
+	pair.host_star.fault_jitter_ms = 80
+	for i in range(20):
+		pair.host_star.send_to_peer(pair.guest_id, _f25_env(first_n + i))
+	var timeline: Array = []
+	var last := _f25_tally_total(pair.host_star)
+	for ms in range(200):
+		await _step(pair.stars(), 1)
+		var now_total := _f25_tally_total(pair.host_star)
+		timeline.append(now_total - last)
+		last = now_total
+	pair.host_star.fault_delay_ms = 0
+	pair.host_star.fault_jitter_ms = 0
+	return timeline
+
+
+func _run_f25_delay_injection() -> void:
+	print("-- F25: delay / jitter injection (debug-only levers) --")
+	var pair := await _f25_established_pair("host25", "g25", "F25")
+	if pair.host_ready.is_empty():
+		return
+	var host := pair.host_star
+	var guest := pair.guest_star
+
+	# F25.1: held until due, then delivered.
+	host.fault_delay_ms = 100
+	_check(host.send_to_peer(pair.guest_id, _f25_env(1)), "F25.1: the delayed send is accepted for send")
+	await _step(pair.stars(), 99)
+	await _f25_spin(pair.stars(), 15)
+	_check(pair.guest_received.is_empty(), "F25.1: delay=100 -- nothing received at t=99 (got %d)" % pair.guest_received.size())
+	_check(host.fault_delayed == 1, "F25.1: fault_delayed == 1 (got %d)" % host.fault_delayed)
+	await _step(pair.stars(), 1)
+	var arrived := await _wait_until(pair.stars(), func() -> bool: return pair.guest_received.size() == 1, "F25.1: the envelope to arrive at t=100")
+	_check(arrived, "F25.1: delay=100 -- received once virtual time reaches t=100")
+	host.fault_delay_ms = 0
+
+	# F25.2: order preserved under jitter; the seed reproduces the flush timeline.
+	pair.guest_received.clear()
+	var timeline_a := await _f25_jitter_run(pair, 1234, 100)
+	var got_a := await _wait_until(pair.stars(), func() -> bool: return pair.guest_received.size() >= 20, "F25.2: run A receipts")
+	var order_a := _f25_ns(pair.guest_received)
+	pair.guest_received.clear()
+	var timeline_b := await _f25_jitter_run(pair, 1234, 200)
+	var got_b := await _wait_until(pair.stars(), func() -> bool: return pair.guest_received.size() >= 20, "F25.2: run B receipts")
+	var order_b := _f25_ns(pair.guest_received)
+	var expect_a: Array = range(100, 120)
+	var expect_b: Array = range(200, 220)
+	_check(got_a and order_a == expect_a, "F25.2: 20 envelopes under delay=100 jitter=80 arrive in send order (run A: %s)" % [order_a])
+	_check(got_b and order_b == expect_b, "F25.2: run B (same seed) also arrives in send order")
+	_check(timeline_a == timeline_b, "F25.2: the same seed reproduces the identical flush timeline")
+	var first_ms := -1
+	var last_ms := -1
+	var flushed_total := 0
+	for ms in range(timeline_a.size()):
+		if int(timeline_a[ms]) > 0:
+			if first_ms < 0:
+				first_ms = ms
+			last_ms = ms
+			flushed_total += int(timeline_a[ms])
+	_check(flushed_total == 20 and first_ms >= 99 and last_ms > first_ms, "F25.2: jitter spread the flushes (20 total, first at ms %d, last at ms %d)" % [first_ms, last_ms])
+	var raw := RandomNumberGenerator.new()
+	raw.seed = 1234
+	var would_reorder := false
+	var prev_raw := -1
+	for i in range(20):
+		var raw_due := raw.randi_range(0, 80)
+		if raw_due < prev_raw:
+			would_reorder = true
+		prev_raw = raw_due
+	_check(would_reorder, "F25.2: the seed's raw jitter sequence is NOT monotonic (the ordering assertion is not vacuous)")
+
+	# F25.3: a send refused today is still refused immediately, and never queued.
+	pair.guest_received.clear()
+	var delayed_before: int = host.fault_delayed
+	var oversized_before: int = host.oversized_sends
+	host.fault_delay_ms = 100
+	var huge := CouchEnvelope.make(
+		CouchEnvelope.KIND_INTENT, 1, 900, {"pad": "a".repeat(CouchEnvelope.MAX_BINARY_FRAME_BYTES + 16)}
+	)
+	_check(not host.send_to_peer(pair.guest_id, huge), "F25.3: an oversized send is still refused with delay on")
+	_check(host.oversized_sends == oversized_before + 1, "F25.3: the oversize refusal is counted immediately")
+	_check(not host.send_to_peer("nobody", _f25_env(901)), "F25.3: a send to an unknown peer is still refused with delay on")
+	_check(host.fault_delayed == delayed_before, "F25.3: fault_delayed did not move for refused sends (got %d, was %d)" % [host.fault_delayed, delayed_before])
+	await _step(pair.stars(), 500)
+	await _f25_spin(pair.stars(), 15)
+	_check(pair.guest_received.is_empty(), "F25.3: nothing from the refused sends ever arrives")
+	host.fault_delay_ms = 0
+
+	# F25.8: a broadcast and a unicast to the same peer on the same lane share that
+	# peer's channel, so they must not reorder under jitter. Host interleaves both.
+	pair.guest_received.clear()
+	host.fault_seed = 77
+	host.fault_delay_ms = 100
+	host.fault_jitter_ms = 80
+	for i in range(20):
+		if i % 2 == 0:
+			host.broadcast(_f25_env(300 + i))
+		else:
+			host.send_to_peer(pair.guest_id, _f25_env(300 + i))
+	for ms in range(200):
+		await _step(pair.stars(), 1)
+	host.fault_delay_ms = 0
+	host.fault_jitter_ms = 0
+	var got8 := await _wait_until(pair.stars(), func() -> bool: return pair.guest_received.size() >= 20, "F25.8: mixed broadcast/unicast receipts")
+	var expect8: Array = range(300, 320)
+	_check(got8 and _f25_ns(pair.guest_received) == expect8, "F25.8: broadcast + send_to_peer on one lane arrive in send order (got %s)" % [_f25_ns(pair.guest_received)])
+
+	# F25.6: delay 0/0 -- the real put happens inside the send, no queue.
+	pair.guest_received.clear()
+	var delayed_zero_before: int = host.fault_delayed
+	var tally_before := _f25_tally_total(host)
+	host.send_to_peer(pair.guest_id, _f25_env(600))
+	_check(_f25_tally_total(host) == tally_before + 1, "F25.6: delay 0/0 hands the frame to put_packet inside the send call")
+	_check(host.fault_delayed == delayed_zero_before, "F25.6: delay 0/0 leaves fault_delayed unchanged")
+	var zero_arrived := await _wait_until(pair.stars(), func() -> bool: return _f25_ns(pair.guest_received) == [600], "F25.6: the undelayed envelope")
+	_check(zero_arrived, "F25.6: the undelayed envelope arrives with virtual time frozen")
+
+	# F25.7: fault_reset() keeps what is queued; new sends are immediate.
+	pair.guest_received.clear()
+	host.fault_delay_ms = 100
+	host.send_to_peer(pair.guest_id, _f25_env(700))
+	host.fault_reset()
+	var tally_reset_before := _f25_tally_total(host)
+	host.send_to_peer(pair.guest_id, _f25_env(701))
+	_check(_f25_tally_total(host) == tally_reset_before + 1, "F25.7: after fault_reset() a new send is immediate")
+	var b_first := await _wait_until(pair.stars(), func() -> bool: return _f25_ns(pair.guest_received) == [701], "F25.7: the post-reset envelope")
+	_check(b_first, "F25.7: only the post-reset envelope has arrived while the queued one is still held")
+	await _step(pair.stars(), 100)
+	var a_later := await _wait_until(pair.stars(), func() -> bool: return pair.guest_received.size() == 2, "F25.7: the pre-reset envelope")
+	_check(a_later and _f25_ns(pair.guest_received) == [701, 700], "F25.7: the pre-reset envelope still arrives at its due time (got %s)" % [_f25_ns(pair.guest_received)])
+	_check(host.fault_delay_dropped == 0, "F25.7: fault_reset() discarded nothing")
+
+	# F25.4: close() with queued envelopes -- nothing delivered later, all counted.
+	var pair4 := await _f25_established_pair("host25c", "g25c", "F25.4")
+	if not pair4.host_ready.is_empty():
+		pair4.host_star.fault_delay_ms = 100
+		for i in range(5):
+			pair4.host_star.send_to_peer(pair4.guest_id, _f25_env(i))
+		pair4.host_star.close()
+		_check(pair4.host_star.fault_delay_dropped == 5, "F25.4: close() counts the 5 queued envelopes as delay-dropped (got %d)" % pair4.host_star.fault_delay_dropped)
+		await _step([pair4.guest_star], 500)
+		await _f25_spin([pair4.guest_star], 15)
+		pair4.host_star.poll(_virtual_now)
+		_check(pair4.guest_received.is_empty(), "F25.4: nothing is delivered after close()")
+		_check(pair4.host_star.fault_delay_dropped == 5, "F25.4: a later poll() does not recount")
+		pair4.guest_star.close()
+
+	# F25.5: the target link dies while an envelope is queued -- discarded at flush.
+	var pair5 := await _f25_established_pair("host25d", "g25d", "F25.5")
+	if not pair5.host_ready.is_empty():
+		pair5.host_star.fault_delay_ms = 100
+		pair5.host_star.send_to_peer(pair5.guest_id, _f25_env(1))
+		_check(pair5.host_star.fault_kill_link(pair5.guest_id), "F25.5: setup -- the link to the guest is killed")
+		var lost := await _wait_until(pair5.stars(), func() -> bool: return pair5.host_lost.has(pair5.guest_id), "F25.5: the host to notice the death")
+		_check(lost, "F25.5: setup -- the host reports peer_lost for the guest")
+		pair5.guest_received.clear()
+		await _step(pair5.stars(), 200)
+		await _f25_spin(pair5.stars(), 15)
+		_check(pair5.host_star.fault_delay_dropped == 1, "F25.5: the queued envelope is discarded at flush and counted (got %d)" % pair5.host_star.fault_delay_dropped)
+		_check(pair5.guest_received.is_empty(), "F25.5: nothing reaches the guest")
+		pair5.host_star.close()
+		pair5.guest_star.close()
+
+	host.close()
+	guest.close()
+
+
 func _run() -> void:
 	print("== Couch star transport fault injection (G11) ==")
 	var webrtc_available := CouchStarTransport.is_webrtc_available()
@@ -2183,6 +2411,8 @@ func _run() -> void:
 
 	var p24 := _Pair.new("host24", "g24")
 	await _run_f24_unreported_host_restart(p24)
+
+	await _run_f25_delay_injection()
 
 	print("")
 	print("total assertions: %d failed" % failures)
