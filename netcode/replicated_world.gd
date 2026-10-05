@@ -142,6 +142,13 @@ func register_kind(kind: int, channels: Array) -> bool:
 	return true
 
 
+## Copy of a registered kind's channel list; [] if the kind is unregistered.
+func kind_channels(kind: int) -> Array:
+	if not _kinds.has(kind):
+		return []
+	return (_kinds[kind] as Array).duplicate()
+
+
 ## FNV-1a 32-bit hash of the registry (ascending kind order: kind, count, channels).
 func layout_hash() -> int:
 	return _layout_hash

@@ -45,6 +45,7 @@ var _over_ack: Dictionary = {}
 
 
 ## Queue an event for one peer; returns its per-peer monotone id.
+## Negative event kinds are reserved for the library; games use kinds >= 0.
 func push(peer_id: String, kind: int, payload: Variant, host_tick: int) -> int:
 	var id: int = int(_highest.get(peer_id, 0)) + 1
 	_highest[peer_id] = id
