@@ -845,8 +845,8 @@ func _t1_accept() -> void:
 	var t := _new_targets(_new_world())
 	t.set_owner("b", 11, KIND6, 1.0, 1.0, 0)
 	var o := _pf(BASE_O)
-	var body := {"t": 5, "o": o, "ev": "ignored garbage", "extra": [1, 2, 3]}
-	_check(t.note_input("b", body, 1000) and t.accepted_count("b") == 1, "T1: an accepted input returns true and counts; \"ev\" and extra keys are ignored here")
+	var body := {"t": 5, "o": o, "ev": 0, "extra": [1, 2, 3]}
+	_check(t.note_input("b", body, 1000) and t.accepted_count("b") == 1, "T1: an accepted input returns true and counts; extra keys are ignored (\"ev\" validation is G17's)")
 	o[0] = 999.0
 	body["o"] = null
 	_check(_pfclose(t.target_for("b", 1000), BASE_O), "T1: the stored report is a COPY of o (mutating the caller's array afterwards changes nothing)")
@@ -1007,13 +1007,13 @@ func _t1_impulse() -> void:
 	var t := _owner_a()
 	var ring := CouchEventRing.new()
 	_check(CouchOwnedEntity.IMPULSE_EVENT_KIND == -1, "T1: IMPULSE_EVENT_KIND is -1")
-	var id: int = t.push_impulse(ring, "a", Vector2(3.0, -4.0), 0.5, 77)
+	var id: int = t.push_impulse(ring, "a", Vector2(3.0, -4.0), 0.5, 77, 1000)
 	var pend: Array = ring.pending_for("a")
 	var ok: bool = pend.size() == 1 and typeof(pend[0]) == TYPE_ARRAY and (pend[0] as Array).size() == 3
 	_check(id == 1 and ok and _int_is(pend[0][0], 1) and _int_is(pend[0][1], -1) and _pfclose(pend[0][2], [3.0, -4.0, 0.5]),
 		"T1: push_impulse pushes [id 1, kind -1, PackedFloat32Array([jx, jy, aj])] and returns the id")
 	_check(_is_pf(pend[0][2] if ok else null) and _psize(pend[0][2] if ok else null) == 3, "T1: the payload is a PackedFloat32Array of size 3")
-	_check(t.push_impulse(ring, "a", Vector2(-1.0, 2.0), -0.25, 80) == 2 and ring.highest_id("a") == 2 and ring.pending_for("a").size() == 2,
+	_check(t.push_impulse(ring, "a", Vector2(-1.0, 2.0), -0.25, 80, 1000) == 2 and ring.highest_id("a") == 2 and ring.pending_for("a").size() == 2,
 		"T1: the next push returns the next per-peer id (2)")
 	ring.expire(77 + 120)
 	_check(ring.pending_for("a").size() == 2 and ring.expired_count("a") == 0, "T1: the host_tick passed through: not expired at 77 + max_age")
@@ -1021,13 +1021,13 @@ func _t1_impulse() -> void:
 	_check(ring.pending_for("a").size() == 1 and ring.expired_count("a") == 1, "T1: ...and the first impulse (tick 77) expires one tick later; the second (tick 80) does not")
 	_check(ring.pending_for("b").is_empty(), "T1: the impulse went to the owner's stream only")
 	var r2 := CouchEventRing.new()
-	_check(t.push_impulse(r2, "nobody", Vector2(1, 1), 1.0, 5) == -1 and r2.highest_id("nobody") == 0 and r2.pending_for("nobody").is_empty(),
+	_check(t.push_impulse(r2, "nobody", Vector2(1, 1), 1.0, 5, 1000) == -1 and r2.highest_id("nobody") == 0 and r2.pending_for("nobody").is_empty(),
 		"T1: push_impulse for a non-owner returns -1 and pushes nothing")
 	var bads := [["x NAN", Vector2(NAN, 1.0), 0.0], ["y INF", Vector2(1.0, INF), 0.0], ["x -INF", Vector2(-INF, 1.0), 0.0], ["angular NAN", Vector2(1, 1), NAN], ["angular INF", Vector2(1, 1), INF]]
 	for b in bads:
-		_check(t.push_impulse(r2, "a", b[1], b[2], 5) == -1 and r2.highest_id("a") == 0 and r2.pending_for("a").is_empty(),
+		_check(t.push_impulse(r2, "a", b[1], b[2], 5, 1000) == -1 and r2.highest_id("a") == 0 and r2.pending_for("a").is_empty(),
 			"T1: push_impulse with a non-finite value (%s) returns -1 and pushes nothing" % b[0])
-	_check(t.push_impulse(r2, "a", Vector2.ZERO, 0.0, 5) == 1, "T1: a zero impulse is finite and is pushed")
+	_check(t.push_impulse(r2, "a", Vector2.ZERO, 0.0, 5, 1000) == 1, "T1: a zero impulse is finite and is pushed")
 
 
 # --- O1 / I1: CouchOwnedEntity -------------------------------------------------------------
@@ -1097,8 +1097,8 @@ func _case_i1() -> void:
 	# Round trips through the ring + inbox, and through pack / ingest.
 	var t := _owner_a()
 	var ring := CouchEventRing.new()
-	t.push_impulse(ring, "a", Vector2(120.0, -160.0), 1.5, 10)
-	t.push_impulse(ring, "a", Vector2(-3.0, 4.0), -0.5, 11)
+	t.push_impulse(ring, "a", Vector2(120.0, -160.0), 1.5, 10, 1000)
+	t.push_impulse(ring, "a", Vector2(-3.0, 4.0), -0.5, 11, 1000)
 	ring.push("a", 7, "a game event", 12)
 	var inbox := CouchEventInbox.new()
 	var got: Array = inbox.receive(ring.pending_for("a"))
@@ -1112,7 +1112,7 @@ func _case_i1() -> void:
 	var ring2 := CouchEventRing.new()
 	var t2 := _new_targets(host)
 	t2.set_owner("a", 10, KIND6, 1.0, 1.0, 0)
-	t2.push_impulse(ring2, "a", Vector2(9.0, -8.0), 0.25, 5)
+	t2.push_impulse(ring2, "a", Vector2(9.0, -8.0), 0.25, 5, 1000)
 	var body: Dictionary = host.pack(5, 1000, {"a": 3}, null, ring2)
 	var client := _new_world()
 	_check(client.ingest(body), "I1: the packed snapshot ingests")
@@ -1531,7 +1531,7 @@ class _OSim extends RefCounted:
 		(hist[HOST_EID] as Array).append([hx, hy, hrot])
 		host_world.set_entity(HOST_EID, KIND7, PackedFloat32Array([hx, hy, hrot, 0.0, 0.0, 1.5, 0.0]))
 		if knock_at >= 0 and knock_tick < 0 and th >= knock_at and standins.has(knock_peer):
-			knock_id = targets.push_impulse(ring, knock_peer, KNOCK_J, KNOCK_A, tk)
+			knock_id = targets.push_impulse(ring, knock_peer, KNOCK_J, KNOCK_A, tk, T)
 			knock_tick = tk
 		for peer in standins.keys():
 			var s: Dictionary = standins[peer]
@@ -1951,7 +1951,7 @@ func _case_s2() -> void:
 	_manual_ticks(sim, p1, 1, 5)
 	_manual_ticks(sim, p2, 1, 5)
 	_check(t.accepted_count("p1") == 5 and t.accepted_count("p2") == 5 and sim.align_violations == 0, "S2: each owner's 5 inputs were accepted through the real sessions")
-	_check(t.push_impulse(sim.ring, "p1", Vector2(5, 5), 1.0, 10) == 1, "S2: the host knocks p1 (impulse id 1)")
+	_check(t.push_impulse(sim.ring, "p1", Vector2(5, 5), 1.0, 10, sim.T) == 1, "S2: the host knocks p1 (impulse id 1)")
 	_s2_snapshot(sim)
 	_manual_ticks(sim, p1, 6, 3)
 	_check(p1.applied_ids == [1] and p1.inbox.last_applied() == 1 and sim.ring.pending_for("p1").is_empty(),
@@ -1966,7 +1966,7 @@ func _case_s2() -> void:
 	_check(sim.ring.pending_for("p1").is_empty() and sim.ring.highest_id("p1") == 1, "S2: ring.forget dropped p1's pending events but kept its next id (highest 1)")
 	_check(not t.note_input("p1", {"t": 99, "o": _pf(BASE_O), "ev": 0}, sim.T) and t.reject_count("p1", "unowned") == 1,
 		"S2: a late input of the departed peer is 'unowned'")
-	_check(t.push_impulse(sim.ring, "p1", Vector2(1, 1), 1.0, 20) == -1 and sim.ring.highest_id("p1") == 1, "S2: no impulse can be pushed to the departed peer")
+	_check(t.push_impulse(sim.ring, "p1", Vector2(1, 1), 1.0, 20, sim.T) == -1 and sim.ring.highest_id("p1") == 1, "S2: no impulse can be pushed to the departed peer")
 	_check(t.entity_of("p2") == 12 and t.accepted_count("p2") == acc_p2 and sim.host_world.has_entity(12), "S2: p2 was not touched")
 
 	# p1 rejoins as a brand-new client (fresh session / clock / inbox: ticks restart low).
@@ -1977,7 +1977,7 @@ func _case_s2() -> void:
 		"S2: new ownership: no report yet, no counters carried over")
 	_manual_ticks(sim, p1b, 1, 3)
 	_check(t.accepted_count("p1") == 3 and t.reject_count("p1", "stale-tick") == 0, "S2: the rejoiner's restarted low ticks 1..3 are accepted (the old last tick 8 was forgotten)")
-	_check(t.push_impulse(sim.ring, "p1", Vector2(7, -7), 0.5, 30) == 2 and sim.ring.highest_id("p1") == 2,
+	_check(t.push_impulse(sim.ring, "p1", Vector2(7, -7), 0.5, 30, sim.T) == 2 and sim.ring.highest_id("p1") == 2,
 		"S2: ring continuity: the next impulse after the rejoin has id 2 (ids stay monotone within the epoch)")
 	_s2_snapshot(sim)
 	_manual_ticks(sim, p1b, 4, 3)
@@ -1999,7 +1999,7 @@ func _case_s2() -> void:
 	_check(pre_ok and p1b.applied_count == 1 and p1b.inbox.last_applied() == 0 and p1b.world.newest_tick() == -1, "S2: the owners' inbox / world were reset")
 	_check(t.set_owner("p1", 11, KIND7, 1.0, 1.0, 5000) and t.note_input("p1", {"t": 1, "o": _pf([1, 2, 0, 0, 0, 0, 0]), "ev": 0}, 5010),
 		"S2: after the reset set_owner works without set_channels and a low tick is accepted again")
-	_check(t.push_impulse(sim.ring, "p1", Vector2(1, 2), 3.0, 1) == 1, "S2: after the reset the first impulse is id 1 again")
+	_check(t.push_impulse(sim.ring, "p1", Vector2(1, 2), 3.0, 1, sim.T) == 1, "S2: after the reset the first impulse is id 1 again")
 	var o: CouchOwnedEntity = p1b.owned
 	var f: Dictionary = o.input_fields(1, PackedFloat32Array([1, 2, 0, 0, 0, 0, 0]), p1b.inbox)
 	_check(_int_is(_dg(f, "ev"), 0) and _int_is(_dg(f, "t"), 1), "S2: the owner side starts the epoch with ev 0")
