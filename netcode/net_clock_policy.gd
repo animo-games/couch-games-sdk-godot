@@ -40,7 +40,9 @@ var max_lead_ticks: int = 30
 ## advance() emits at most this many ticks per call.
 var max_catchup_ticks: int = 8
 ## Interpolation runs this many ticks behind the host-time estimate.
-var render_delay_ticks: int = 3
+## 6 (100 ms at 60 Hz) from G15's S1b sweep: with snapshots every 2 ticks over
+## 50 +/- 30 ms links, 3 left ~65% of frames extrapolating, 6 ~3%, 8 none.
+var render_delay_ticks: int = 6
 ## Size of the stamped-tick -> local send time ring.
 var send_ring_size: int = 128
 
