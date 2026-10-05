@@ -1,0 +1,12 @@
+{
+  "godot": "4.7.stable.official.5b4e0cb0f",
+  "godotsteam": "4.23",
+  "distribution": "GDExtension",
+  "steamworks": "1.65",
+  "archive": "godotsteam-4.23-gdextension-plugin-4.4.zip",
+  "url": "https://codeberg.org/godotsteam/godotsteam/releases/download/v4.23-gde/godotsteam-4.23-gdextension-plugin-4.4.zip",
+  "sha256": "c1728b4bf330da851a00eaf64dab2e99c506018b1d9f529511b25d7fe7649e97",
+  "targets": ["linux.x86_64", "windows.x86_64"],
+  "verified": ["linux.x86_64 extension loading", "runtime method and signal signatures"],
+  "live_steam_acceptance": "pending App ID and two authorized test accounts"
+}

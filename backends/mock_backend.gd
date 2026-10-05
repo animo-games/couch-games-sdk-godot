@@ -77,6 +77,9 @@ var simulate_load_unavailable := false
 var simulate_host_authoritative := false
 var _session_stats: Dictionary = {"cumulativeGameplayTimeMs": 0.0, "gameplayCompleted": false}
 var _metadata: Dictionary = {}
+var simulate_achievements_unavailable := false
+var simulate_achievement_pending := false
+var simulate_achievement_store_failure := false
 var _achievements: Dictionary = {}  # key -> {"unlockedAt": iso}
 
 
@@ -490,6 +493,10 @@ func set_game_metadata(category: String, key: String, value: Variant) -> Diction
 
 func unlock_achievement(key: String) -> Dictionary:
 	await _tick()
+	if simulate_achievements_unavailable:
+		return _unavailable("Mock achievements unavailable")
+	if simulate_achievement_pending or simulate_achievement_store_failure:
+		return {"success": false, "error": "Mock award pending storage", "metadata": {"error_code": "pending"}}
 	var already: bool = _achievements.has(key)
 	if not already:
 		_achievements[key] = {"unlockedAt": Time.get_datetime_string_from_system(true)}
@@ -499,6 +506,8 @@ func unlock_achievement(key: String) -> Dictionary:
 
 func get_achievements() -> Dictionary:
 	await _tick()
+	if simulate_achievements_unavailable:
+		return _unavailable("Mock achievement read unavailable")
 	var unlocked := []
 	for key in _achievements.keys():
 		var entry: Dictionary = {"key": key}
@@ -745,3 +754,8 @@ func _write_json(file_name: String, data: Dictionary) -> void:
 		push_error("CouchGames mock: failed to write " + file_name)
 		return
 	file.store_string(JSON.stringify(data, "\t"))
+
+
+func supports(capability: String) -> bool:
+	if capability == "achievements": return not simulate_achievements_unavailable
+	return super.supports(capability)

@@ -5,6 +5,7 @@
 # them into typed Godot signals, so game code never touches the transport.
 class_name CouchLobby
 extends Node
+const _JSONValue := preload("res://addons/couch-games-sdk/core/json_value.gd")
 
 ## A tunnel event from another client in the session. You never receive your
 ## own send_event back (server semantics), so apply local effects at send time.
@@ -14,6 +15,14 @@ signal event_received(event: String, data: Variant, sender_user_id: String)
 signal players_changed(players: Array)
 signal player_joined(player: CouchLobbyPlayer)
 signal player_left(player: CouchLobbyPlayer)
+
+signal state_changed(state: String)
+signal join_requested(lobby_id: String)
+signal operation_failed(code: String, message: String)
+signal event_send_failed(code: String, message: String, peer_id: String)
+signal transport_gap(peer_id: String, reason: String)
+var state := "idle"
+var lobby_id := ""
 
 var is_available: bool:
 	get:
@@ -28,6 +37,11 @@ func setup(backend: CouchGamesBackend) -> void:
 	_backend = backend
 	_backend.lobby_event_received.connect(_on_backend_event)
 	_backend.lobby_players_updated.connect(_on_roster)
+	_backend.lobby_state_changed.connect(_on_state)
+	_backend.lobby_join_requested.connect(join_requested.emit)
+	_backend.lobby_operation_failed.connect(operation_failed.emit)
+	_backend.event_send_failed.connect(event_send_failed.emit)
+	_backend.transport_gap.connect(transport_gap.emit)
 
 
 func get_players() -> Array[CouchLobbyPlayer]:
@@ -95,9 +109,7 @@ func get_current_game() -> Dictionary:
 ## {"user_id": ...} and/or {"role": "host"|"guest"} narrow delivery (conditions
 ## AND together). You will not receive your own event back.
 func send_event(event: String, data: Variant = null, target: Dictionary = {}) -> void:
-	if _backend == null:
-		return
-	_backend.lobby_send_event(event, data, _normalize_target(target))
+	try_send_event(event, data, target)
 
 
 ## Re-fetch the roster from the backend immediately. Rarely needed, since
@@ -155,6 +167,11 @@ func _on_roster(raw_players: Array) -> void:
 			changed = true
 
 	_players = new_players
+	if not _backend.has_method("achievement_adapter"):
+		var legacy_state := "joined" if not _players.is_empty() and is_available else "idle"
+		if state != legacy_state:
+			state = legacy_state
+			state_changed.emit(state)
 
 	# Per-player signals fire before the aggregate one so players_changed
 	# handlers observe the final roster.
@@ -164,3 +181,40 @@ func _on_roster(raw_players: Array) -> void:
 		player_left.emit(player)
 	if changed:
 		players_changed.emit(get_players())
+
+
+func try_send_event(event: String, data: Variant = null, target: Dictionary = {}) -> bool:
+	if _backend == null:
+		return false
+	if event.is_empty() or not _JSONValue.compatible(data):
+		event_send_failed.emit("invalid-payload", "Event and payload must be JSON-compatible", "")
+		return false
+	var normalized := _normalize_target(target)
+	if (normalized.has("role") and normalized.role not in ["host", "guest"]) or (normalized.has("userId") and not normalized.userId is String):
+		event_send_failed.emit("invalid-target", "Invalid user or role filter", "")
+		return false
+	return _backend.lobby_try_send_event(event, data, normalized)
+
+func host(options: Dictionary = {}) -> CouchGamesSDKResponse:
+	return CouchGamesSDKResponse.from_dict(await _backend.lobby_host(options))
+
+func join(id: String) -> CouchGamesSDKResponse:
+	return CouchGamesSDKResponse.from_dict(await _backend.lobby_join(id))
+
+func leave() -> void:
+	if _backend != null:
+		_backend.lobby_leave()
+
+func open_invite_overlay() -> CouchGamesSDKResponse:
+	return CouchGamesSDKResponse.from_dict(await _backend.lobby_open_invite_overlay())
+
+func _on_state(value: String, id: String) -> void:
+	state = value
+	lobby_id = id
+	state_changed.emit(state)
+
+func get_backend_name() -> String:
+	return "steam" if _backend != null and _backend.has_method("achievement_adapter") else ""
+
+func consume_join_request() -> String:
+	return _backend.consume_join_request() if _backend != null and _backend.has_method("consume_join_request") else ""

@@ -38,6 +38,50 @@ signal webrtc_ice_servers_updated(ice_servers: Array)
 signal play_mode_selected(mode: String, code: String)
 
 
+signal capabilities_changed
+signal lobby_state_changed(state: String, lobby_id: String)
+signal lobby_join_requested(lobby_id: String)
+signal lobby_operation_failed(code: String, message: String)
+signal event_send_failed(code: String, message: String, peer_id: String)
+signal transport_gap(peer_id: String, reason: String)
+var initialization_error := ""
+
+func supports(capability: String) -> bool:
+	match capability:
+		"lobby_events": return lobby_is_available()
+		"webrtc": return webrtc_is_available()
+		"achievements": return is_available()
+		"experience_files": return is_available()
+		"shared_assets": return not shared_root().is_empty()
+	return false
+
+func shutdown() -> void:
+	pass
+
+func lobby_host(_options: Dictionary) -> Dictionary:
+	return _unavailable("Lobby creation is managed outside this backend")
+
+func lobby_join(_id: String) -> Dictionary:
+	return _unavailable("Lobby joining is managed outside this backend")
+
+func lobby_leave() -> void:
+	pass
+
+func lobby_open_invite_overlay() -> Dictionary:
+	return _unavailable("Friend invitations are unavailable")
+
+func lobby_try_send_event(event: String, data: Variant, target: Dictionary) -> bool:
+	if not lobby_is_available():
+		event_send_failed.emit("unavailable", "Lobby events are unavailable", "")
+		return false
+	# Compatibility hook for existing backends whose send method returns void.
+	lobby_send_event(event, data, target)
+	return true
+
+static func _unavailable(message: String) -> Dictionary:
+	return {"success": false, "error": message, "metadata": {"error_code": "unavailable"}}
+
+
 func is_available() -> bool:
 	return false
 

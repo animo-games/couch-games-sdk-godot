@@ -111,7 +111,13 @@ static func resolve_kind(prefer: String = PREFER_AUTO) -> String:
 ##
 ## `probe_timeout_ms` bounds the star's preflight probe; <= 0 skips it.
 static func pick(lobby: Object, webrtc: CouchWebRTC, prefer: String = PREFER_AUTO, probe_timeout_ms: int = CouchWebRTCProbe.DEFAULT_TIMEOUT_MS) -> Dictionary:
-	var kind := resolve_kind(prefer)
+	# Steam's backend contract fixes the session wire to lobby events, even when
+	# unrelated WebRTC extensions happen to be installed in the same project.
+	var kind: String
+	if prefer == PREFER_AUTO and lobby.has_method("get_backend_name") and lobby.get_backend_name() == "steam":
+		kind = KIND_LOBBY
+	else:
+		kind = resolve_kind(prefer)
 	match kind:
 		KIND_LOBBY:
 			return _picked(CouchLobbyTransport.new(lobby), KIND_LOBBY)

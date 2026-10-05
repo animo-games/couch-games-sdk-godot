@@ -735,3 +735,10 @@ loop. `request_ice_servers()` and successful automatic reconnects update
 `CouchWebRTCSignalingSource` forwards those values through the optional,
 SDK-neutral `get_connection_config()` / `connection_config_updated` transport
 capability so future peer rebuilds use current TURN credentials.
+
+## Optional Steam and shared achievements
+
+The same SDK now supports an optional runtime-selected Steam adapter and
+`CouchGames.achievements`. See [Steam setup, dependency pin, API contracts,
+tests, and open live acceptance gates](docs/steam.md). Existing Couch, mock,
+local relay, and Web APIs remain available.

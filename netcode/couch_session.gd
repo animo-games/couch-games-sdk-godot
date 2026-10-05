@@ -162,6 +162,8 @@ var rejected_count: int:  # for the milestone report
 var _roster: Object
 var _transport: Object
 
+var _steam_baseline_pending := false
+var _steam_peer_handshakes: Dictionary = {}
 var _engaged: bool = false   # true from the moment a role is committed until stop()
 var _active: bool = false
 var _epoch: int = CouchEnvelope.UNKNOWN_EPOCH
@@ -259,6 +261,10 @@ func evaluate(now_ms: int) -> void:
 ## Call every frame; drives the guest hello retry.
 func poll(now_ms: int) -> void:
 	_now_ms = now_ms
+	if _engaged and _is_host and now_ms >= _next_hello_retry_ms and not _steam_peer_handshakes.is_empty():
+		_next_hello_retry_ms = now_ms + HELLO_RETRY_MS
+		for peer_id in _steam_peer_handshakes.keys():
+			_send_host_hello(peer_id, true)
 	if _engaged and not _is_host and not _active and now_ms >= _next_hello_retry_ms:
 		_send_guest_hello()
 		_next_hello_retry_ms = now_ms + HELLO_RETRY_MS
@@ -268,6 +274,8 @@ func stop(reason: String) -> void:
 	if not _engaged:
 		return
 	_engaged = false
+	_steam_baseline_pending = false
+	_steam_peer_handshakes.clear()
 	_active = false
 	_epoch = CouchEnvelope.UNKNOWN_EPOCH
 	_is_host = false
@@ -506,13 +514,15 @@ func _mint_epoch() -> int:
 # --- Hello --------------------------------------------------------------------
 
 
-func _send_host_hello(target_peer_id: String) -> void:
+func _send_host_hello(target_peer_id: String, reconnect := false) -> void:
 	var body := {
 		"role": "host",
 		"slots": _slots.duplicate(),
 		"authorizedGuest": _authorized_peer_id,
 		"name": _field_string(_roster.get_me(), "username"),
 	}
+	if reconnect:
+		body["reconnect"] = true
 	_out_seq[CouchEnvelope.KIND_HELLO] = int(_out_seq.get(CouchEnvelope.KIND_HELLO, 0)) + 1
 	var envelope := CouchEnvelope.make(
 		CouchEnvelope.KIND_HELLO, _epoch, _out_seq[CouchEnvelope.KIND_HELLO], body
@@ -537,6 +547,7 @@ func _send_guest_hello() -> void:
 
 
 func _on_hello_at_host(sender_id: String) -> void:
+	_steam_peer_handshakes.erase(sender_id)
 	# Rate-limited because each reply costs the host a full-world broadcast.
 	var last := int(_last_hello_state_request_ms.get(sender_id, -HELLO_STATE_REQUEST_MIN_INTERVAL_MS))
 	if _now_ms - last < HELLO_STATE_REQUEST_MIN_INTERVAL_MS:
@@ -547,6 +558,10 @@ func _on_hello_at_host(sender_id: String) -> void:
 
 
 func _on_hello_at_guest(body: Dictionary) -> void:
+	if body.get("reconnect", false):
+		_steam_baseline_pending = true
+		_restart_as_guest("steam-link-gap")
+		_send_guest_hello()
 	var my_id := _field_string(_roster.get_me(), "user_id")
 	var slots: Dictionary = body.get("slots", {})
 	var new_slot := int(slots.get(my_id, SLOT_SPECTATOR))
@@ -567,6 +582,11 @@ func _on_envelope_received(envelope: Dictionary, sender_id: String) -> void:
 	if not _engaged:
 		return
 	var kind := str(envelope.get(CouchEnvelope.KEY_KIND, ""))
+	if not _is_host and _steam_baseline_pending and not _active and kind != CouchEnvelope.KIND_HELLO:
+		return
+	if _is_host and _steam_peer_handshakes.has(sender_id) and kind in [CouchEnvelope.KIND_INTENT, CouchEnvelope.KIND_INPUT]:
+		_reject(sender_id, "handshake-required")
+		return
 
 	if not CouchEnvelope.is_implemented(kind):
 		# Reserved vocabulary (resync-request/-response): accept and ignore, not
@@ -706,6 +726,7 @@ func _dispatch(kind: String, envelope: Dictionary, sender_id: String) -> void:
 		CouchEnvelope.KIND_INPUT:
 			input_received.emit(body, sender_id)
 		CouchEnvelope.KIND_SNAPSHOT:
+			_steam_baseline_pending = false
 			snapshot_received.emit(body)
 
 
@@ -730,6 +751,16 @@ func _restart_as_guest(reason: String) -> void:
 
 
 func _on_transport_gap(peer_id: String, reason: String) -> void:
+	# Existing roster/fault gap semantics remain diagnostic. A Steam provider
+	# gap invalidates its physical link and explicitly requires hello + snapshot.
+	if _engaged and reason.begins_with("steam:"):
+		if _is_host and _slots.has(peer_id):
+			_steam_peer_handshakes[peer_id] = true
+			_last_hello_state_request_ms.erase(peer_id)
+			# Poll retries after a failed send; never recurse from a provider error.
+		elif not _is_host and peer_id == _host_id:
+			_steam_baseline_pending = true
+			_restart_as_guest("steam-link-gap")
 	transport_gap.emit(peer_id, reason)
 
 
@@ -767,7 +798,7 @@ func _hello_body_is_valid(body: Variant) -> bool:
 ## host may send this kind (snapshot), false means only a non-host may
 ## (intent/input).
 func _send(kind: String, body: Dictionary, requires_host: bool) -> bool:
-	if not _active:
+	if not _active or (not _is_host and _steam_baseline_pending):
 		return false
 	if requires_host != _is_host:
 		return false

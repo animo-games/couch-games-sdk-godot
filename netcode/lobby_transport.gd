@@ -121,6 +121,8 @@ func _init(lobby: Object, event_name: String = DEFAULT_EVENT_NAME) -> void:
 		return
 	_lobby.event_received.connect(_on_lobby_event)
 	_lobby.players_changed.connect(_on_players_changed)
+	if _lobby.has_signal("transport_gap"):
+		_lobby.connect("transport_gap", _on_provider_gap)
 
 
 static func _implements_lobby(candidate: Object) -> bool:
@@ -198,6 +200,8 @@ func close() -> void:
 	if _lobby != null:
 		if _lobby.event_received.is_connected(_on_lobby_event):
 			_lobby.event_received.disconnect(_on_lobby_event)
+		if _lobby.has_signal("transport_gap") and _lobby.is_connected("transport_gap", _on_provider_gap):
+			_lobby.disconnect("transport_gap", _on_provider_gap)
 		if _lobby.players_changed.is_connected(_on_players_changed):
 			_lobby.players_changed.disconnect(_on_players_changed)
 
@@ -232,8 +236,7 @@ func _send(envelope: Dictionary, target: Dictionary) -> bool:
 	if OS.is_debug_build() and (fault_delay_ms > 0 or fault_jitter_ms > 0):
 		_enqueue_delayed(frame, target)
 		return true
-	_lobby.send_event(_event_name, frame, target)
-	return true
+	return _send_frame(frame, target)
 
 
 ## DEBUG-ONLY (caller checks the gate). Queue an already-validated frame.
@@ -254,7 +257,8 @@ func _flush_delayed() -> void:
 		if _closed or _lobby == null:
 			_fault_delay_dropped += 1
 			continue
-		_lobby.send_event(_event_name, item["frame"], item["target"])
+		if not _send_frame(item["frame"], item["target"]):
+			_fault_delay_dropped += 1
 
 
 func _should_drop(kind: String) -> bool:
@@ -347,3 +351,14 @@ static func _player_user_id(player: Variant) -> String:
 			return str(uid)
 		return ""
 	return ""
+
+
+func _send_frame(frame: Dictionary, target: Dictionary) -> bool:
+	if _lobby.has_method("try_send_event"):
+		return bool(_lobby.try_send_event(_event_name, frame, target))
+	_lobby.send_event(_event_name, frame, target)
+	return true
+
+func _on_provider_gap(peer_id: String, reason: String) -> void:
+	if not _closed:
+		transport_gap.emit(peer_id, reason)
