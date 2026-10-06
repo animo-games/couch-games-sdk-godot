@@ -23,9 +23,10 @@ Verified locally on October 5, 2026: installed Godot reports
 `4.7.stable.official.5b4e0cb0f`; the checksum-pinned package loads on Linux x86_64
 and exposes the expected methods and callback signatures. The SDK also parses
 and passes its deterministic contracts with **no Steam extension installed**.
-Windows loading, native packaged exports, Web packaged exports, live Steam
-initialization, cross-machine messages, invitations, and achievement storage
-are **unverified release gates**. No game App ID or authorized live test accounts
+Linux, Windows and Web package builds/inspections and Linux/Chromium smoke
+runs are now verified without an App ID; see the reproducible checks below.
+Native Windows execution, live Steam initialization, cross-machine messages,
+invitations, and achievement storage remain **unverified release gates**. No game App ID or authorized live test accounts
 are available. Fake results must not be recorded as live acceptance.
 
 Primary references used for the spike:
@@ -159,13 +160,18 @@ exercise the shared facade without Steam.
 in `metadata.error_code`. States are idle/creating/joining/joined/leaving/failed.
 One membership operation is allowed. Timeouts default to 10 seconds, with a
 3-second metadata wait. Native uncorrelated requests remain reserved after a
-caller timeout; a late successful abandoned membership is left before reuse.
+caller timeout; creation retains its reservation until both creation and entry
+callbacks arrive, in either order. A late successful abandoned membership is
+left before reuse.
 
 Compatibility metadata contains game/wire/protocol/content versions, match
 state, pinned original authority, session token, and creator-assigned slots.
 The authority remains the creator even if Steam changes its owner. Original
 host departure ends the lobby (`host-left`), rather than migrating authority.
-Slots stay stable while participants are present; departure frees a slot. IDs
+Slots stay stable while participants are present; departure frees a slot.
+Guests revoke departed peers immediately when slot metadata lags membership;
+new peers become eligible only after a valid slot map arrives. A metadata wait
+that does not converge ends membership with `metadata-timeout`. IDs
 are decimal strings outside the bridge, with persona names and `ping = -1`.
 
 `try_send_event` returns provider acceptance, not delivery; `send_event` remains
@@ -181,7 +187,8 @@ for Steam even if a WebRTC extension is installed. `CouchLobbyTransport` uses
 optional send acceptance and provider gaps, retaining its duck-typed fallback.
 Call backend arrivals before transport/session timers: SDK backend priority is
 -100; game drivers call `transport.poll(now)` then `session.poll(now)`.
-Steam provider gaps require a fresh existing session hello and snapshot. Guests
+Steam provider gaps discard delayed accepted gameplay before requiring a fresh
+existing session hello and snapshot. Guests
 block gameplay sends until that baseline; host `hello_received` handlers must
 send a complete snapshot. There is no second Steam authority or snapshot system.
 
@@ -215,5 +222,101 @@ late completion, lifecycle cancellation/timeout cleanup, targeting, JSON/sender
 parity, message rejection, unchanged-roster link failure, real session
 handshake/snapshot/recovery, store batching and delayed callbacks, restart,
 offline/retry behavior, read failures, and account isolation. Existing shared
-netcode and WebRTC fixtures remain independent regression gates. Packaged and
-live acceptance remain open until real evidence is recorded.
+netcode and WebRTC fixtures remain independent regression gates. Live acceptance and native Windows execution remain open until real evidence
+is recorded.
+
+
+## Reproducible CI and packaging (no App ID)
+
+The workflow [Steam SDK without App ID](../.github/workflows/steam-sdk.yml)
+requires Linux and Windows jobs. Each runs the Steam-free contracts first,
+then the shared corpus, transport/session, native WebRTC, and actual loopback
+relay gates. Each builds and inspects both native targets and Web; native
+exports execute on the matching host. Linux also executes Web in Chromium.
+This local evidence was captured before publication of the workflow; remote CI
+results must be checked separately. No existing workflows were available for a
+Windows CI run during this review.
+
+[`tests/steam/dependency-lock.json`](../tests/steam/dependency-lock.json) pins
+ordinary engine/export archives by the official release SHA-512 sums and
+WebRTC native 1.2.2 by SHA-256. Steam continues using its own existing lock.
+CI also pins Python 3.12.10 and Node 22.16.0 via commit-pinned setup actions.
+Playwright 1.59.1 and its browser revision are pinned through the npm lock.
+Local runs used Python 3.14 and Node 26.10 with system Chromium; the exact
+CI interpreter/browser combination is unexecuted until the workflow runs.
+Acquisition rejects checksum mismatches; the runners reject wrong engine
+versions, missing success markers, script errors, nonzero exits, timeouts,
+missing corpus cases and unimplemented required cases. Failure logs remain CI
+artifacts. Required checks never become optional because a dependency is absent.
+
+The authoritative `couch-netcode-fixtures` repository requires authentication.
+For credential-free CI, `tests/steam/corpus.zip` is a small immutable **test-only
+snapshot** of commit `bd0ccee615850d98122833c030611aff4d59e175`, with both archive
+and extracted content checksums. It is not a second editable fixture corpus.
+Refresh it only with `snapshot_fixtures.py` against the exact clean checkout and
+explicitly updated lock; never alter its cases in the SDK. Packaging stages
+runtime directories, so this archive and test scripts do not ship in artifacts.
+
+Commands (Python 3.11+ and Node 22+; paths printed by acquisition):
+
+```sh
+python3 tests/steam/acquire.py --cache /tmp/sdk-dependencies
+python3 tests/steam/run.py --godot /path/to/pinned/godot --regressions \
+  --fixtures /tmp/sdk-dependencies/fixtures --webrtc-zip /path/to/pinned/webrtc.zip \
+  --logs /tmp/sdk-logs
+python3 fixtures/steam/package/build.py --godot /path/to/pinned/godot \
+  --templates /path/to/pinned/templates.tpz --godotsteam-zip /path/to/pinned/steam.zip \
+  --output /tmp/sdk-packages
+cd fixtures/steam/package
+npm ci --ignore-scripts
+npx --no-install playwright install chromium
+node web.mjs /tmp/sdk-packages
+```
+
+`--output` must be a new directory. The runner uses custom template paths,
+checksum-validates dependencies, mounts the exported PCK to enumerate resources,
+and compares bundled native library bytes with the pinned archive. It builds
+native debug/release variants with and without GodotSteam, plus release variants
+with the `steam` feature. Web is built both from Steam-free and installed-extension
+source projects. The SDK export plugin supplies Web exclusions; the fixture has
+no manual exclusion filter masking a plugin failure. Web packages must contain
+zero Steam adapter scripts/descriptors/native libraries. Shared native builds
+retain optional adapter scripts and have no native Steam dependency.
+
+Source and exported native checks cover auto selection, mock, and visible
+explicit Steam failure; installed-extension checks require the actual singleton
+to load. Auto debug creates local relay, auto release creates mock, and an auto
+`steam`-feature build stays failed Steam without an App ID/account. Fixture startup
+settings disable native auto initialization and embedded callbacks, and auto
+runs create no SDK Steam bridge. Explicit Steam on Web reaches the shared failure
+path with the excluded adapter absent. Browser Couch checks use a **simulated
+JavaScript parent API**, not a live Couch deployment. The independent relay test
+uses a real loopback socket and verifies JSON/sender/target/no-self-echo behavior.
+
+Fixture tooling registers extension descriptors before starting Godot. During
+this review, editor discovery/hot-loading of a new extension could abort on
+shutdown (exit -6); those initial runs failed. Loading the same verified extension
+at startup avoids that observed failure. This is fixture staging, not a skipped
+check or a change to a consuming game's configuration.
+
+Observed final local checks on October 5, 2026:
+
+| Gate | Evidence |
+| --- | --- |
+| Steam-free deterministic contracts | **138 checks, 0 failures** |
+| Shared netcode corpus | **117 passed**, no awaiting-port cases |
+| Transport/session corpus | **44 passed** |
+| Session players / transport faults | **83 checks / 0 failed assertions** |
+| Session transport, signaling reconnect, connection handler, real WebRTC probe | Passed with pinned native extension |
+| Real local relay | Passed |
+| Linux x86_64 exports | Debug/release, installed/absent extension, and Steam-feature release built, inspected and smoke-run |
+| Windows x86_64 exports | Same variants built and inspected; native Windows execution pending |
+| Web exports | Steam-free and installed-extension sources built/inspected; **6 actual Chromium runs** passed (mock, explicit Steam failure, simulated Couch for each) |
+| Live Steam | Not run; still requires App ID and authorized accounts |
+
+A supplemental Wine attempt produced no SDK smoke result and was stopped; it
+provides no Windows execution acceptance.
+
+Package inventories, library checks and execution labels are written to
+`evidence.json`, `pack-paths.json`, `web-evidence.json` and per-check logs. These
+App-ID-free checks do not prove live Steam lobby, invitation or storage behavior.

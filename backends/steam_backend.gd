@@ -25,6 +25,7 @@ var _active := false
 var _closed := false
 var _pinned_account := ""
 var _launch_invite := ""
+var _roster_wait_until := 0
 
 func initialize() -> void:
 	if _closed or _active:
@@ -86,7 +87,7 @@ func consume_join_request() -> String:
 	return id
 
 func _on_invite(id: String) -> void:
-	if _valid_id(id):
+	if not _closed and _valid_id(id):
 		_launch_invite = id
 		lobby_join_requested.emit(id)
 
@@ -110,8 +111,8 @@ func poll(now_ms: int) -> void:
 	if _closed or not _active: return
 	bridge.poll()
 	if not is_available():
-		lobby_leave()
 		_active = false
+		lobby_leave()
 		initialization_error = "Steam account changed; reinitialize in a new SDK instance"
 		capabilities_changed.emit()
 		return
@@ -122,6 +123,11 @@ func poll(now_ms: int) -> void:
 			_finish_operation(false, "timeout", "Steam membership operation timed out")
 		elif _operation.get("entered", false):
 			_validate_entry()
+	if state == "joined" and _roster_wait_until > 0:
+		if now_ms >= _roster_wait_until:
+			_fail_membership("metadata-timeout", "Controller slot metadata did not converge")
+		else:
+			_refresh_roster()
 	for packet in bridge.receive(receive_budget):
 		if not lobby_is_available() or not packet is Dictionary: continue
 		var sender := str(packet.get("sender", ""))
@@ -218,8 +224,8 @@ func _validate_entry() -> void:
 	_authority = values.authority
 	_token = values.token
 	_slots = slots
-	_refresh_roster()
-	_finish_operation(true)
+	if _refresh_roster():
+		_finish_operation(true)
 
 func _valid_slots(slots: Variant, members: Array, authority: String) -> bool:
 	if not slots is Dictionary or slots.get(authority) != 0: return false
@@ -258,6 +264,7 @@ func _clear_membership() -> void:
 	lobby_id = ""
 	_authority = ""
 	_token = ""
+	_roster_wait_until = 0
 	_slots.clear()
 	_members.clear()
 	_players.clear()
@@ -274,14 +281,22 @@ func _on_roster_changed(id: String) -> void:
 	if state == "joined": _refresh_roster()
 	elif _operation.get("entered", false) and not _operation.get("done", true): _validate_entry()
 
-func _refresh_roster() -> void:
-	var members: Array = bridge.lobby_members(lobby_id)
-	if not members.has(_authority) or not members.has(bridge.user_id):
-		var code := "host-left" if not members.has(_authority) else "unavailable"
-		lobby_leave()
+func _fail_membership(code: String, message: String) -> void:
+	if not _operation.is_empty() and not _operation.done:
+		_finish_operation(false, code, message)
+	else:
+		_generation += 1
+		_set_state("leaving")
+		_clear_membership()
 		_set_state("failed")
-		lobby_operation_failed.emit(code, "Original authority or local member left the lobby")
-		return
+		lobby_operation_failed.emit(code, message)
+
+func _refresh_roster() -> bool:
+	var members: Array = bridge.lobby_members(lobby_id)
+	if not members.has(_authority) or bridge.lobby_owner(lobby_id) != _authority or not members.has(bridge.user_id):
+		var code := "host-left" if not members.has(_authority) or bridge.lobby_owner(lobby_id) != _authority else "unavailable"
+		_fail_membership(code, "Original authority or local member left the lobby")
+		return false
 	for id in _members:
 		if not members.has(id) and id != bridge.user_id: bridge.close_peer(id)
 	if _authority == bridge.user_id:
@@ -299,18 +314,28 @@ func _refresh_roster() -> void:
 						used[slot] = true
 						break
 		if not bridge.set_metadata(lobby_id, "couch_slots", JSON.stringify(_slots)):
-			lobby_leave()
-			lobby_operation_failed.emit("metadata-failed", "Cannot publish controller slots")
-			return
+			_fail_membership("metadata-failed", "Cannot publish controller slots")
+			return false
 	else:
 		var slots: Variant = JSON.parse_string(bridge.metadata(lobby_id, "couch_slots"))
-		if not _valid_slots(slots, members, _authority): return
+		if not _valid_slots(slots, members, _authority):
+			# Slot publication can lag membership. Immediately revoke departed
+			# peers while retaining only already validated remaining members.
+			_members = _members.filter(func(id): return members.has(id))
+			_players = _players.filter(func(player): return _members.has(player.userId))
+			lobby_players_updated.emit(_players.duplicate(true))
+			if _roster_wait_until == 0:
+				_roster_wait_until = Time.get_ticks_msec() + metadata_timeout_ms
+				bridge.request_metadata(lobby_id)
+			return false
 		_slots = slots
+	_roster_wait_until = 0
 	_members = members.duplicate()
 	_players.clear()
 	for id in members:
 		_players.append({"userId": id, "username": bridge.persona_name(id), "role": "host" if id == _authority else "guest", "controllerSlot": int(_slots.get(id, -1)), "status": "lobby", "ping": -1})
 	lobby_players_updated.emit(_players.duplicate(true))
+	return true
 
 func lobby_is_available() -> bool:
 	return is_available() and state == "joined" and not lobby_id.is_empty() and bridge.connected()
@@ -373,9 +398,11 @@ func get_achievements() -> Dictionary:
 	return _awards.get_unlocked() if _awards != null else _failure("unavailable", "Achievements unavailable")
 func shutdown() -> void:
 	if _closed: return
-	lobby_leave()
+	# State/roster listeners run synchronously. Revoke capabilities before leave
+	# signals so a listener cannot start a new native request during teardown.
 	_closed = true
 	_active = false
+	lobby_leave()
 	if _awards != null: _awards.shutdown()
 	if bridge != null: bridge.shutdown()
 	capabilities_changed.emit()

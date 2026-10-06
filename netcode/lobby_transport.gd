@@ -361,4 +361,9 @@ func _send_frame(frame: Dictionary, target: Dictionary) -> bool:
 
 func _on_provider_gap(peer_id: String, reason: String) -> void:
 	if not _closed:
+		# A provider gap cancels accepted delayed gameplay before recovery sends.
+		# Broadcast frames may include the broken peer; discard the whole queue.
+		_fault_delay_dropped += _delay_queue.size()
+		_delay_queue.clear()
+		_delay_last_due = _now_ms
 		transport_gap.emit(peer_id, reason)

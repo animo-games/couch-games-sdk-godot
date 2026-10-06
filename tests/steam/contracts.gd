@@ -37,6 +37,9 @@ func _run() -> void:
 	await _membership_events()
 	await _lifecycle_validation()
 	await _achievements()
+	await _hardening_regressions()
+	await _teardown_regressions()
+	_native_callback_correlation()
 	await _classic_achievements()
 	await _ui()
 	for node in _owned:
@@ -502,3 +505,149 @@ func _ui() -> void:
 	check(sdk.initialization_state == "ready", "restored provider updates readiness")
 	panel.free()
 	sdk.free()
+
+func _hardening_regressions() -> void:
+	var production := ProductionBridge.new()
+	production.initialized = true
+	production.set("_creating", 81)
+	production.set("_joining", 82)
+	production.set("_joining_id", "1000")
+	production.shutdown()
+	check(production.get("_creating") == -1 and production.get("_joining") == -1 and production.get("_joining_id").is_empty(), "native shutdown clears uncorrelated request reservations")
+	var entries := []
+	production.request_entered.connect(func(g, id, code): entries.append([g, id, code]))
+	production._on_created(1, 1000)
+	production._on_joined(1000, 0, false, 1)
+	check(entries.is_empty(), "callbacks after native shutdown cannot resurrect membership")
+	production.free()
+	var provider := Bridge.new()
+	root.add_child(provider)
+	_owned.append(provider)
+	await provider.initialize(0)
+	var awards := _new_awards(provider)
+	awards.catalog["a"] = {"steam": ""}
+	provider.definitions["a"] = false
+	var job := {"done": false}
+	_award_call(awards, "a", job)
+	while not job.done: await process_frame
+	check(job.result.status == "pending" and provider.definitions.a, "empty dictionary Steam name defaults to stable game key")
+	awards.shutdown()
+	var path: String = awards.get("_journal_path")
+	var invalid_files := [
+		{"pending": ["a", 7], "local_keys": []},
+		{"pending": ["a", "a"], "local_keys": []},
+		{"pending": ["a"], "local_keys": "a"},
+		{"pending": ["a"], "local_keys": ["b"]},
+		{"pending": [""], "local_keys": []},
+	]
+	var too_many := []
+	for index in range(129): too_many.append("key_%s" % index)
+	invalid_files.append({"pending": too_many, "local_keys": []})
+	for value in invalid_files:
+		value.account = provider.app_id + "/" + provider.user_id
+		var file := FileAccess.open(path, FileAccess.WRITE)
+		var original := JSON.stringify(value)
+		file.store_string(original)
+		file.close()
+		var recovered := _new_awards(provider, awards.journal_root)
+		check(not recovered.is_ready() and recovered.pending.is_empty(), "invalid journal rejected atomically: " + original.left(60))
+		check((await recovered.unlock("a")).status == "unavailable" and FileAccess.get_file_as_string(path) == original, "invalid journal remains intact after rejected unlock")
+		recovered.shutdown()
+	var host_provider := Bridge.new()
+	var host := _backend(host_provider)
+	await host.initialize()
+	check((await host.lobby_host({"max_players": 3})).success, "roster hardening fixture host enters")
+	var id: String = host.lobby_id
+	var guest_provider := Bridge.new()
+	guest_provider.user_id = "76561198000000021"
+	guest_provider.hub = host_provider.hub
+	var guest := _backend(guest_provider)
+	await guest.initialize()
+	check((await guest.lobby_join(id)).success, "roster hardening fixture guest enters")
+	var departed := "76561198000000022"
+	host_provider.hub.lobbies[id].members.append(departed)
+	host._on_roster_changed(id)
+	guest._on_roster_changed(id)
+	check(guest.get("_members").has(departed), "third member validated before departure")
+	# Membership changes before the authority publishes a new slot map.
+	host_provider.hub.lobbies[id].members.erase(departed)
+	host_provider.hub.lobbies[id].members.append("76561198000000023")
+	guest._on_roster_changed(id)
+	var delivered := []
+	guest.lobby_event_received.connect(func(event, _data, _sender): delivered.append(event))
+	guest_provider.packets.append({"sender": departed, "bytes": Wire.encode(id, guest.get("_token"), "stale", null)})
+	guest_provider.peer_requested.emit(departed)
+	guest.poll(Time.get_ticks_msec())
+	check(delivered.is_empty() and not guest.get("_members").has(departed) and not guest_provider.accepted_peers.has(departed), "departed peer revoked while slot metadata lags new membership")
+	host._on_roster_changed(id)
+	guest.poll(Time.get_ticks_msec())
+	check(guest.get("_members").has("76561198000000023") and guest.get("_roster_wait_until") == 0, "bounded slot wait resumes after authority publishes metadata")
+	var lobby := CouchLobby.new()
+	lobby.setup(guest)
+	root.add_child(lobby)
+	_owned.append(lobby)
+	lobby.refresh_players()
+	var transport := CouchLobbyTransport.new(lobby)
+	transport.fault_delay_ms = 100
+	transport.poll(10)
+	check(transport.broadcast({"v": 1, "epoch": 1, "kind": "intent", "seq": 1, "body": {"stale": true}}), "delayed gameplay accepted before provider gap")
+	var sends_before: int = guest_provider.sends.size()
+	guest_provider.peer_failed.emit(host_provider.user_id, "broken")
+	transport.poll(1000)
+	check(guest_provider.sends.size() == sends_before and transport.fault_delay_dropped == 1, "provider gap discards delayed stale gameplay before recovery")
+	transport.close()
+	host_provider.hub.lobbies[id].members.append("76561198000000024")
+	guest._on_roster_changed(id)
+	var failure_states := []
+	guest.lobby_state_changed.connect(func(value, _id): failure_states.append(value))
+	guest.poll(Time.get_ticks_msec() + 100000)
+	check(not failure_states.has("idle"), "failed roster cleanup never exposes an intermediate idle state to synchronous listeners")
+	check(guest.state == "failed" and guest.lobby_id.is_empty(), "slot metadata wait fails visibly instead of holding a stale roster indefinitely")
+	host.shutdown()
+	guest.shutdown()
+
+func _teardown_regressions() -> void:
+	var rejecting := Bridge.new()
+	rejecting.fail_metadata_after = 8
+	var failed_host := _backend(rejecting)
+	await failed_host.initialize()
+	var rejected: Dictionary = await failed_host.lobby_host({})
+	check(not rejected.success and rejected.metadata.error_code == "metadata-failed" and failed_host.state == "failed", "slot publication failure cannot overwrite failed entry with success/cancellation")
+	failed_host.shutdown()
+	var provider := Bridge.new()
+	var backend := _backend(provider)
+	await backend.initialize()
+	check((await backend.lobby_host({})).success, "teardown fixture enters")
+	provider.hold_membership = true
+	var job := {"done": false}
+	backend.lobby_state_changed.connect(func(value, _id):
+		if value == "idle": _op(backend, job, "host"))
+	var invites := []
+	backend.lobby_join_requested.connect(func(id): invites.append(id))
+	backend.shutdown()
+	provider.join_requested.emit("12345")
+	check(job.done and job.result.metadata.error_code == "initialization-failed" and provider.requests.is_empty(), "synchronous leave listener cannot reopen native membership during teardown")
+	check(invites.is_empty(), "late invitation ignored after backend shutdown")
+
+func _native_callback_correlation() -> void:
+	var production := ProductionBridge.new()
+	production.initialized = true
+	production.set("_creating", 91)
+	var results := []
+	production.request_entered.connect(func(g, id, code): results.append([g, id, code]))
+	production._on_created(1, 1000)
+	check(results.is_empty() and not production.join_lobby(92, "1000"), "native create retains reservation until its LobbyEnter callback")
+	production._on_joined(1000, 0, false, 1)
+	check(results == [[91, "1000", ""]] and production.get("_creating") == -1, "native creation completes exactly once after both callbacks")
+	production._on_joined(1000, 0, false, 1)
+	check(results.size() == 1, "duplicate abandoned LobbyEnter cannot complete another operation")
+	production.set("_creating", 93)
+	production._on_joined(1001, 0, false, 1)
+	check(results.size() == 1 and production.get("_creating") == 93, "native entry arriving before creation remains reserved")
+	production._on_created(1, 1001)
+	check(results.size() == 2 and results[1] == [93, "1001", ""], "native create handles callback order inversion")
+	production.set("_creating", 94)
+	production._on_created(2, 0)
+	check(results.size() == 3 and results[2][2] == "unavailable" and production.get("_creating") == -1, "failed native creation releases reservation visibly")
+	production.shutdown()
+	production.free()

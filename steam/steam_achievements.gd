@@ -173,9 +173,8 @@ func _mark_local(key: String) -> void:
 
 func _api_name(key: String) -> String:
 	var value: Variant = catalog[key]
-	if value is Dictionary:
-		return str(value.get("steam", key))
-	return key if str(value).is_empty() else str(value)
+	var api := str(value.get("steam", key)) if value is Dictionary else str(value)
+	return key if api.is_empty() else api
 
 func _result(key: String, status: String, code := "", message := "") -> Dictionary:
 	if status in ["error", "unavailable"]:
@@ -196,15 +195,27 @@ func _load_journal() -> void:
 	if not value is Dictionary or value.get("account", "") != _account or not value.get("pending") is Array:
 		_journal_valid = false
 		return
-	for key in value.pending:
-		if key is String:
-			# Removed catalog entries remain recorded; never silently erase an
-			# earned intent when configuration changes. Only known keys retry.
-			pending[key] = true
 	var local_keys: Variant = value.get("local_keys", [])
-	if local_keys is Array:
-		for key in local_keys:
-			if key is String and pending.has(key): _local[key] = true
+	if value.pending.size() > 128 or not local_keys is Array or local_keys.size() > 128:
+		_journal_valid = false
+		return
+	# Validate the whole file before accepting any entry; malformed awards must
+	# never become a partial successful recovery or overwrite the original file.
+	var recovered := {}
+	for key in value.pending:
+		if not key is String or key.is_empty() or key.length() > 128 or recovered.has(key):
+			_journal_valid = false
+			return
+		recovered[key] = true
+	var local_recovered := {}
+	for key in local_keys:
+		if not key is String or not recovered.has(key) or local_recovered.has(key):
+			_journal_valid = false
+			return
+		local_recovered[key] = true
+	# Removed catalog entries remain recorded; only known keys retry.
+	pending = recovered
+	_local = local_recovered
 
 func _save_journal() -> bool:
 	if not _same_account():

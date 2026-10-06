@@ -20,6 +20,8 @@ var initialization_calls := 0
 var shutdown_calls := 0
 var definitions: Dictionary = {"ACH_A": false, "ACH_B": false}
 var init_ok := true
+var metadata_writes := 0
+var fail_metadata_after := -1
 
 func _init() -> void:
 	app_id = "123"
@@ -69,6 +71,8 @@ func lobby_owner(id: String) -> String:
 func persona_name(id: String) -> String:
 	return "Player " + id.right(2)
 func set_metadata(id: String, key: String, value: String) -> bool:
+	metadata_writes += 1
+	if fail_metadata_after >= 0 and metadata_writes > fail_metadata_after: return false
 	hub.lobbies[id].metadata[key] = value
 	return true
 func metadata(id: String, key: String) -> String:

@@ -6,6 +6,8 @@ var _native: Object
 var _creating := -1
 var _joining := -1
 var _joining_id := ""
+var _created_id := ""
+var _create_entry: Dictionary = {}
 var _connections: Array = []
 func initialize(requested_app_id: int) -> Dictionary:
 	if initialized:
@@ -15,9 +17,13 @@ func initialize(requested_app_id: int) -> Dictionary:
 	if ProjectSettings.get_setting("steam/initialization/processes/initialize_on_startup", false) or ProjectSettings.get_setting("steam/initialization/processes/embed_callbacks", false):
 		return {"success": false, "error": "Disable GodotSteam automatic initialization and embedded callbacks; CouchGames owns both"}
 	_native = Engine.get_singleton("Steam")
-	for method in ["steamInitEx", "getAppID", "getSteamID", "run_callbacks", "sendMessageToUser", "receiveMessagesOnChannel", "getAchievement", "storeStats"]:
+	for method in ["steamInitEx", "getAppID", "getSteamID", "run_callbacks", "sendMessageToUser", "receiveMessagesOnChannel", "getAchievement", "storeStats", "steamShutdown", "loggedOn", "createLobby", "joinLobby", "leaveLobby", "getNumLobbyMembers", "getLobbyMemberByIndex", "getLobbyOwner", "getFriendPersonaName", "setLobbyData", "getLobbyData", "requestLobbyData", "isOverlayEnabled", "activateGameOverlayInviteDialog", "acceptSessionWithUser", "closeSessionWithUser", "setAchievement"]:
 		if not _native.has_method(method):
 			return {"success": false, "error": "Incompatible GodotSteam: missing " + method}
+	for event in ["lobby_created", "lobby_joined", "lobby_chat_update", "lobby_data_update", "persona_state_change", "join_requested", "network_messages_session_request", "network_messages_session_failed", "user_stats_stored", "steam_server_connected", "steam_server_disconnected"]:
+		if not _native.has_signal(event):
+			shutdown()
+			return {"success": false, "error": "Incompatible GodotSteam: missing signal " + event}
 	_link("lobby_created", _on_created)
 	_link("lobby_joined", _on_joined)
 	_link("lobby_chat_update", func(id, _changed, _actor, _state): roster_changed.emit(str(id)))
@@ -37,7 +43,10 @@ func initialize(requested_app_id: int) -> Dictionary:
 		if app_id == "0" or user_id == "0":
 			shutdown()
 			return {"success": false, "error": "Steam did not identify the app/account"}
-	return {"success": initialized, "error": str(result.get("verbal", "Steam initialization failed")) if not initialized else ""}
+	if not initialized:
+		shutdown()
+		return {"success": false, "error": str(result.get("verbal", "Steam initialization failed"))}
+	return {"success": true, "error": ""}
 func _link(event: String, callback: Callable) -> void:
 	_native.connect(event, callback)
 	_connections.append([event, callback])
@@ -51,6 +60,13 @@ func shutdown() -> void:
 	_connections.clear()
 	initialized = false
 	_native = null
+	_creating = -1
+	_joining = -1
+	_joining_id = ""
+	_created_id = ""
+	_create_entry.clear()
+	app_id = ""
+	user_id = ""
 func connected() -> bool:
 	return initialized and bool(_native.call("loggedOn"))
 func poll() -> void:
@@ -71,17 +87,44 @@ func join_lobby(generation: int, id: String) -> bool:
 	_native.call("joinLobby", int(id))
 	return true
 func _on_created(result: int, id: int) -> void:
+	if not initialized or _creating < 0:
+		return
+	if result != 1:
+		var generation := _creating
+		_creating = -1
+		_created_id = ""
+		_create_entry.clear()
+		request_entered.emit(generation, str(id), "unavailable")
+		return
+	# createLobby also produces LobbyEnter. Keep the native reservation until
+	# BOTH callbacks arrive; otherwise a synchronous listener could join the
+	# same lobby and consume the old create's LobbyEnter as a new join result.
+	_created_id = str(id)
+	_complete_create()
+func _complete_create() -> void:
+	if _created_id.is_empty() or _create_entry.get("id", "") != _created_id:
+		return
 	var generation := _creating
+	var id := _created_id
+	var code: String = _create_entry.code
 	_creating = -1
-	request_entered.emit(generation, str(id), "" if result == 1 else "unavailable")
+	_created_id = ""
+	_create_entry.clear()
+	request_entered.emit(generation, id, code)
 func _on_joined(id: int, _permissions: int, _locked: bool, response: int) -> void:
-	# createLobby also produces lobby_joined. Never attribute it to a join.
+	if not initialized:
+		return
+	var code: String = {1: "", 4: "full", 2: "unavailable", 3: "unavailable"}.get(response, "unavailable")
+	if _creating >= 0:
+		_create_entry = {"id": str(id), "code": code}
+		_complete_create()
+		return
 	if _joining < 0 or str(id) != _joining_id:
 		return
 	var generation := _joining
 	_joining = -1
 	_joining_id = ""
-	request_entered.emit(generation, str(id), {1: "", 4: "full", 2: "unavailable", 3: "unavailable"}.get(response, "unavailable"))
+	request_entered.emit(generation, str(id), code)
 func leave_lobby(id: String) -> void:
 	if initialized and not id.is_empty():
 		_native.call("leaveLobby", int(id))
