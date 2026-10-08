@@ -23,6 +23,10 @@ real SDK export plugin, without manual Web exclusion filters. Generated projects
 and templates stay in hidden output directories; runtime artifacts are the
 named `linux-*`, `windows-*`, and `web-*` directories.
 
+Windows custom templates include their debug/release console companions from
+the same pinned archive. Every Windows export must contain the matching console
+wrapper bytes, including exports built on Linux, before native smoke execution.
+
 Each PCK is mounted and enumerated with the ordinary engine. Web must exclude
 Steam scripts, descriptor and all native libraries. Native installed packages
 must contain the descriptor and exact target/debug-or-release extension and

@@ -72,7 +72,8 @@ def main():
     templates = output / '.templates'
     with zipfile.ZipFile(args.templates) as archive:
         wanted = ['linux_debug.x86_64', 'linux_release.x86_64', 'windows_debug_x86_64.exe',
-                  'windows_release_x86_64.exe', 'web_nothreads_debug.zip', 'web_nothreads_release.zip']
+                  'windows_debug_x86_64_console.exe', 'windows_release_x86_64.exe',
+                  'windows_release_x86_64_console.exe', 'web_nothreads_debug.zip', 'web_nothreads_release.zip']
         for name in wanted:
             archive.extract('templates/' + name, templates)
     templates /= 'templates'
@@ -140,6 +141,14 @@ renderer/rendering_method="gl_compatibility"
             artifact = artifact_dir / ('smoke' + suffix)
             run([args.godot, '--headless', '--path', project, '--export-' + variant,
                  target + '-' + variant + ('-feature' if steam_feature else ''), artifact], project, log=logs / (label + '-export.log'), timeout=180)
+            if target == 'windows':
+                # Godot copies a console companion from beside the custom template.
+                # Check every Windows export, including builds on Linux, so a
+                # missing wrapper cannot first surface as WinError 2 in smoke runs.
+                wrapper = artifact.with_name(artifact.stem + '.console.exe')
+                source = templates / f'windows_{variant}_x86_64_console.exe'
+                if not wrapper.is_file() or wrapper.read_bytes() != source.read_bytes():
+                    raise RuntimeError(f'Missing or altered pinned Windows console wrapper: {wrapper}')
             sources = []
             if installed and target != 'web':
                 arch = 'linux64' if target == 'linux' else 'win64'
