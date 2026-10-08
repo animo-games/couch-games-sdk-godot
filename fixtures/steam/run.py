@@ -29,6 +29,7 @@ def main():
                         help='Run the headless single-account create/leave probe instead of the UI')
     parser.add_argument('--visibility', choices=('private', 'friends', 'public'), default='private',
                         help='Interactive host visibility; the headless probe always uses a private lobby')
+    parser.add_argument('--achievement', help='Published Steam achievement API name; enables the manual award control')
     args = parser.parse_args()
     system = platform.system()
     if system not in ('Linux', 'Windows') or platform.machine().lower() not in ('x86_64', 'amd64'):
@@ -73,8 +74,11 @@ def main():
             print('Host on one computer; paste its lobby ID and Join on the other. Friends-only lobbies require friendship or an invitation.', flush=True)
         # Preserve a terminal for peer event/snapshot output. Normal UI exit is
         # not a passed live test; the UI and logs show each actual result.
+        user_args = ['--app-id=' + str(args.app_id), '--visibility=' + args.visibility]
+        if args.achievement:
+            user_args.append('--achievement=' + args.achievement)
         result = subprocess.run(list(map(str, [*command, '--log-file', log, '--',
-            '--app-id=' + str(args.app_id), '--visibility=' + args.visibility])), cwd=project, env=environment(project))
+            *user_args])), cwd=project, env=environment(project))
         if result.returncode:
             raise SystemExit(result.returncode)
         if log.exists() and 'SCRIPT ERROR' in log.read_text(encoding='utf-8', errors='replace'):

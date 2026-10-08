@@ -25,10 +25,11 @@ and exposes the expected methods and callback signatures. The SDK also parses
 and passes its deterministic contracts with **no Steam extension installed**.
 Linux, Windows and Web package builds/inspections and Linux/Chromium smoke
 runs are now verified without an App ID; see the reproducible checks below.
-Native Windows execution passed in remote CI. Real Steam initialization and
-single-account private lobby creation/leave passed on Linux for supplied App ID
-`5310050` on October 8, 2026. Cross-machine messages, invitations, achievement
-storage and live native Windows Steam tests remain **unverified release gates**.
+Native Windows execution passed in remote CI. Live Linux initialization and
+private lobby create/leave, plus a two-account Linux/Windows public lobby,
+bidirectional reliable events and an applied session baseline passed for app
+`5310050` on October 8, 2026. Invitations, link recovery, host departure,
+achievement storage and packaged live acceptance remain **unverified release gates**.
 Fake results must not be recorded as live acceptance.
 
 Primary references used for the spike:
@@ -360,11 +361,10 @@ negative runs fail visibly. Staging loads the extension before editor import and
 isolates fixture data in its disposable directory. The App ID is supplied at
 runtime; SDK defaults and consumer projects are unchanged.
 
-[Live verification record](steam-live-verification.json) preserves the observed
-result and its scope. Remaining live gates need another authorized account on a
-separate machine and a published achievement API name for read/store tests.
-Steam invitation and peer/session recovery tests, live Windows execution and
-packaged live runs remain open.
+[Single-account live verification record](steam-live-verification.json) preserves
+that run and its scope. The subsequent two-account Linux/Windows result is recorded
+below. A published achievement API name is still needed for read/store tests;
+invitation, peer/session recovery, host departure and packaged live runs remain open.
 
 
 For interactive two-computer setup, run
@@ -383,3 +383,32 @@ private/public modes; these remain single-account checks. Rendered window startu
 was also exercised on Linux. The Windows launcher itself has not been executed
 locally; existing Windows CI verifies its shared dependency-acquisition and
 native package prerequisites. Neither claim replaces the two-account live matrix.
+
+
+## Two-account Linux/Windows live verification (October 8, 2026)
+
+At source revision `4e0401d`, the Windows fixture joined the Linux host's public
+lobby for app `5310050` with a distinct Steam account. Both sides showed two
+participants with stable host/guest slots. Linux directly received the Windows
+fixture event; supplied Windows terminal output confirmed the Linux fixture
+events arrived. JSON numeric values appeared as floats, and sender identities
+matched the peer accounts. These were actual Steam Networking Messages.
+
+After the Windows session control was pressed, Linux received the guest hello
+and printed `BASELINE ACCEPTED true`. The Windows operator confirmed a separate
+applied `BASELINE` line. The earlier raw `EVENT couch-net` snapshot line alone
+was not counted as session application. Detailed evidence and limits are in
+[the two-account report](steam-two-account-verification.json); this is source
+fixture acceptance with manual Windows evidence, not packaged live acceptance.
+
+The fixture now displays bounded result output in the window as well as the
+terminal. It shows send acceptance separately from received events and applied
+baselines, session start/stop/rejections, and visible unavailable-state errors.
+Its session button is named **Start local session**, since repeated clicks report
+state rather than requesting another baseline. The achievement control is disabled
+until the launcher receives `--achievement <published-api-name>`. Starting the
+launcher does not award an achievement. Feedback startup/unavailable controls and
+rendered window startup were checked on Linux; Windows feedback rendering remains
+unexecuted. SDK backend/transport/session implementations are unchanged by this
+fixture feedback update. Invitation, host-leave, link recovery, achievements and
+packaged live gates remain open.

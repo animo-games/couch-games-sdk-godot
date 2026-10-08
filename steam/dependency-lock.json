@@ -13,7 +13,8 @@
   "verified": [
     "linux.x86_64 extension loading",
     "runtime method and signal signatures",
-    "Linux Steam initialization and single-account private lobby create/leave (source fixture)"
+    "Linux Steam initialization and single-account private lobby create/leave (source fixture)",
+    "Linux/Windows two-account lobby, reliable events and session baseline (source fixtures; manual Windows evidence)"
   ],
-  "live_steam_acceptance": "partial: single-account Linux source fixture passed; two-account transport, invitations, achievements, live Windows and packaged live runs pending"
+  "live_steam_acceptance": "partial: Linux/Windows source lobby, bidirectional events and session baseline passed; invitations, recovery, host departure, achievements and packaged live runs pending"
 }

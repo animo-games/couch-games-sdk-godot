@@ -1,0 +1,68 @@
+{
+  "date": "2026-10-08",
+  "app_id": 5310050,
+  "runtime_source_revision": "4e0401d05a32d336cc80d5e630040b57c3452c22",
+  "godot": "4.7.stable.official.5b4e0cb0f",
+  "godotsteam": "4.23",
+  "steamworks": "1.65",
+  "native_archive_sha256": "c1728b4bf330da851a00eaf64dab2e99c506018b1d9f529511b25d7fe7649e97",
+  "platforms": {
+    "host": "Linux x86_64; directly observed",
+    "guest": "Windows x86_64; user-operated launcher and supplied terminal output"
+  },
+  "distinct_steam_accounts_observed": 2,
+  "lobby_visibility": "public",
+  "player_limit": 2,
+  "roles": [
+    "host",
+    "guest"
+  ],
+  "controller_slots": [
+    0,
+    1
+  ],
+  "checks": {
+    "join_and_roster": {
+      "result": "passed",
+      "evidence": "Linux observed two distinct account IDs with host/guest roles and slots 0/1; Windows user confirmed joined with two roster entries."
+    },
+    "windows_to_linux_event": {
+      "result": "passed",
+      "evidence": "Linux received fixture event with counter 0.0; authenticated sender was the guest account, distinct from local host."
+    },
+    "linux_to_windows_event": {
+      "result": "passed",
+      "evidence": "User supplied Windows terminal EVENT fixture output for counter 1.0/from linux_host and counter 0.0, both from host account."
+    },
+    "session_hello": {
+      "result": "passed",
+      "evidence": "After the Windows session control was pressed, Linux received guest hello envelopes with unknown epoch 0 and sequences 1/2; host queued its baseline response."
+    },
+    "session_baseline": {
+      "result": "passed",
+      "evidence": "Linux printed BASELINE ACCEPTED true. User confirmed a separate applied BASELINE line on Windows after starting its session. The applied line itself was not copied into the transcript; confirmation is manual."
+    }
+  },
+  "limitations": [
+    "Source fixtures, not packaged live builds.",
+    "Windows actions/logs and applied baseline confirmation are user-supplied evidence.",
+    "The new on-screen feedback changes follow this live run; their Windows rendering has not been executed."
+  ],
+  "not_executed": [
+    "Private lobby invitations and cold launch invitation handling",
+    "Provider link failure and session recovery",
+    "Host departure ending the guest session",
+    "Achievement read/store callbacks and account-scoped persistence",
+    "Packaged live acceptance on Linux and Windows"
+  ],
+  "source_sha256": {
+    "core/couch_games_sdk.gd": "86f6cf72ebe1f4ccf41a7d8d14b49379de85d2bae7c2309e601cbe345578a034",
+    "backends/steam_backend.gd": "aae2b6197009676af21738e51c39a1a9687d8c3f0be5b2ce6a08ec99487a747c",
+    "steam/steam_bridge.gd": "ef267e5bd542e78b6f4f28b55ad8c5d309665d151b58817f111cb8aadb164a88",
+    "steam/steam_events.gd": "08d05a21baef59d1482114bce51dcb316d02efbaff76c71e431de3a7f987d238",
+    "netcode/lobby_transport.gd": "60b261cbf3044cc84d67997673044c5f9ed6742e5a73d5ae570ff37bcc749b73",
+    "netcode/couch_session.gd": "8ee02ef14f03541fef49083f4e52dcface5fd0678ee8d92420e68769fcba7706",
+    "fixtures/steam/main.gd": "ca28b15a01ddf706ca199fef753d4d71e9178c3fdf00bc22a2ecbbc6b5507e4f"
+  },
+  "consumer_game_changes": "Specification only; no SDK installation, game scripts, export presets or co-op changes."
+}

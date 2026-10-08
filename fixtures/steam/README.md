@@ -13,11 +13,19 @@ project, and opens the interactive fixture. It prints the project and log paths.
 Keep the terminal open for event and snapshot output. Each computer needs a
 different Steam account with access to the supplied app.
 
+The fixture also shows initialization, send acceptance, received messages,
+session state, and applied `BASELINE` results in its window. Steam accepting a
+send does not confirm delivery; check the other client's receive output.
+The achievement control stays disabled until a published API name is supplied
+with `--achievement NAME`. This enables manual read/award testing; no achievement
+is awarded merely by starting the launcher.
+
 The example deliberately hosts a public two-slot SDK test lobby for joining by
 ID. On one computer, click **Host**. Copy the lobby ID displayed beside `joined`
 into the other computer's **Lobby ID** field and click **Join**. Send the
-reliable fixture event from each side and check the other terminal's `EVENT`
-output. Start the local session on both sides to exercise the baseline path.
+reliable fixture event from each side and check the other client's `EVENT`
+output. Click **Start local session** on both sides and check the guest's
+applied `BASELINE` output, which is separate from receiving a raw snapshot packet.
 Closing the UI is not a passed acceptance result; record the observed messages,
 snapshot and any errors. The game project does not participate in these tests.
 
@@ -64,8 +72,10 @@ both clients; the host's `hello_received` sends a fixture snapshot. Award the
 configured achievement separately on each account, checking the printed read
 status and storage acknowledgment. Repeat after a link failure and host leave,
 and from packaged Linux/Windows builds. Single-account Linux initialization and
-private lobby creation/leave passed for app `5310050` on October 8, 2026; the
-two-account and achievement matrix remains open. See
+private lobby creation/leave passed for app `5310050` on October 8, 2026. A
+Linux/Windows public lobby, reliable events in both directions and an applied
+session baseline also passed with two distinct accounts. Invitation, link recovery,
+host-leave, achievement and packaged live acceptance remain open. See
 [SDK Steam documentation](../../docs/steam.md).
 
 Deterministic fake-provider checks are separate:
