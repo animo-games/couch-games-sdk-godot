@@ -1,11 +1,12 @@
 # Prop authority in the addon (Rev 3 step 3)
 
 Status: DESIGN rev 1 APPROVED (Daniel, 2026-10-08). Design #31 and host slice A1 #32
-merged; addon main is `233d6d1`. Owner slice A2 is implemented and verified locally on
-`feat/prop-authority-owner` in `~/Repositories/addon-prop-owner`, awaiting approval to push
-and open its PR. All decisions taken: P1-P3 and P5-P7 as recommended; P4 dropped for now
-with the API shaped so the fix is additive. The API contract below is frozen.
-Next: publish A2 for review; after it merges, demo port B1.
+merged; addon main is `233d6d1`. Owner slice A2 is implemented, verified and published as
+[PR #33](https://github.com/animo-games/couch-games-sdk-godot/pull/33) on
+`feat/prop-authority-owner` (verified code commit `664c364`), worktree
+`~/Repositories/addon-prop-owner`. All decisions taken: P1-P3 and P5-P7 as recommended;
+P4 dropped for now with the API shaped so the fix is additive. The API contract is frozen.
+Next: review and merge A2; then demo port B1. Daniel requested discussion of next work.
 
 Summary. The netcode demo's crate ownership (`CrateAuthority` on the host, `CratePrediction` on
 each guest) moves into the addon as two pure `RefCounted` classes: `CouchPropAuthority` (host:
@@ -946,4 +947,7 @@ No production code changes were needed after the fresh review.
 
 This is a prerequisite API slice. Real physics-body and demo integration verification
 belongs to B1 after A2 merges; the demo submodule is still pinned to `2e5b123`.
-The approved P4 press-loss limit is unchanged. No push, PR, merge or demo edits yet.
+The approved P4 press-loss limit is unchanged. Daniel authorized push and PR creation
+on 2026-10-08; A2 is pushed and PR #33 is open against addon main. This publication
+status update changes docs only; production code remains exactly the verified `664c364`.
+No merge or demo edits yet. Next work is a discussion with Daniel, then B1 after A2 merges.
