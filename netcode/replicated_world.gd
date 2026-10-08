@@ -184,6 +184,7 @@ func has_entity(id: int) -> bool:
 
 ## Host: pack the world into one snapshot body (see the wire shape above). `acks` is
 ## peer_id -> ack tick and defines which peers get a section.
+## `extra` is the game's; its key "pp" is reserved (CouchPropAuthority.take_snapshot_extra).
 func pack(host_tick: int, now_ms: int, acks: Dictionary,
 		echo: CouchNetClockEcho = null, ring: CouchEventRing = null,
 		extra: Dictionary = {}) -> Dictionary:

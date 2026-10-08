@@ -8,6 +8,7 @@
 ## CouchEventInbox.receive and returns {"j": Vector2, "a": float} iff kind ==
 ## IMPULSE_EVENT_KIND and payload is a finite PackedFloat32Array of size 3; else {}.
 ## Negative event kinds are reserved for the library; games use kinds >= 0.
+## Reserved top-level input keys: "t", "o", "ev" (here), "p" and "pr" (CouchPropAuthority).
 ##
 ## GAME WIRING. world.set_local([my_eid, ...]) so the owner's own entity is never
 ## interpolated over its real body. Per owner tick:
