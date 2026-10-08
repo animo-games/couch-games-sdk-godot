@@ -55,8 +55,10 @@
 ## SAMPLING (milliticks, integer; floats only for entity state). Between samples a, b:
 ## alpha = (r - a*1000) / ((b - a)*1000). Past the newest sample LERP/ANGLE
 ## extrapolate linearly from the last two samples for at most extrapolate_cap_ticks,
-## then hold; SNAP holds. Before the oldest sample, hold it. extrapolated_frames and
-## held_frames count sample() calls (not entities) so underrun is observable.
+## then hold; SNAP holds. Before the oldest sample, hold it, so each life keeps its
+## last history_size samples plus any older ones still needed to bracket
+## newest_tick() - history_ticks. extrapolated_frames and held_frames count
+## sample() calls (not entities) so underrun is observable.
 ## Render time never runs backwards: a lower render_milli reuses the previous one.
 ##
 ## LOCAL ENTITIES. set_local(ids) marks entities the client owns/predicts: they are
@@ -96,8 +98,14 @@ signal entity_despawned(id: int)
 ## Fired by ingest() with the reason when a body is rejected.
 signal rejected(reason: String)
 
-## Samples kept per entity life (client).
+## Samples always kept per entity life (client).
 var history_size: int = 8
+## Samples are also kept while needed to bracket render times down to
+## newest_tick() - history_ticks (client). 34 covers
+## CouchNetClockPolicy.render_delay_max_ticks (30) plus two snapshot intervals:
+## the adaptive render delay can reach its cap without render time falling before
+## the oldest sample, which would hold every entity frozen.
+var history_ticks: int = 34
 ## Ticks of linear extrapolation past the newest sample before holding (client).
 var extrapolate_cap_ticks: int = 6
 
@@ -251,7 +259,7 @@ func ingest(body: Variant) -> bool:
 		else:
 			cur["ticks"].append(ht)
 			cur["states"].append(state)
-			while cur["ticks"].size() > history_size:
+			while cur["ticks"].size() > history_size and int(cur["ticks"][1]) <= ht - history_ticks:
 				cur["ticks"].remove_at(0)
 				cur["states"].remove_at(0)
 	for id in _lives:
