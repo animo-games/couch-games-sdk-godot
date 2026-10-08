@@ -20,10 +20,10 @@
 ## - advance(now_ms): the input ticks to stamp NOW (ascending, consecutive, at
 ##   most max_catchup_ticks; a longer gap jumps and counts skipped_ticks). Never
 ##   repeats a tick within a reset() epoch.
-## - render_tick_milli(now_ms): estimate minus the render delay, monotone since
-##   the last reset(). The delay is render_delay_ticks, or with
-##   policy.render_delay_adaptive a jitter buffer measured from snapshot arrivals
-##   (RENDER DELAY below).
+## - render_tick_milli(now_ms): estimate minus the render delay in use, monotone
+##   since the last reset(). The delay slews toward a target: render_delay_ticks
+##   in fixed mode, or with policy.render_delay_adaptive a jitter buffer measured
+##   from snapshot arrivals (RENDER DELAY below).
 ## - reset(): new epoch; forgets everything, sync_generation += 1.
 ##
 ## WHY RTT COMES FROM recv_tick + hold_ms, NOT ack_tick. The host buffers an

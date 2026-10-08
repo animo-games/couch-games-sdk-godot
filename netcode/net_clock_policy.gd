@@ -39,7 +39,8 @@ var lead_shrink_interval_ms: int = 1000
 var max_lead_ticks: int = 30
 ## advance() emits at most this many ticks per call.
 var max_catchup_ticks: int = 8
-## Interpolation runs this many ticks behind the host-time estimate; with
+## Fixed mode: interpolation targets this many ticks behind the host-time
+## estimate (the delay in use slews to it, so a live edit never jumps). With
 ## render_delay_adaptive on, this is the floor the measured delay never goes below.
 ## 6 (100 ms at 60 Hz) from G15's S1b sweep: with snapshots every 2 ticks over
 ## 50 +/- 30 ms links, 3 left ~65% of frames extrapolating, 6 ~3%, 8 none.
