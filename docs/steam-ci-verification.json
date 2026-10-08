@@ -1,0 +1,91 @@
+{
+  "date": "2026-10-08",
+  "revision": "333b187a796494b04013afbb81df83e805e2550d",
+  "run_url": "https://github.com/animo-games/couch-games-sdk-godot/actions/runs/37817619299",
+  "conclusion": "success",
+  "reproduced_failure_run": "https://github.com/animo-games/couch-games-sdk-godot/actions/runs/37816712377",
+  "failure": "WinError 2 launching smoke.console.exe: fixture omitted companion Windows console templates.",
+  "fix": "Extract pinned debug/release console companions; verify exported wrapper presence and bytes on every host.",
+  "jobs": [
+    {
+      "name": "contracts-and-packages (windows-2022)",
+      "url": "https://github.com/animo-games/couch-games-sdk-godot/actions/runs/37817619299/job/113450168065",
+      "conclusion": "success",
+      "started_at": "2026-10-08T17:34:32Z",
+      "completed_at": "2026-10-08T17:37:26Z",
+      "steps": [
+        {
+          "name": "Acquire and verify pinned tools",
+          "conclusion": "success"
+        },
+        {
+          "name": "Steam-free contracts and regression gates",
+          "conclusion": "success"
+        },
+        {
+          "name": "Build, inspect and smoke native host packages",
+          "conclusion": "success"
+        },
+        {
+          "name": "Install pinned browser runner",
+          "conclusion": "skipped"
+        },
+        {
+          "name": "Install pinned Chromium",
+          "conclusion": "skipped"
+        },
+        {
+          "name": "Execute Web packages in Chromium",
+          "conclusion": "skipped"
+        },
+        {
+          "name": "Preserve evidence even on failure",
+          "conclusion": "success"
+        }
+      ]
+    },
+    {
+      "name": "contracts-and-packages (ubuntu-24.04)",
+      "url": "https://github.com/animo-games/couch-games-sdk-godot/actions/runs/37817619299/job/113450168481",
+      "conclusion": "success",
+      "started_at": "2026-10-08T17:34:31Z",
+      "completed_at": "2026-10-08T17:37:30Z",
+      "steps": [
+        {
+          "name": "Acquire and verify pinned tools",
+          "conclusion": "success"
+        },
+        {
+          "name": "Steam-free contracts and regression gates",
+          "conclusion": "success"
+        },
+        {
+          "name": "Build, inspect and smoke native host packages",
+          "conclusion": "success"
+        },
+        {
+          "name": "Install pinned browser runner",
+          "conclusion": "success"
+        },
+        {
+          "name": "Install pinned Chromium",
+          "conclusion": "success"
+        },
+        {
+          "name": "Execute Web packages in Chromium",
+          "conclusion": "success"
+        },
+        {
+          "name": "Preserve evidence even on failure",
+          "conclusion": "success"
+        }
+      ]
+    }
+  ],
+  "scope": {
+    "native": "Each job builds and inspects all Linux/Windows/Web variants and executes its matching native packages in auto/mock/explicit-Steam modes.",
+    "browser": "Six real pinned Chromium runs on Linux; mock, explicit Steam failure and simulated Couch parent for each Web source variant. Browser steps are intentionally Linux-only.",
+    "live_steam": "Not executed; requires an App ID and authorized accounts.",
+    "live_couch_service": "Not executed; browser parent is simulated. Local relay uses real loopback sockets."
+  }
+}

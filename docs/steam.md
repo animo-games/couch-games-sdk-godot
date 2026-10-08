@@ -242,8 +242,8 @@ ordinary engine/export archives by the official release SHA-512 sums and
 WebRTC native 1.2.2 by SHA-256. Steam continues using its own existing lock.
 CI also pins Python 3.12.10 and Node 22.16.0 via commit-pinned setup actions.
 Playwright 1.59.1 and its browser revision are pinned through the npm lock.
-Local runs used Python 3.14 and Node 26.10 with system Chromium; the exact
-CI interpreter/browser combination is unexecuted until the workflow runs.
+Local runs used Python 3.14 and Node 26.10 with system Chromium. The pinned
+CI interpreter/browser combination passed in the October 8 remote run below.
 Acquisition rejects checksum mismatches; the runners reject wrong engine
 versions, missing success markers, script errors, nonzero exits, timeouts,
 missing corpus cases and unimplemented required cases. Failure logs remain CI
@@ -320,3 +320,22 @@ provides no Windows execution acceptance.
 Package inventories, library checks and execution labels are written to
 `evidence.json`, `pack-paths.json`, `web-evidence.json` and per-check logs. These
 App-ID-free checks do not prove live Steam lobby, invitation or storage behavior.
+
+
+Remote CI verification on October 8, 2026:
+
+[Run 37817619299](https://github.com/animo-games/couch-games-sdk-godot/actions/runs/37817619299)
+passed on `windows-2022` and `ubuntu-24.04` at SDK revision `333b187`. Both jobs
+passed dependency acquisition, Steam-free contracts and existing regressions,
+all package builds/inspections, and native host smoke runs. Linux also passed
+six actual pinned Chromium runs. This closes the App-ID-free native Windows
+execution gap in the October 5 local table; live Steam acceptance remains open.
+
+The preceding rerun reproduced `WinError 2` when launching `smoke.console.exe`.
+The fixture extracted regular Windows templates but omitted their console
+companions, so Godot exported no wrapper. The fix extracts both pinned companions
+and checks every exported wrapper against the verified template bytes on all
+hosts. The successful native Windows job exercises that fix directly.
+Job/step conclusions, including intentional Linux-only browser steps, are saved
+in [the remote verification report](steam-ci-verification.json). The original
+[local report](steam-verification.json) remains a historical snapshot.
