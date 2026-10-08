@@ -19,7 +19,8 @@ own loops; CouchSession is untouched (bodies are still game Dictionaries it neve
   acked; client-side inbox that yields each event exactly once.
 
 Out of scope: delta compression, interest management, CouchInputBuffer / redundant input
-packing (step 2), PD follower (step 1), adaptive render delay.
+packing (step 2), PD follower (step 1), adaptive render delay (since built:
+adaptive-render-delay-design.md).
 
 ## Entity model [DECIDED A, Daniel 2026-10-05: option 1]
 
