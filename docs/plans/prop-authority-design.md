@@ -1,8 +1,12 @@
 # Prop authority in the addon (Rev 3 step 3)
 
-Status: DESIGN rev 1 APPROVED (Daniel, 2026-10-08). No code yet. All decisions taken: P1-P3 and
-P5-P7 as recommended; P4 dropped for now with the API shaped so the fix is additive. The API
-contract below is frozen. Next: this doc lands as its own docs PR, then slice A1.
+Status: DESIGN rev 1 APPROVED (Daniel, 2026-10-08). Design #31 and host slice A1 #32
+merged; addon main is `233d6d1`. Owner slice A2 is implemented, verified and published as
+[PR #33](https://github.com/animo-games/couch-games-sdk-godot/pull/33) on
+`feat/prop-authority-owner` (verified code commit `664c364`), worktree
+`~/Repositories/addon-prop-owner`. All decisions taken: P1-P3 and P5-P7 as recommended;
+P4 dropped for now with the API shaped so the fix is additive. The API contract is frozen.
+Next: review and merge A2; then demo port B1. Daniel requested discussion of next work.
 
 Summary. The netcode demo's crate ownership (`CrateAuthority` on the host, `CratePrediction` on
 each guest) moves into the addon as two pure `RefCounted` classes: `CouchPropAuthority` (host:
@@ -917,3 +921,33 @@ Ruling: option 1, as recommended.
 - Other players drawn 15-33 px inside the crate on third screens.
 - Impulse compensation for props, wiring into `CouchSession`, 3D bodies, prop-prop contention
   between owners, rollback or deterministic physics.
+
+
+## A2 verification milestone (2026-10-08)
+
+The A2 implementation reviewed was `de7bcc0` (local, unpushed), based on merged A1
+`233d6d1`. It adds `CouchPropController`, O1-O6/E1 fixtures, and 16 owner mutants.
+No production code changes were needed after the fresh review.
+
+- Fresh read-only gpt-6-sol review: **"No in-scope findings. CONVERGED."**
+  Covered the frozen A2 contract, host helper, existing demo consumer, and new fixtures.
+- Independent Godot 4.4 and 4.7 matrix in fresh disposable projects: G18 213/213,
+  G14 137/137, G15 237/237, G16 375/375, G17 197/197. No script or parse errors.
+  The same gates were also run against clean `233d6d1` projects on both versions:
+  existing G15/G16 resource-exit messages match that baseline. Godot 4.4 editor-import
+  progress-dialog messages also reproduce there; Godot 4.7 imports cleanly.
+- Full Godot 4.7 mutation pass: **29/29 killed by their named cases**, 16 owner and
+  13 host. No survivors. The deliberately malformed host-size mutant h12 also emits
+  script errors, but fails its A6 assertions; no mutant was counted by errors alone.
+- Every tracked netcode file was restored byte for byte; restored G18 passed 213/213
+  without errors. `git diff --check` passed.
+- Evidence for this run: `/tmp/codex-prop-a2-6l6zlzvo/` (`results.json`, baseline and
+  A2 gate logs, `mutations.log`, `g47-after-mutations.log`, `review.md`, `pr-body.md`).
+  These paths are disposable; the counts and baseline observations above are durable.
+
+This is a prerequisite API slice. Real physics-body and demo integration verification
+belongs to B1 after A2 merges; the demo submodule is still pinned to `2e5b123`.
+The approved P4 press-loss limit is unchanged. Daniel authorized push and PR creation
+on 2026-10-08; A2 is pushed and PR #33 is open against addon main. This publication
+status update changes docs only; production code remains exactly the verified `664c364`.
+No merge or demo edits yet. Next work is a discussion with Daniel, then B1 after A2 merges.

@@ -14,6 +14,7 @@ import os, subprocess, sys
 GODOT = os.environ.get("GODOT", os.path.expanduser(
     "~/.local/share/godot/app_userdata/Godots/versions/Godot_v4_7-stable_linux_x86_64/Godot_v4.7-stable_linux.x86_64"))
 H = "netcode/prop_authority.gd"
+P = "netcode/prop_controller.gd"
 G18 = "netcode/fixtures/run_prop_authority.gd"
 # name: (file, search, replace, gate, case that must fail)
 MUTS = {
@@ -36,6 +37,23 @@ MUTS = {
  "h13-shared-targets": (H, "\tvar targets := CouchOwnerTargets.new(_world)\n",
     "\tvar targets: CouchOwnerTargets = _props.values()[0][\"targets\"] if not _props.is_empty() else CouchOwnerTargets.new(_world)\n",
     G18, "A7"),
+ # Owner side (CouchPropController, slice A2).
+ "o01-claim-not-extrapolated": (P, "\tvar age := clampf((tick - int(latest[\"tick\"])) * _dt, 0.0, extrapolate_cap_ms / 1000.0)\n", "\tvar age := 0.0\n", G18, "O1"),
+ "o02-extrapolation-uncapped": (P, "0.0, extrapolate_cap_ms / 1000.0)", "0.0, INF)", G18, "O1"),
+ "o03-mine-not-claimable": (P, "(owner == \"\" or owner == _my_id)", "owner == \"\"", G18, "O1"),
+ "o04-backoff-ignored": (P, " and now_ms >= int(rec[\"backoff_ms\"]):", ":", G18, "O1"),
+ "o05-early-grant": (P, "if owner == _my_id and now_ms - int(rec[\"claim_ms\"]) >= int(rtt_ms):", "if owner == _my_id:", G18, "O2"),
+ "o06-unanswered-no-grace": (P, " + _snapshot_ms + claim_grace_ms:", " + _snapshot_ms:", G18, "O2"),
+ "o07-no-taken-back": (P, "elif rec[\"granted\"] and owner == \"\":", "elif false:", G18, "O2"),
+ "o08-settled-no-match": (P, "and Vector2(copy[ch.x], copy[ch.y]).distance_to(rec[\"sample_pos\"]) < release_match", "and true", G18, "O3"),
+ "o09-settled-press-queued": (P, "and int(rec[\"ticks_left\"]) == 0:", "and true:", G18, "O3"),
+ "o10-settled-no-speed": (P, "and Vector2(copy[ch.vx], copy[ch.vy]).length() < settle_speed", "and true", G18, "O3"),
+ "o11-press-one-lump": (P, "rec[\"ticks_left\"] = snapshot_ticks", "rec[\"ticks_left\"] = 1", G18, "O4"),
+ "o12-press-when-not-predicting": (P, "if rec[\"owner\"] != _my_id or not rec[\"predicting\"]:", "if rec[\"owner\"] != _my_id:", G18, "O4"),
+ "o13-release-keeps-queue": (P, "\trec[\"left\"] = Vector3.ZERO\n\trec[\"ticks_left\"] = 0\n", "", G18, "O4"),
+ "o14-report-not-predicted": (P, "if _props[eid][\"predicting\"] and typeof(copies.get(eid))", "if typeof(copies.get(eid))", G18, "O5"),
+ "o15-press-on-predicted": (P, "\t\telif not _props[eid][\"predicting\"] and typeof(presses.get(eid))", "\t\tif typeof(presses.get(eid))", G18, "O5"),
+ "o16-no-release-blend": (P, "\trec[\"blend_ms\"] = now_ms\n", "\trec[\"blend_ms\"] = -1\n", G18, "O6"),
 }
 
 
