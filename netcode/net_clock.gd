@@ -59,8 +59,14 @@
 ## The first lag after a (re-)sync is skipped: it is measured against an estimate
 ## that has not settled (at first sync the RTT is still the default), and the
 ## first interval after it cannot shrink the target on its own. late_snapshots
-## counts arrivals whose lag exceeded the delay in use, in either mode: each is a
-## stretch of extrapolated frames.
+## counts arrivals whose measured lag exceeded the delay in use, in either mode.
+## It does not prove a frame extrapolated: the lag can pass the delay between two
+## render calls.
+##
+## Fixed mode (render_delay_adaptive off) targets render_delay_ticks * 1000 and
+## slews the delay in use toward it like adaptive mode does, so switching the
+## policy live or moving the floor never jumps render time; a clock that starts
+## fixed starts at the floor and stays there.
 ##
 ## Lead and RTT survive a hard re-sync (they describe the link, not the host's
 ## timeline); only reset() forgets them. A tick is never stamped twice within one
@@ -87,11 +93,13 @@ var rate_permille: int = 1000
 var last_margin: int = 0
 ## Ticks dropped by advance() jumps (a gap longer than max_catchup_ticks).
 var skipped_ticks: int = 0
-## Render delay in use, milliticks (render_delay_ticks * 1000 unless adaptive).
+## Render delay in use, milliticks (slews toward render_target_milli).
 var render_delay_milli: int = 0
-## What render_delay_milli slews toward, milliticks.
+## What render_delay_milli slews toward, milliticks (render_delay_ticks * 1000 in
+## fixed mode).
 var render_target_milli: int = 0
-## Snapshots whose arrival lag exceeded render_delay_milli (see RENDER DELAY).
+## Snapshots whose measured arrival lag exceeded render_delay_milli; not proof
+## that a frame extrapolated (see RENDER DELAY).
 var late_snapshots: int = 0
 
 var _policy: CouchNetClockPolicy
@@ -341,8 +349,7 @@ func render_tick_milli(now_ms: int) -> int:
 	var estimate: int = host_tick_estimate_milli(now_ms)
 	if not _policy.render_delay_adaptive:
 		render_target_milli = _policy.render_delay_ticks * 1000
-		render_delay_milli = render_target_milli
-	elif _has_last_estimate and estimate > _last_estimate:
+	if _has_last_estimate and estimate > _last_estimate:
 		var step: int = estimate - _last_estimate
 		if render_delay_milli < render_target_milli:
 			render_delay_milli = mini(render_target_milli,

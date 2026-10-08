@@ -10,11 +10,12 @@
 ## the newest received input tick, echoed in the snapshot body so the client's
 ## RTT sample is not polluted by how long the host buffered the input.
 ## U1/U2 are unit specs of the ticker and the echo. C1-C10 drive the real
-## classes through a simulated network. R1-R7 cover the render delay
-## (CouchNetClock "RENDER DELAY"): R1 fixed mode (C3 also pins it), R2 growth
+## classes through a simulated network. R1-R8 cover the render delay
+## (CouchNetClock "RENDER DELAY"): R1 fixed mode in steady state (C3 also pins
+## it), R8 a live switch from adaptive to fixed that slews instead of jumping, R2 growth
 ## to peak lag + margin, R3 slew rates both ways, R4 the shrink over the last
 ## two intervals and the hysteresis, R5 cap and floor, R6 the snap and the skipped lag on a resync,
-## R1/R2 the late counter, R1-R6 by hand through `_Feed`, R7 through `_Sim`
+## R1/R2 the late counter, R1-R6 and R8 by hand through `_Feed`, R7 through `_Sim`
 ## (fixed 3 ticks extrapolates, adaptive does not). Each mutant in
 ## docs/plans/render-delay-mutations.py names the case that kills it.
 ##
@@ -610,6 +611,7 @@ func _run() -> void:
 	_case_r5()
 	_case_r6()
 	_case_r7()
+	_case_r8()
 	_case_c7()
 
 	print("")
@@ -930,7 +932,7 @@ func _case_c2() -> void:
 func _case_c3() -> void:
 	print("C3: render_tick_milli is monotone across jitter and a 600 ms host stall")
 	var s := _new_sim("C3", 1003)
-	s.policy.render_delay_adaptive = false   # the fixed mode; R1-R7 cover the adaptive one
+	s.policy.render_delay_adaptive = false   # fixed from the start, so the delay starts and stays at the floor (R8 covers a live switch)
 	s.up_jitter = 30
 	s.down_jitter = 30
 	s.host_stall_from = 10_000
@@ -1258,6 +1260,8 @@ func _adaptive_policy(floor_ticks: int) -> CouchNetClockPolicy:
 
 func _case_r1() -> void:
 	print("R1: fixed mode holds render_delay_ticks and still counts late snapshots")
+	# Fixed from construction: the delay starts at the floor, so the slew toward
+	# the fixed target never moves it. R8 covers switching to fixed mid-run.
 	var p := CouchNetClockPolicy.new()
 	p.render_delay_adaptive = false
 	var f := _Feed.new(p)
@@ -1468,6 +1472,45 @@ func _case_r6() -> void:
 	_check(
 		g.clock.render_target_milli > 7000,
 		"R6: the one after it is (target %d)" % g.clock.render_target_milli
+	)
+
+
+func _case_r8() -> void:
+	print("R8: switching adaptive off mid-run slews the delay down to the floor instead of jumping")
+	var p := _adaptive_policy(6)
+	var f := _Feed.new(p)
+	f.run_until(4000)
+	f.hold_next(100)
+	f.run_until(5000)
+	var settled := f.clock.render_delay_milli
+	p.render_delay_adaptive = false   # the clock holds this policy object
+	var from := f.frames.size()
+	f.run_until(12_000)
+	var bad := 0
+	var frozen := 0
+	var reached := -1
+	var left_floor := 0
+	for i in range(from, f.frames.size()):
+		var a: Array = f.frames[i - 1]
+		var b: Array = f.frames[i]
+		var d_est := int(b[2]) - int(a[2])
+		var d_r := int(b[1]) - int(a[1])
+		var d_delay := int(b[3]) - int(a[3])
+		if d_r <= 0:
+			frozen += 1
+		if -d_delay > d_est * p.render_slew_shrink_permille / 1000 + 1 or d_delay > 0 or d_r > d_est + d_est * p.render_slew_shrink_permille / 1000 + 1:
+			bad += 1
+		if reached < 0 and int(b[3]) == 6000:
+			reached = i
+		elif reached >= 0 and (int(b[3]) != 6000 or int(b[4]) != 6000 or int(b[1]) != int(b[2]) - 6000):
+			left_floor += 1
+	_check(
+		settled == 13_000 and bad == 0 and frozen == 0,
+		"R8: from a settled %d, every frame after the switch moves the delay and render time no faster than the shrink slew (%d too fast, %d frozen)" % [settled, bad, frozen]
+	)
+	_check(
+		reached > 0 and left_floor == 0 and f.clock.render_delay_milli == 6000,
+		"R8: the delay reaches 6000 at %d ms and stays there, rendering at estimate - 6000 (%d frames off)" % [int(f.frames[reached][0]) if reached > 0 else -1, left_floor]
 	)
 
 
