@@ -10,7 +10,13 @@
 ## the newest received input tick, echoed in the snapshot body so the client's
 ## RTT sample is not polluted by how long the host buffered the input.
 ## U1/U2 are unit specs of the ticker and the echo. C1-C10 drive the real
-## classes through a simulated network.
+## classes through a simulated network. R1-R7 cover the render delay
+## (CouchNetClock "RENDER DELAY"): R1 fixed mode (C3 also pins it), R2 growth
+## to peak lag + margin, R3 slew rates both ways, R4 the shrink over the last
+## two intervals and the hysteresis, R5 cap and floor, R6 the snap and the skipped lag on a resync,
+## R1/R2 the late counter, R1-R6 by hand through `_Feed`, R7 through `_Sim`
+## (fixed 3 ticks extrapolates, adaptive does not). Each mutant in
+## docs/plans/render-delay-mutations.py names the case that kills it.
 ##
 ## C11/C12/U3/U4/U5 and the C2 pinned-rate and C6 shrink-spacing checks were
 ## added AFTER mutation testing left seven mutants of CouchNetClock green (each
@@ -182,6 +188,8 @@ class _Sim extends RefCounted:
 	var render_last := 0
 	var render_max := -FAR
 	var render_minus_est_last := 0
+	var newest_rx := -1            # highest host_tick delivered to the client this epoch
+	var ahead_post := 0            # post-warmup frames rendering past newest_rx
 	var prev_r_valid := false
 	var prev_r := 0
 
@@ -361,6 +369,7 @@ class _Sim extends RefCounted:
 		var cn := client_now(int(msg["arrive"]))
 		snaps_since_frame += 1
 		var lead_before := clock.lead_ticks
+		newest_rx = maxi(newest_rx, int(msg["host_tick"]))
 		clock.on_snapshot(int(msg["host_tick"]), cn)
 		var e: Dictionary = msg["echo"]
 		if not e.is_empty():
@@ -472,6 +481,8 @@ class _Sim extends RefCounted:
 		render_last = r
 		render_max = maxi(render_max, r)
 		render_minus_est_last = r - est
+		if tc >= warmup_ms and r > newest_rx * 1000:
+			ahead_post += 1
 
 	func _note_stamp(tk: int, gen: int, first_in_batch: bool, tc: int) -> void:
 		stamps_total += 1
@@ -592,6 +603,13 @@ func _run() -> void:
 	_case_c8()
 	_case_c9()
 	_case_c10()
+	_case_r1()
+	_case_r2()
+	_case_r3()
+	_case_r4()
+	_case_r5()
+	_case_r6()
+	_case_r7()
 	_case_c7()
 
 	print("")
@@ -912,6 +930,7 @@ func _case_c2() -> void:
 func _case_c3() -> void:
 	print("C3: render_tick_milli is monotone across jitter and a 600 ms host stall")
 	var s := _new_sim("C3", 1003)
+	s.policy.render_delay_adaptive = false   # the fixed mode; R1-R7 cover the adaptive one
 	s.up_jitter = 30
 	s.down_jitter = 30
 	s.host_stall_from = 10_000
@@ -1168,6 +1187,314 @@ func _case_c7() -> void:
 	_check(
 		total > 5000 and count_mismatch == 0,
 		"C7: skipped_ticks equals the missing ticks observed in every run (%d runs disagree)" % count_mismatch
+	)
+
+
+# --- R: render delay (adaptive jitter buffer) ------------------------------------------------
+
+
+## Drives one CouchNetClock by hand, no network: synced at host tick 100 / local
+## 1000 ms, then a snapshot 3 ticks later every 50 ms and a render frame every
+## 10 ms. Before any echo the RTT is the default 100 ms, so every on-time
+## snapshot lands exactly on the estimate (no error, rate 1000) and its lag is
+## exactly rtt/2 + 3 ticks = 6000 milliticks. hold_next(ms) delivers the next
+## snapshot that much late; the ones due meanwhile follow in a burst, as a
+## real link delivers them.
+class _Feed extends RefCounted:
+	var clock: CouchNetClock
+	var policy: CouchNetClockPolicy
+	var now := 1000
+	var host := 100
+	var due := 1050           # nominal arrival of the next snapshot
+	var held := 0             # extra delay of the next snapshot only
+	var resyncs: Array = []
+	## One row per render frame: [now, render, estimate, render_delay_milli, render_target_milli]
+	var frames: Array = []
+	## One row per snapshot: [now, lag measured just before it, target after it]
+	var arrivals: Array = []
+
+	func _init(p_policy: CouchNetClockPolicy) -> void:
+		policy = p_policy
+		clock = CouchNetClock.new(policy)
+		clock.resynced.connect(_on_resynced)
+		clock.on_snapshot(host, now)
+
+	func _on_resynced(reason: String) -> void:
+		resyncs.append(reason)
+
+	func hold_next(ms: int) -> void:
+		held = ms
+
+	func deliver(host_tick: int) -> void:
+		var lag := clock.host_tick_estimate_milli(now) - host * 1000
+		host = host_tick
+		clock.on_snapshot(host_tick, now)
+		arrivals.append([now, lag, clock.render_target_milli])
+
+	func run_until(end_ms: int) -> void:
+		while now < end_ms:
+			now += 10
+			while now >= due + held:
+				deliver(host + 3)
+				due += 50
+				held = 0
+			var r := clock.render_tick_milli(now)
+			frames.append([now, r, clock.host_tick_estimate_milli(now), clock.render_delay_milli, clock.render_target_milli])
+
+	## Index of the first frame at or after `at`.
+	func frame_at(at: int) -> int:
+		for i in frames.size():
+			if int(frames[i][0]) >= at:
+				return i
+		return frames.size()
+
+
+func _adaptive_policy(floor_ticks: int) -> CouchNetClockPolicy:
+	var p := CouchNetClockPolicy.new()
+	p.render_delay_adaptive = true
+	p.render_delay_ticks = floor_ticks
+	return p
+
+
+func _case_r1() -> void:
+	print("R1: fixed mode holds render_delay_ticks and still counts late snapshots")
+	var p := CouchNetClockPolicy.new()
+	p.render_delay_adaptive = false
+	var f := _Feed.new(p)
+	f.run_until(2000)
+	var late_before := f.clock.late_snapshots
+	var n := f.arrivals.size()
+	f.hold_next(100)
+	f.run_until(2200)
+	var late: Array = f.arrivals[n]   # the held one (the ones due meanwhile follow it)
+	_check(
+		late_before == 0 and int(late[1]) == 12_000 and int(late[2]) == 6000 and f.clock.late_snapshots >= 1,
+		"R1: on-time lags (exactly 6000) are not late; the held one (lag %d) is, and the target stays 6000 (late %d -> %d)" % [int(late[1]), late_before, f.clock.late_snapshots]
+	)
+	var exact := 0
+	for row in f.frames:
+		if int(row[1]) == int(row[2]) - 6000 and int(row[3]) == 6000:
+			exact += 1
+	_check(
+		f.frames.size() > 100 and exact == f.frames.size(),
+		"R1: every frame renders at estimate - 6000 (%d of %d)" % [exact, f.frames.size()]
+	)
+
+
+func _case_r2() -> void:
+	print("R2: the target grows at once to the peak lag plus the margin")
+	var f := _Feed.new(_adaptive_policy(3))
+	f.run_until(3000)
+	var first: Array = f.arrivals[0]
+	_check(
+		int(first[1]) == 6000 and int(f.arrivals[1][2]) == 7000 and int(first[2]) == 3000,
+		"R2: the first lag after the sync is skipped (target %d after it), the second sets 6000 + margin = 7000 (%d)" % [int(first[2]), int(f.arrivals[1][2])]
+	)
+	var late_settled := f.clock.late_snapshots
+	_check(
+		f.clock.render_target_milli == 7000 and f.clock.render_delay_milli == 7000,
+		"R2: on time for 2 s, target and delay sit at 7000 (%d, %d)" % [f.clock.render_target_milli, f.clock.render_delay_milli]
+	)
+	f.run_until(4000)
+	_check(
+		f.clock.late_snapshots == late_settled,
+		"R2: once the delay covers the lag, on-time snapshots are not late (%d -> %d)" % [late_settled, f.clock.late_snapshots]
+	)
+	f.hold_next(100)
+	var n := f.arrivals.size()
+	f.run_until(4160)
+	var held: Array = f.arrivals[n]
+	_check(
+		int(held[1]) == 12_000 and int(held[2]) == 13_000 and f.clock.render_target_milli == 13_000,
+		"R2: a snapshot 100 ms late (lag %d) raises the target to lag + 1000 at once (%d), its burst does not move it (%d)" % [int(held[1]), int(held[2]), f.clock.render_target_milli]
+	)
+	_check(
+		f.clock.late_snapshots > late_settled,
+		"R2: the held snapshot counts as late (%d -> %d)" % [late_settled, f.clock.late_snapshots]
+	)
+	_check(
+		f.clock.render_delay_milli < 13_000,
+		"R2: the delay in use does not jump with the target (%d)" % f.clock.render_delay_milli
+	)
+
+
+func _case_r3() -> void:
+	print("R3: the delay slews: render slows to half speed growing, 5% fast shrinking, never freezes or jumps")
+	var p := _adaptive_policy(3)
+	var f := _Feed.new(p)
+	f.run_until(4000)
+	f.hold_next(100)
+	f.run_until(30_000)
+	var grow_frames := 0
+	var shrink_frames := 0
+	var bad_grow := 0
+	var bad_shrink := 0
+	var frozen := 0
+	var reached := -1
+	var grew_at := -1
+	for i in range(1, f.frames.size()):
+		var a: Array = f.frames[i - 1]
+		var b: Array = f.frames[i]
+		var d_est := int(b[2]) - int(a[2])
+		var d_r := int(b[1]) - int(a[1])
+		var d_delay := int(b[3]) - int(a[3])
+		if int(a[0]) < 4000 or d_est <= 0:
+			continue
+		if d_r <= 0:
+			frozen += 1
+		if d_delay > 0:
+			grow_frames += 1
+			if grew_at < 0:
+				grew_at = int(a[0])
+			if d_delay > d_est * p.render_slew_grow_permille / 1000 or d_r < d_est - d_est * p.render_slew_grow_permille / 1000:
+				bad_grow += 1
+		elif d_delay < 0:
+			shrink_frames += 1
+			if -d_delay > d_est * p.render_slew_shrink_permille / 1000 + 1 or d_r > d_est + d_est * p.render_slew_shrink_permille / 1000 + 1:
+				bad_shrink += 1
+		if reached < 0 and int(b[3]) == 13_000:
+			reached = int(b[0])
+	_check(
+		grow_frames > 10 and bad_grow == 0,
+		"R3: growing, the delay rises by at most 500 permille of the estimate's advance per frame (%d frames, %d too fast)" % [grow_frames, bad_grow]
+	)
+	_check(
+		grew_at > 0 and reached - grew_at >= 180 and reached - grew_at <= 300,
+		"R3: 7000 -> 13000 takes %d ms (6000 / (60 * 0.5) = 200; 180-300 allowed)" % (reached - grew_at)
+	)
+	_check(
+		shrink_frames > 50 and bad_shrink == 0,
+		"R3: shrinking, the delay falls by at most 50 permille of the estimate's advance per frame (%d frames, %d too fast)" % [shrink_frames, bad_shrink]
+	)
+	_check(
+		frozen == 0,
+		"R3: render time advanced on every frame after the growth (%d frozen)" % frozen
+	)
+
+
+func _case_r4() -> void:
+	print("R4: after two quiet intervals the target drops once, to their peak need plus the hysteresis")
+	# Windows close on the first non-growing arrival >= 2000 ms after the last
+	# close: 3000, 5000, 7000, 9000, 11000... The 100 ms hold grows the target to
+	# 13000 at 4150, inside the 3000-5000 window. At 5000 that window's peak
+	# (13000) blocks the drop; at 7000 it is still the previous window; at 9000
+	# both windows peaked at the on-time need, so the target drops in one step to
+	# that need + 1000. After the hold the on-time lag settles at 6030, not 6000:
+	# the offset EWMA truncates to a steady 30-millitick error. So the need is
+	# 7030 and the target 8030. Judging one window alone would drop at 7000.
+	var p := _adaptive_policy(3)
+	var f := _Feed.new(p)
+	f.run_until(4000)
+	var n := f.arrivals.size()
+	f.hold_next(100)
+	f.run_until(4200)
+	var grew_at := int(f.arrivals[n][0])
+	f.run_until(30_000)
+	var drops: Array = []
+	for i in range(1, f.arrivals.size()):
+		var d := int(f.arrivals[i][2]) - int(f.arrivals[i - 1][2])
+		if d < 0 and int(f.arrivals[i][0]) > grew_at:
+			drops.append([int(f.arrivals[i][0]), d])
+	_check(
+		grew_at == 4150 and drops == [[9000, -4970]],
+		"R4: grown at %d (4150), then one drop, of 4970 at 9000 (%s)" % [grew_at, str(drops)]
+	)
+	_check(
+		f.clock.render_target_milli == 8030 and f.clock.render_delay_milli == 8030,
+		"R4: it settles at the on-time need 7030 plus the 1-tick hysteresis = 8030 (%d, delay %d)" % [f.clock.render_target_milli, f.clock.render_delay_milli]
+	)
+
+
+func _case_r5() -> void:
+	print("R5: the target stays between render_delay_ticks and render_delay_max_ticks")
+	var p := _adaptive_policy(3)
+	p.render_delay_max_ticks = 9
+	var f := _Feed.new(p)
+	f.run_until(2000)
+	f.hold_next(100)
+	f.run_until(3000)
+	var peak := 0
+	for row in f.frames:
+		peak = maxi(peak, int(row[4]))
+	_check(
+		peak == 9000 and f.clock.render_delay_milli == 9000 and f.resyncs == ["first-sync"],
+		"R5: a 12000 lag + margin is capped at 9000 (peak target %d, delay %d)" % [peak, f.clock.render_delay_milli]
+	)
+	var g := _Feed.new(_adaptive_policy(9))
+	g.run_until(12_000)
+	var low := FAR
+	for row in g.frames:
+		low = mini(low, int(row[4]))
+	_check(
+		g.arrivals.size() > 200 and low == 9000 and g.clock.render_delay_milli == 9000,
+		"R5: with a floor of 9 ticks above the 7000 need, 10 quiet seconds never take the target below 9000 (lowest %d)" % low
+	)
+
+
+func _case_r6() -> void:
+	print("R6: a hard resync snaps the delay to the target and skips the next lag")
+	var f := _Feed.new(_adaptive_policy(3))
+	f.run_until(4000)
+	f.hold_next(100)
+	f.run_until(4160)
+	var mid := f.clock.render_delay_milli
+	var target := f.clock.render_target_milli
+	var r_before := f.clock.render_tick_milli(f.now)
+	f.clock.on_snapshot(10, f.now)   # far below the last host tick: host-tick-backwards
+	_check(
+		f.resyncs == ["first-sync", "host-tick-backwards"] and mid < target and f.clock.render_delay_milli == target,
+		"R6: mid-slew (%d of %d) the backwards resync snaps the delay to the target (%d)" % [mid, target, f.clock.render_delay_milli]
+	)
+	_check(
+		f.clock.render_tick_milli(f.now) == r_before,
+		"R6: render time holds at its last value across the resync instead of going back"
+	)
+
+	# Steady at 7000, then a resync and a snapshot whose lag would be 12000.
+	var g := _Feed.new(_adaptive_policy(3))
+	g.run_until(4000)
+	g.clock.on_snapshot(10, g.now)
+	g.host = 10
+	var late_before := g.clock.late_snapshots
+	g.now += 150
+	g.deliver(13)
+	_check(
+		g.resyncs == ["first-sync", "host-tick-backwards"] and int(g.arrivals[g.arrivals.size() - 1][1]) == 12_000
+		and g.clock.render_target_milli == 7000 and g.clock.late_snapshots == late_before,
+		"R6: the first snapshot after the resync (lag 12000) is not measured: target %d, late %d -> %d" % [g.clock.render_target_milli, late_before, g.clock.late_snapshots]
+	)
+	g.now += 50
+	g.deliver(16)
+	_check(
+		g.clock.render_target_milli > 7000,
+		"R6: the one after it is (target %d)" % g.clock.render_target_milli
+	)
+
+
+func _case_r7() -> void:
+	print("R7: over a jittery link the adaptive delay stops extrapolation that a fixed 3 ticks cannot")
+	var rows: Array = []
+	for adaptive in [false, true]:
+		var s := _new_sim("R7" + ("a" if adaptive else "f"), 1017)
+		s.policy.render_delay_adaptive = adaptive
+		s.policy.render_delay_ticks = 3
+		s.up_jitter = 30
+		s.down_jitter = 30
+		s.run_until(20_000)
+		rows.append(s)
+	var fixed: _Sim = rows[0]
+	var adapt: _Sim = rows[1]
+	_check(
+		fixed.ahead_post * 100 > fixed.frames_post * 30,
+		"R7: (guard) fixed 3 ticks renders past the newest snapshot on %d of %d frames (> 30%%)" % [fixed.ahead_post, fixed.frames_post]
+	)
+	_check(
+		adapt.frames_post > 800 and adapt.ahead_post * 100 <= adapt.frames_post,
+		"R7: adaptive renders past the newest snapshot on %d of %d frames (<= 1%%)" % [adapt.ahead_post, adapt.frames_post]
+	)
+	_check(
+		adapt.clock.render_delay_milli >= 6000 and adapt.clock.render_delay_milli <= 12_000 and adapt.render_violations == 0,
+		"R7: at a delay of %d milliticks (between 6000 and 12000), render never backwards" % adapt.clock.render_delay_milli
 	)
 
 
