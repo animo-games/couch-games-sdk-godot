@@ -34,6 +34,7 @@ MUTS = {
  "r14-render-uses-target": (C, "var value: int = estimate - render_delay_milli", "var value: int = estimate - render_target_milli", G14, "R3"),
  "r15-never-adapts": (C, "\tif need > render_target_milli:\n\t\trender_target_milli = need\n", "\tif need > render_target_milli:\n\t\tpass\n", G14, "R2"),
  "r16-one-window-decay": (C, "maxi(_prev_peak, _window_peak)", "_window_peak", G14, "R4"),
+ "r17-fixed-switch-jumps": (C, "\t\trender_target_milli = _policy.render_delay_ticks * 1000\n", "\t\trender_target_milli = _policy.render_delay_ticks * 1000\n\t\trender_delay_milli = render_target_milli\n", G14, "R8"),
  "w01-count-only-history": (W, " and int(cur[\"ticks\"][1]) <= ht - history_ticks", "", G15, "W4c"),
  "w02-window-only-history": (W, "cur[\"ticks\"].size() > history_size and ", "cur[\"ticks\"].size() > 1 and ", G15, "W4b"),
 }

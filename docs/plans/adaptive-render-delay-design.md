@@ -35,8 +35,9 @@ snapshot interval, jitter, a lost snapshot and frame phase, with no model of any
 
 - The first lag after any sync (first sync or hard resync) is skipped: at first sync the RTT is
   still the 100 ms default, so the estimate has not settled.
-- `late_snapshots` counts arrivals whose lag exceeded the delay in use, in both modes. Each is a
-  stretch of extrapolated frames. The demo compares fixed against adaptive with it.
+- `late_snapshots` counts arrivals whose measured lag exceeded the delay in use, in both modes.
+  It does not prove a frame extrapolated, since the lag can pass the delay between two render
+  calls. The demo compares fixed against adaptive with it.
 - A repeat of the same host tick would be measured again, but `CouchReplicatedWorld.ingest`
   rejects `ht <= newest_tick()` before the clock sees it.
 
@@ -54,8 +55,10 @@ snapshot interval, jitter, a lost snapshot and frame phase, with no model of any
 - Hard resync: the delay in use snaps to the target. The timeline jumps anyway, and the
   monotone clamp holds render time until it catches up.
 
-**Fixed mode** (`render_delay_adaptive = false`): `render_tick_milli` re-pins target and delay to
-`render_delay_ticks * 1000` on every call, so the floor slider stays a live lever.
+**Fixed mode** (`render_delay_adaptive = false`): the target is `render_delay_ticks * 1000`, and the
+delay in use slews toward it through the same slew as adaptive mode, so a live switch to fixed or
+a floor-slider edit never jumps render time. A clock that starts fixed starts at the floor and
+stays there.
 
 | Policy field | Default | Meaning |
 |---|---|---|
@@ -94,19 +97,20 @@ oldest sample and every entity holds frozen.
 
 ## Gates
 
-G14 (`run_net_clock.gd`) cases R1-R6 drive one clock by hand through `_Feed`. It syncs at host
+G14 (`run_net_clock.gd`) cases R1-R6 and R8 drive one clock by hand through `_Feed`. It syncs at host
 tick 100 at 1000 ms, then delivers a snapshot 3 ticks later every 50 ms and renders every 10 ms.
 Each on-time lag is exactly 6000. R7 runs the network `_Sim`.
 
 | Case | Proves |
 |---|---|
-| R1 | Fixed mode: lag 6000 is not late, a 100 ms hold (12000) is; target stays 6000; every frame at `est - 6000`. C3 also pins fixed mode. |
+| R1 | Fixed mode from the start (steady state): lag 6000 is not late, a 100 ms hold (12000) is; target stays 6000; every frame at `est - 6000`. C3 also pins fixed mode. |
 | R2 | Floor 3: first lag skipped, second sets 7000; a 100 ms hold sets 13000 at once, counts as late, and the delay in use does not jump. |
 | R3 | Per-frame slew bounds both ways; 7000 -> 13000 in 180-300 ms (210); render never freezes. |
 | R4 | Two-window decay: grown at 4150, windows close at 5000/7000/9000, and the only drop is at 9000, by 4970 to 8030 (on-time need 7030 + 1 tick). The 30 is the offset EWMA's steady truncation error after the hold. One-window decay would drop at 7000. |
 | R5 | Cap 9 holds a 13000 need at 9000 with no resync; floor 9 is never undercut in 10 s. |
 | R6 | A backwards resync mid-slew (7591 of 13000) snaps to 13000 and render holds; the first lag after it is skipped, the next is measured. |
 | R7 | 50 +/- 30 ms links: fixed 3 ticks draws past the newest snapshot on 677/1056 frames; adaptive on 0/1056, settling at 8095. |
+| R8 | Live switch: adaptive floor 6 settled at 13000, then fixed. Every frame stays within the shrink slew (no jump, no freeze); the delay reaches 6000 at 7340 ms and stays there at `est - 6000`. |
 
 G15 (`run_replicated_world.gd`):
 
@@ -120,7 +124,7 @@ Results on this branch (Godot 4.7; G14 and G15 also on 4.4):
 
 | Gate | main | branch |
 |---|---|---|
-| G14 net clock | 112/112 | 135/135 |
+| G14 net clock | 112/112 | 137/137 |
 | G15 replicated world | 223/223 | 237/237 |
 | G16 owner authority | 375/375 | 375/375 |
 | G17 impulse compensation | 197/197 | 197/197 |
@@ -130,7 +134,7 @@ Results on this branch (Godot 4.7; G14 and G15 also on 4.4):
 `docs/plans/render-delay-mutations.py <scratch project>` applies each mutant to a plain copy of
 the addon inside a scratch Godot project. It refuses a symlinked addon or one with a `.git`
 entry, restores every file in `finally`, and counts a mutant as KILLED only when a `FAIL:` line of
-the named case appears. 18 mutants, 18 killed, no survivors:
+the named case appears. 19 mutants, 19 killed, no survivors:
 
 | Mutant | Change | Killed by |
 |---|---|---|
@@ -146,6 +150,7 @@ the named case appears. 18 mutants, 18 killed, no survivors:
 | r14 | render from the target, not the delay in use | R3 |
 | r15 | never adapts | R2 |
 | r16 | judge one window, not the last two (D5) | R4 |
+| r17 | fixed mode replaces the delay in use at once (jumps on a live switch) | R8 |
 | w01 / w02 | count-only / window-only history | W4c / W4b |
 
 Not pinned by any case (both survive as mutants, which is acceptable for behaviour this small):
