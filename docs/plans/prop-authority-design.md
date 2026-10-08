@@ -1,6 +1,7 @@
 # Prop authority in the addon (Rev 3 step 3)
 
-Status: DESIGN rev 1, awaiting Daniel's approval (2026-10-08). No code.
+Status: DESIGN rev 1, awaiting Daniel's approval (2026-10-08). No code. P4 DECIDED (Daniel,
+2026-10-08: item 2 dropped for now, API shaped so the fix is additive); P1-P3 and P5-P7 still open.
 
 Summary. The netcode demo's crate ownership (`CrateAuthority` on the host, `CratePrediction` on
 each guest) moves into the addon as two pure `RefCounted` classes: `CouchPropAuthority` (host:
@@ -87,12 +88,12 @@ func add_prop(entity_id: int, kind: int, mass: float, inertia: float) -> bool
 func remove_prop(entity_id: int) -> void
 func owner_of(entity_id: int) -> String
 func is_guest_owned(entity_id: int) -> bool
-func update(entity_id: int, host_near: bool, now_ms: int) -> void
+func update(entity_id: int, host_near: bool, now_ms: int) -> Dictionary   # {eid: Vector3} recovered presses
 func on_input(peer_id: String, body: Dictionary, now_ms: int) -> Dictionary
 func apply_now(entity_id: int, press: Vector3) -> bool   # true = the caller applies the press now
 func target_for(entity_id: int, now_ms: int) -> PackedFloat32Array
 func take_snapshot_extra() -> Dictionary
-func forget(peer_id: String) -> void
+func forget(peer_id: String) -> Dictionary                                # {eid: Vector3} recovered presses
 static func press_of(field: Variant) -> Vector3
 ```
 - **_init**: `world` is read only (kind registry). `host_id` is the host's own peer id; it is the
@@ -108,7 +109,16 @@ static func press_of(field: Variant) -> Vector3
 - **owner_of**: "" = free and host-simulated; `host_id` = the host's player holds it; else the
   guest that owns it. "" for an unknown id.
 - **is_guest_owned**: `owner_of(eid)` is neither "" nor `host_id`.
-- **update** (once per physics tick per prop, before the host's player steps), in this order:
+- **Recovered presses** (item 2, [DECIDE P4]). Every host call through which a release, take-back
+  or forget can happen (`update`, `forget`, `on_input`) returns presses for the game to apply NOW,
+  in one shape: `Dictionary` int eid -> `Vector3`, applied with the same call the game uses for
+  `apply_now` presses. They are "presses recovered at a release; empty until item 2 is built": in
+  slices A-D `update` and `forget` always return `{}`, and `on_input` returns only its routed
+  presses. Slice E fills them without changing any signature. Class docs state the limit until
+  then: presses forwarded within one round trip plus one snapshot interval of a release under
+  press are lost (~280 ms at 250 ms RTT; on every transfer once item 1 lands).
+- **update** (once per physics tick per prop, before the host's player steps; returns recovered
+  presses, `{}` until item 2), in this order:
   1. guest-owned and the owner is stale (`CouchOwnerTargets.is_stale`): take back (`takebacks += 1`,
      owner "", the inner targets forget the peer; slice D also marks the refusal, item 5).
   2. `host_near` (the game's gap < `CLAIM_MARGIN`, not actual contact): note the time; a free
@@ -116,7 +126,8 @@ static func press_of(field: Variant) -> Vector3
   3. else host-held and `now_ms - last host contact >= release_idle_ms`: free. No settle wait.
 - **on_input** (every input the game accepted from a remote player; after the player ring ack and
   `driver.on_input`, as today): returns `{eid: Vector3}`, the presses the game must apply to its
-  bodies NOW. Processing order:
+  bodies NOW: the routed presses of step 3, plus (from slice E only) presses recovered at a
+  release in step 1, summed per eid into the same Dictionary. Processing order:
   1. Releases. Let `claims = body.get("p")`, or `{}` if that is not a Dictionary. Every prop
      owned by `peer_id` whose eid is not a key of `claims` is released (`releases += 1`, owner "",
      the inner targets forget the peer).
@@ -143,6 +154,7 @@ static func press_of(field: Variant) -> Vector3
   for its current owner (`presses_forwarded += 1`). Every sum is then cleared. Free props are left
   out: a missing prop means free.
 - **forget** (player_left): every prop the peer owns is taken back (`takebacks += 1`, owner "").
+  Returns recovered presses, `{}` until item 2.
   Slice D also marks the refusal (item 5).
 - **press_of**: `PackedFloat32Array` of size 3 with finite values -> `Vector3(jx, jy, aj)`; anything
   else -> `Vector3.ZERO`. Used for input presses and, on the owner, snapshot presses.
@@ -241,7 +253,7 @@ props.add_prop(crate.entity_id, CRATE_KIND, Crate.MASS, Crate.INERTIA)
 func _physics_process(_d):
 	var now := Time.get_ticks_msec()
 	for eid in crates:
-		props.update(eid, gap(crates[eid], me.position) < CLAIM_MARGIN, now)
+		apply_all(props.update(eid, gap(crates[eid], me.position) < CLAIM_MARGIN, now))   # {} until item 2
 		crates[eid].set_followed(props.is_guest_owned(eid))   # can_sleep + controller layer (gotchas)
 	me.step(read_input(), DT)
 	var presses := me.take_presses()
@@ -256,12 +268,14 @@ func _physics_process(_d):
 func _on_input(body: Dictionary, sender: String) -> void:
 	# ... ring.ack, driver.on_input (reject -> return), acks, echo, as today
 	var now := Time.get_ticks_msec()
-	var applied := props.on_input(sender, body, now)
-	for eid in applied:
-		apply_press(crates[eid], applied[eid])
+	apply_all(props.on_input(sender, body, now))
 
 func _on_player_left(peer: String, _slot: int) -> void:
-	props.forget(peer)
+	apply_all(props.forget(peer))   # {} until item 2
+
+func apply_all(presses: Dictionary) -> void:   # eid -> Vector3, same call as apply_now presses
+	for eid in presses:
+		apply_press(crates[eid], presses[eid])
 ```
 
 ### Consumer sketch: owner
@@ -495,7 +509,7 @@ of the drawing and into the **report**, where it eases away:
 Gates: G18 C1 (transfer boundaries) and C2 (claim placement, report offset, release offset); demo
 transfer gate and the claim/release jump gate on the drawn (= copy) pose (Verification).
 
-### Item 2: host-acknowledged release (Daniel decides, [DECIDE P4])
+### Item 2: host-acknowledged release (DECIDED, Daniel 2026-10-08, [DECIDE P4])
 
 What is lost today: when an owner releases, presses the host forwarded in snapshots that reach the
 owner after it released are dropped (it no longer simulates), and the host only stops forwarding
@@ -506,14 +520,17 @@ of presses, felt as the prop easing off for a moment. With item 1 this happens o
 under press, not only on rare releases. Presses are already loss-tolerant (inputs are
 latest-wins; the lobby run drops 2%), and the presser keeps pressing.
 
-Recommendation: drop, with the bound stated in the class docs ("presses forwarded within one round
-trip plus one snapshot interval of a release are lost"), and look for the ease-off in the 250 ms
-clip after slice C. Doing it would cost (slice E, addon + demo, ~90 non-test lines):
+Decision (Daniel, 2026-10-08): dropped for now. The limit is stated in the class docs ("presses
+forwarded within one round trip plus one snapshot interval of a release under press are lost";
+~280 ms at 250 ms RTT, on every transfer with item 1). The API is shaped so the fix is additive:
+`update`, `forget` and `on_input` already return recovered presses (empty until then; see the
+contract). The 250 ms clip after slice C decides whether slice E is built. Slice E would cost
+(addon + demo, ~90 non-test lines):
 - owner: in the releasing input, send the undrained queue as its own `"pr"` press (no wire change);
 - a new input field (e.g. `"sa"`: newest snapshot host tick ingested) on every input;
 - host: a per-prop history of forwarded sums by snapshot tick; on release, return the sums newer
   than the owner's `"sa"` from `on_input`; on take-back or forget, newer than the last accepted
-  `"sa"` (so `update` and `forget` would also return presses to apply, an API change);
+  `"sa"`, from `update` and `forget` (the return values already exist);
 - G18 conservation cases and a demo press-conservation gate, which the lobby's 2% input loss makes
   noisy.
 
@@ -556,7 +573,7 @@ judged host->guest press episode.
 | D' | demo | Submodule bump to D, batch only | ~2 | B2, D merged |
 | C | addon | Transfer on press + decaying offset (items 1, 3) + G18 C1/C2 + mutants | ~90 | D |
 | C' | demo | Transfer sub-phase, transfer gate, claim/release jumps on the drawn pose, clip | ~120 | C merged, D' |
-| E | both | Item 2, only if Daniel picks it | ~90 | C' |
+| E | both | Item 2, only if the 250 ms clip after C' calls for it (additive: fills the recovered-press returns) | ~90 | C' |
 
 - Addon PRs stack (A1 -> A2, then D, then C), merged with merge commits. Demo PRs stack the same way
   and pin the submodule to the addon's `main` merge commit before merging (as 4af9e66 did); while
@@ -588,6 +605,9 @@ Cases (slice that adds them):
   `release_idle_ms` (299 ms holds, 300 frees) with no settle wait; stale check runs before the hold.
 - **A4 releases** (A1): an input without `"p"`, with `"p"` not a Dictionary, and with `"p"` lacking
   one of two owned eids, each releasing exactly the right props.
+- **A0 recovered presses** (A1): one check each that `update` and `forget` return an empty
+  Dictionary, including on the calls that release or take back, and that `on_input`'s return
+  holds only routed presses (no recovered press) on an input that releases a prop.
 - **A5 take-back** (A1): stale at `stale_ms` boundary -> free on `update`; `forget` frees every
   prop of the peer and only those; `target_for` empty afterwards.
 - **A6 presses** (A1): `apply_now` true for free / host-held, false for guest-held; the sum
@@ -825,8 +845,12 @@ the full claim offset; G18 C2 gates it.
    The demo has one crate.
 2. One prop per peer. Simpler, but a player pushing two crates side by side breaks the rule.
 
-### [DECIDE P4] Item 2, host-acknowledged release
-1. **Drop** (recommended): document the bound (one round trip plus one snapshot interval of
+### [DECIDE P4] Item 2, host-acknowledged release: DECIDED (Daniel, 2026-10-08)
+Ruling: a new option 3, **drop for now, but shape the API so a later fix is additive**. `update`,
+`forget` and `on_input` return recovered presses (`{eid: Vector3}`, empty in slices A-D); the
+limit is in the class docs; the 250 ms clip after slice C decides whether slice E is built.
+Options as presented, for the record:
+1. Drop (was recommended): document the bound (one round trip plus one snapshot interval of
    presses at a release under press; ~280 ms at 250 ms RTT, now on every transfer), and judge it
    in the clip.
 2. Do it as slice E (~90 lines, a new input field, an API change to `update` / `forget`, a noisy
