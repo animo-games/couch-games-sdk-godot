@@ -1,7 +1,8 @@
 # Prop authority in the addon (Rev 3 step 3)
 
-Status: DESIGN rev 1, awaiting Daniel's approval (2026-10-08). No code. P4 DECIDED (Daniel,
-2026-10-08: item 2 dropped for now, API shaped so the fix is additive); P1-P3 and P5-P7 still open.
+Status: DESIGN rev 1 APPROVED (Daniel, 2026-10-08). No code yet. All decisions taken: P1-P3 and
+P5-P7 as recommended; P4 dropped for now with the API shaped so the fix is additive. The API
+contract below is frozen. Next: this doc lands as its own docs PR, then slice A1.
 
 Summary. The netcode demo's crate ownership (`CrateAuthority` on the host, `CratePrediction` on
 each guest) moves into the addon as two pure `RefCounted` classes: `CouchPropAuthority` (host:
@@ -13,7 +14,7 @@ is near a prop, and computes presses from contacts. The addon returns decisions 
 "apply this press now", "follow this target") and never touches a body. The first addon slices are
 behaviour-identical to the demo; the demo then becomes a thin consumer, and open items 1, 3, 4, 5
 and 6 from Rev 3 step 2 land as their own small PRs, each with a gate. Item 2 (host-acknowledged
-release) is a decision for Daniel, recommended dropped. This doc lands on its own as a docs PR
+release) is dropped for now ([DECIDE P4]). This doc lands on its own as a docs PR
 before any code.
 
 ## Problem and goal
@@ -819,7 +820,9 @@ the full claim offset; G18 C2 gates it.
 
 ## Decisions for Daniel
 
-### [DECIDE P1] API shape
+### [DECIDE P1] API shape: DECIDED (Daniel, 2026-10-08)
+Ruling: option 1, as recommended.
+
 1. **Two new classes, `CouchPropAuthority` (host) and `CouchPropController` (owner), each holding
    N props by entity id, one hidden `CouchOwnerTargets` per prop** (recommended). The step 1
    contract and G16/G17's ~570 checks stay untouched; a prop's lifecycle (claim, grant, hold,
@@ -829,7 +832,9 @@ the full claim offset; G18 C2 gates it.
    contract keyed by peer, for no gain the wrapper does not already give.
 3. A Node helper that also drives the bodies. Banned in `netcode/`, not testable headless, 2D only.
 
-### [DECIDE P2] Wire format
+### [DECIDE P2] Wire format: DECIDED (Daniel, 2026-10-08)
+Ruling: option 1, as recommended.
+
 1. **Input `"p"` and `"pr"` as Dictionaries keyed by entity id; snapshot extra under one key
    `"pp"`: `{eid: {"ow": owner, "pr": press}}`, free props absent** (recommended). Reports reuse
    `note_input`; three floats per press; no change to `pack()` or per-peer sections.
@@ -838,7 +843,9 @@ the full claim offset; G18 C2 gates it.
 3. Longer, namespaced keys (`"prop_claims"`, ...). Safer against game key clashes, a few bytes more
    per input. Reasonable if Daniel prefers explicit names; the reservation note covers the short ones.
 
-### [DECIDE P3] Several props per peer
+### [DECIDE P3] Several props per peer: DECIDED (Daniel, 2026-10-08)
+Ruling: option 1, as recommended.
+
 1. **Yes, no cap, keyed by eid from day one** (recommended). The press loop and the wire are per
    prop anyway. Unresolved and untested: two props held by DIFFERENT peers pushing each other (each
    owner's copy meets the other's static puppet and is blocked by it, but neither feels the other).
@@ -856,14 +863,18 @@ Options as presented, for the record:
 2. Do it as slice E (~90 lines, a new input field, an API change to `update` / `forget`, a noisy
    conservation gate; see Item 2).
 
-### [DECIDE P5] Slicing order
+### [DECIDE P5] Slicing order: DECIDED (Daniel, 2026-10-08)
+Ruling: option 1, as recommended.
+
 1. **0 -> A1 -> A2 -> B1 -> B2 -> D -> D' -> C -> C' (-> E)** (recommended). Port first with no
    behaviour change, so B1's batch proves the move; then coverage, so later changes are measured on
    every press path; D before C because a take-back re-grant jumps the crate and would muddy C's
    claim-jump gate.
 2. C before B2 / D: the feel improvements sooner, measured with weaker coverage.
 
-### [DECIDE P6] Where the claim jump goes
+### [DECIDE P6] Where the claim jump goes: DECIDED (Daniel, 2026-10-08)
+Ruling: option 1, as recommended.
+
 1. **Keep copy = drawn = solid; claim at the drawn puppet pose with the "now" velocity and put the
    difference into the report, decaying** (recommended, item 3). The Rev 3 rule holds on the
    claimer's screen at every frame, the penetration gate is unchanged, and the host's crate never
@@ -878,7 +889,9 @@ Options as presented, for the record:
    is yanked back by the render delay for everyone else.
 4. Keep the jump (today, up to ~40 px).
 
-### [DECIDE P7] Transfer threshold (item 1)
+### [DECIDE P7] Transfer threshold (item 1): DECIDED (Daniel, 2026-10-08)
+Ruling: option 1, as recommended.
+
 1. **Owner idle for 300 ms AND someone else pressing continuously for 300 ms** (recommended; reuses
    `release_idle_ms`). Two players pushing together never trade the prop.
 2. Transfer on the first press while idle. Faster, but a brush against an idle-held prop moves its
