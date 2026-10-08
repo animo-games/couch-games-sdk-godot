@@ -592,6 +592,32 @@ func _ui() -> void:
 	panel.get("_confirmation").canceled.emit()
 	panel.get("_confirmation").hide()
 	check(sdk.lobby.lobby_id == active_id, "canceling invitation retains current membership")
+	var replacement_provider := Bridge.new()
+	replacement_provider.user_id = "76561198000000031"
+	replacement_provider.hub = provider.hub
+	var replacement_host := _backend(replacement_provider)
+	replacement_host.game_id = backend.game_id
+	await replacement_host.initialize()
+	check((await replacement_host.lobby_host({})).success, "replacement invitation host enters")
+	provider.hub.lobbies[active_id].members.clear()
+	provider.notify_roster(active_id)
+	check(sdk.lobby.state == "failed" and sdk.lobby.lobby_id.is_empty()
+		and sdk.lobby.get_players().is_empty(), "lost lobby clears membership while retaining failed state")
+	provider.join_requested.emit(replacement_host.lobby_id)
+	check(panel.get("_confirmation").visible and provider.requests.is_empty(),
+		"active match still requires confirmation after lobby failure")
+	panel.get("_confirmation").canceled.emit()
+	panel.get("_confirmation").hide()
+	panel.match_active = false
+	provider.hold_membership = true
+	provider.join_requested.emit(replacement_host.lobby_id)
+	check(not panel.get("_confirmation").visible and sdk.lobby.state == "joining"
+		and provider.requests.size() == 1,
+		"invitation after cleared failed lobby enters without stale-session confirmation")
+	provider.complete_next()
+	await process_frame
+	check(sdk.lobby.state == "joined" and sdk.lobby.lobby_id == replacement_host.lobby_id,
+		"replacement invitation completes entry through reusable panel")
 	provider.online = false
 	provider.connection_changed.emit(false)
 	check(sdk.initialization_state == "degraded" and sdk.supports("achievements") and not sdk.supports("lobby_events"), "later networking failure degrades only networking capability")

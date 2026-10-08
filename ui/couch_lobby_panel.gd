@@ -102,7 +102,7 @@ func _on_join_requested(id: String) -> void:
 		return
 	if sdk.lobby.lobby_id == id: return
 	_pending_invite = id
-	if match_active or sdk.lobby.state != "idle":
+	if match_active or sdk.lobby.state not in ["idle", "failed"]:
 		_confirmation.popup_centered()
 	else:
 		_accept_switch()
