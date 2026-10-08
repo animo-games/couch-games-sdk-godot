@@ -365,3 +365,21 @@ result and its scope. Remaining live gates need another authorized account on a
 separate machine and a published achievement API name for read/store tests.
 Steam invitation and peer/session recovery tests, live Windows execution and
 packaged live runs remain open.
+
+
+For interactive two-computer setup, run
+`python fixtures/steam/run.py --app-id 5310050 --visibility public` from the SDK
+feature branch on each computer. The launcher downloads just the pinned native
+engine and extension, stages/imports an isolated fixture, prints its log path and
+opens the lobby controls. It needs Python 3.11+ and Steam signed into distinct
+accounts with access to the supplied app. On Linux, use `python3` if needed.
+
+The fixture's public two-slot mode is explicit so a pasted ID can be used for
+entry. Its default remains private; private entry requires an invitation under
+[Steam's visibility rules](https://partner.steamgames.com/doc/api/ISteamMatchmaking#ELobbyType).
+The shared SDK panel and production private default are unchanged. Actual Linux
+launcher probe and headless UI host-control create/leave checks passed in both
+private/public modes; these remain single-account checks. Rendered window startup
+was also exercised on Linux. The Windows launcher itself has not been executed
+locally; existing Windows CI verifies its shared dependency-acquisition and
+native package prerequisites. Neither claim replaces the two-account live matrix.

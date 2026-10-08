@@ -1,5 +1,10 @@
 ## Minimal interactive live fixture. No fake results are reported as Steam proof.
 extends Node
+class FixtureLobbyPanel extends CouchLobbyPanel:
+	var visibility := "private"
+	func _on_host() -> void:
+		_show_response(await sdk.lobby.host({"visibility":visibility, "max_players":2}))
+
 var sdk: Node
 var session: CouchSession
 var transport: Object
@@ -7,9 +12,15 @@ var _revision := 0
 func _ready() -> void:
 	var app_id := 0
 	var api_name := ""
+	var visibility := "private"
 	for arg in OS.get_cmdline_user_args():
 		if arg.begins_with("--app-id="): app_id = int(arg.trim_prefix("--app-id="))
 		if arg.begins_with("--achievement="): api_name = arg.trim_prefix("--achievement=")
+		if arg.begins_with("--visibility="): visibility = arg.trim_prefix("--visibility=")
+	if visibility not in ["private", "friends", "public"]:
+		printerr("FAIL: unknown fixture lobby visibility")
+		get_tree().quit(1)
+		return
 	ProjectSettings.set_setting("couch_games/backend", "steam")
 	ProjectSettings.set_setting("couch_games/steam/app_id", app_id)
 	ProjectSettings.set_setting("couch_games/steam/game_id", "couch-sdk-steam-fixture")
@@ -17,9 +28,10 @@ func _ready() -> void:
 		ProjectSettings.set_setting("couch_games/achievements/catalog", {"fixture_award": api_name})
 	sdk = load("res://addons/couch-games-sdk/core/couch_games_sdk.gd").new()
 	add_child(sdk)
-	var panel := CouchLobbyPanel.new()
+	var panel := FixtureLobbyPanel.new()
 	panel.sdk = sdk
-	panel.title = "Steam SDK acceptance fixture"
+	panel.visibility = visibility
+	panel.title = "Steam SDK acceptance fixture (%s lobby)" % visibility
 	add_child(panel)
 	panel.start_game_requested.connect(_start_session)
 	sdk.lobby.players_changed.connect(func(_players):
