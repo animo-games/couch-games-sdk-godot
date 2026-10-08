@@ -35,6 +35,7 @@ func _run() -> void:
 	_selection()
 	await _initialization()
 	await _membership_events()
+	await _fixture_start_order()
 	await _lifecycle_validation()
 	await _achievements()
 	await _hardening_regressions()
@@ -253,6 +254,100 @@ func _membership_events() -> void:
 	host.shutdown()
 	host.shutdown()
 	check(provider.shutdown_calls == 1, "Steam teardown idempotent")
+func _fixture_start_order() -> void:
+	for guest_first in [false, true]:
+		var provider := Bridge.new()
+		var host := _backend(provider)
+		await host.initialize()
+		var response: Dictionary = await host.lobby_host({})
+		check(response.success, "fixture startup host lobby created")
+		var guest_provider := Bridge.new()
+		guest_provider.user_id = "76561198000000002"
+		guest_provider.hub = provider.hub
+		var guest := _backend(guest_provider)
+		await guest.initialize()
+		response = await guest.lobby_join(host.lobby_id)
+		check(response.success, "fixture startup guest joined")
+		var host_lobby := CouchLobby.new()
+		host_lobby.setup(host)
+		host_lobby.refresh_players()
+		var guest_lobby := CouchLobby.new()
+		guest_lobby.setup(guest)
+		guest_lobby.refresh_players()
+		# The driver only needs sdk.lobby; do not run its live-Steam _ready.
+		var host_sdk := SDK.new()
+		var guest_sdk := SDK.new()
+		host_sdk.lobby = host_lobby
+		guest_sdk.lobby = guest_lobby
+		var host_driver := _LiveFixture.new()
+		var guest_driver := _LiveFixture.new()
+		host_driver.sdk = host_sdk
+		guest_driver.sdk = guest_sdk
+		host_driver._revision = 42
+		var snapshots := []
+		if guest_first:
+			guest_driver._start_session()
+			guest_driver.session.snapshot_received.connect(func(body): snapshots.append(body))
+			# Deliver several retries before the host installs its transport.
+			for step in range(3):
+				guest_driver.session.poll(Time.get_ticks_msec() + step * 600)
+				host.poll(Time.get_ticks_msec())
+			host_driver._start_session()
+		else:
+			host_driver._start_session()
+			# A host's initial messages may reach an unstarted guest.
+			guest.poll(Time.get_ticks_msec())
+			guest_driver._start_session()
+			guest_driver.session.snapshot_received.connect(func(body): snapshots.append(body))
+		for step in range(6):
+			host.poll(Time.get_ticks_msec())
+			guest.poll(Time.get_ticks_msec())
+			host_driver._process(0.0)
+			guest_driver._process(0.0)
+		check(guest_driver.session.active and guest_driver.session.local_slot == 1,
+			"fixture guest session starts with guest_first=%s" % guest_first)
+		check(not snapshots.is_empty() and snapshots.back() == {"fixture": true, "revision": 42},
+			"fixture applies authoritative baseline with guest_first=%s" % guest_first)
+		# Reuse both session objects across host leave and a new lobby.
+		host_lobby.players_changed.connect(func(_players):
+			host_driver.session.evaluate(Time.get_ticks_msec()))
+		guest_lobby.players_changed.connect(func(_players):
+			guest_driver.session.evaluate(Time.get_ticks_msec()))
+		var old_epoch := guest_driver.session.epoch
+		var snapshots_before := snapshots.size()
+		var previous_lobby_id: String = host.lobby_id
+		host.lobby_leave()
+		guest_provider.notify_roster(previous_lobby_id)
+		check(not guest_driver.session.active, "fixture guest stops on host leave")
+		response = await host.lobby_host({})
+		check(response.success, "fixture host creates replacement lobby")
+		response = await guest.lobby_join(host.lobby_id)
+		check(response.success, "fixture guest rejoins replacement lobby")
+		# The initial roster arrived while joining; early host packets are
+		# delivered while the old guest session is still stopped.
+		guest.poll(Time.get_ticks_msec())
+		guest_driver._start_session()
+		host_driver._start_session()
+		for step in range(6):
+			host.poll(Time.get_ticks_msec())
+			guest.poll(Time.get_ticks_msec())
+			host_driver._process(0.0)
+			guest_driver._process(0.0)
+		check(guest_driver.session.active and guest_driver.session.epoch != old_epoch,
+			"fixture Start resumes stopped guest into a fresh epoch")
+		check(snapshots.size() > snapshots_before and snapshots.back().revision == 42,
+			"fixture applies fresh baseline after leave and rejoin")
+		host_driver.transport.close()
+		guest_driver.transport.close()
+		host_driver.free()
+		guest_driver.free()
+		host_sdk.free()
+		guest_sdk.free()
+		host_lobby.free()
+		guest_lobby.free()
+		host.lobby_leave()
+		guest.lobby_leave()
+
 func _award_call(awards: Node, key: String, job: Dictionary) -> void:
 	job.result = await awards.unlock(key)
 	job.done = true

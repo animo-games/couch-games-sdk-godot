@@ -85,6 +85,7 @@ func _start_session() -> void:
 		_log("SESSION NOT STARTED: join a lobby first")
 		return
 	if session != null:
+		session.evaluate(Time.get_ticks_msec())
 		_log("SESSION STATE: active=%s slot=%s" % [session.active, session.local_slot])
 		return
 	transport = CouchLobbyTransport.new(sdk.lobby)
@@ -92,7 +93,10 @@ func _start_session() -> void:
 	session.hello_received.connect(_send_baseline)
 	session.snapshot_received.connect(func(body): _log("BASELINE %s" % str(body)))
 	session.session_started.connect(func(epoch, host, slot, _peer, _name):
-		_log("SESSION STARTED: host=%s slot=%s epoch=%s" % [host, slot, epoch]))
+		_log("SESSION STARTED: host=%s slot=%s epoch=%s" % [host, slot, epoch])
+		# A guest that started first can stop retrying after the initial host
+		# hello, so publish a baseline when the host starts as well.
+		if host: _send_baseline(""))
 	session.session_stopped.connect(func(reason): _log("SESSION STOPPED %s" % reason))
 	session.rejected.connect(func(reason, sender): _log("SESSION REJECTED %s FROM %s" % [reason, sender]))
 	_log("SESSION CREATED: waiting for peer handshake and baseline")
