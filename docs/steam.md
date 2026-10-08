@@ -25,9 +25,11 @@ and exposes the expected methods and callback signatures. The SDK also parses
 and passes its deterministic contracts with **no Steam extension installed**.
 Linux, Windows and Web package builds/inspections and Linux/Chromium smoke
 runs are now verified without an App ID; see the reproducible checks below.
-Native Windows execution, live Steam initialization, cross-machine messages,
-invitations, and achievement storage remain **unverified release gates**. No game App ID or authorized live test accounts
-are available. Fake results must not be recorded as live acceptance.
+Native Windows execution passed in remote CI. Real Steam initialization and
+single-account private lobby creation/leave passed on Linux for supplied App ID
+`5310050` on October 8, 2026. Cross-machine messages, invitations, achievement
+storage and live native Windows Steam tests remain **unverified release gates**.
+Fake results must not be recorded as live acceptance.
 
 Primary references used for the spike:
 
@@ -339,3 +341,27 @@ hosts. The successful native Windows job exercises that fix directly.
 Job/step conclusions, including intentional Linux-only browser steps, are saved
 in [the remote verification report](steam-ci-verification.json). The original
 [local report](steam-verification.json) remains a historical snapshot.
+
+
+## Live single-account Linux verification (October 8, 2026)
+
+Using supplied App ID `5310050`, the actual pinned native bridge connected to the
+signed-in Steam account. The SDK reached `steam / ready`, Steam reported the
+requested app identity and a logged-on account, and private lobby creation/entry
+resolved successfully with one local host. Leaving cleared membership, lobby ID
+and roster; SDK teardown released the backend and bridge. The probe reported
+zero failures. This is a source fixture run on Linux x86_64 with the pinned
+Godot/GodotSteam/Steamworks combination, not packaged or two-account acceptance.
+
+Reproduce with the [SDK acceptance fixture](../fixtures/steam/README.md) and its
+`probe.gd -- --app-id=5310050` command. The probe neither sends invitations or
+peer messages nor awards achievements. Missing App ID and absent-extension
+negative runs fail visibly. Staging loads the extension before editor import and
+isolates fixture data in its disposable directory. The App ID is supplied at
+runtime; SDK defaults and consumer projects are unchanged.
+
+[Live verification record](steam-live-verification.json) preserves the observed
+result and its scope. Remaining live gates need another authorized account on a
+separate machine and a published achievement API name for read/store tests.
+Steam invitation and peer/session recovery tests, live Windows execution and
+packaged live runs remain open.
