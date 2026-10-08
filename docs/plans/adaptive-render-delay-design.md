@@ -4,7 +4,7 @@ Repo: /home/daniel/Repositories/couch-games-sdk-godot, branch `feat/adaptive-ren
 main eafd993. Roadmap: `docs/plans/realtime-netcode-roadmap.md` (the render delay left as later
 work in `replicated-world-0d-design.md`). Demo consumer: couch-netcode-demo, its own PR after
 this one merges.
-STATUS: BUILT, PR pending. D1-D6 decided by Daniel 2026-10-08.
+STATUS: BUILT and converged, PRs pending (2026-10-08). Addon feat/adaptive-render-delay 0f6b9fa (9424a61 + review fixes 61f7102, 0f6b9fa); demo adaptive-render-delay fe0fa94 + 70d16c2 (stacked on demo PR #1). D1-D6 decided by Daniel 2026-10-08; D6 (grow slew feel) awaits Daniel's look at ~/Videos/rtt250-adaptive1.mp4 and the F3 floor slider before merge.
 
 ## Decisions
 
@@ -12,7 +12,7 @@ STATUS: BUILT, PR pending. D1-D6 decided by Daniel 2026-10-08.
 |---|---|---|
 | D1 | `render_delay_adaptive` defaults to ON | A fixed 6 ticks extrapolates on ~100% of frames above ~50 ms one-way; every gate passes either way. |
 | D2 | The floor stays `render_delay_ticks = 6` | The floor never binds at 40 or 117 ms; 3 cost late snapshots at join and makes adaptive-off games extrapolate ~65%. |
-| D3 | The demo gates the cost relative to RTT, not "<= 6 ticks at 40/15" | The data refutes 6 ticks at 40/15 (lobby 8.2-8.3); mean <= RTT/2 + one snapshot interval + 4 ticks holds everywhere. Demo-side. |
+| D3 | The demo gates the cost relative to RTT, not "<= 6 ticks at 40/15" | The data refutes 6 ticks at 40/15 (lobby 8.2-8.3); mean <= RTT/2 + one snapshot interval + slack holds everywhere (slack 6 ticks after the plan check: 4 left 0.8 tick of headroom on lobby at 117/15). Demo-side. |
 | D4 | Add `history_ticks = 34` next to `history_size` | Additive: no API break, and independent of the snapshot interval. |
 | D5 | Decay over the last two quiet windows, in one step | One tick per 2 s left a 300 ms hitch on screen for 25 s; one step after two quiet windows still covers a spike that recurs within a window. |
 | D6 | Grow slew 500 permille | Half-speed playback while growing; never freezes. Untested for feel at runtime: try it with the demo's F3 slider. |
@@ -198,6 +198,27 @@ to 8 ticks. Under D5 the target drops in one step 4-6 s after the hitch (two qui
 then the delay slews down at 5% fast (12 ticks in ~4 s). A network hold longer than ~133 ms
 trips the existing error-over-threshold resync instead, which skips the lag, so it inflates
 nothing.
+
+## Evidence (final tree, demo batches b18/b250, 2026-10-08)
+
+18 runs per transport at 40/15 and 9 at 117/15, demo 70d16c2 on addon 0f6b9fa.
+
+| | 40/15 star | 40/15 lobby | 117/15 star | 117/15 lobby |
+|---|---|---|---|---|
+| Result | 18/18 PASS | 18/18 PASS | error p50/p95 only (tuned for 40/15) | error p50/p95 only |
+| Mean effective delay | 6.3 ticks, 106 ms | 8.5 ticks, 141 ms | 11.2 ticks, 187 ms | 13.0 ticks, 217 ms |
+| Frames past the newest snapshot | 0 / 85k | 0 / 88k | 0 / 42k | 0 / 44k |
+| Late snapshots per guest | 0.0 | 0.8 | 0.0 | 2.1 |
+| Puppet jump beyond its velocity, max | 1.8 px | 1.9 px | 1.4 px | 1.5 px |
+| Own penetration max | 0.0 | 2.0 (bound 2.0) | 0.0 | 0.0 |
+
+Fixed 6 ticks at 117/15 for comparison (mutant run): past the newest on 2439/2440 frames, ~566
+late snapshots per guest, puppet jumps 16-25 px, the crate drawn 287-320 px into a wall; and the
+Rev 3 batch had 2/9 lobby runs fail own penetration for one frame. Reviews: Sol x2 on the addon
+(live switch to fixed mode jumped -> fixed mode slews too; comment fixes; writable diagnostics
+declined as consistent with the clock's existing public vars), Sol x2 on the demo (blend frames,
+wall contact vs depth, press-bound maximum, vacuity; remaining nit: the 1% check can miss the one
+frame sampled on the warm-up boundary).
 
 ## Known issues (outside this change)
 
