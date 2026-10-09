@@ -983,3 +983,40 @@ game-specific logic.
   D1's re-add check covers the behaviour.
 - Demo: unchanged. The demo submodule stays pinned to `07829c8`. D' is folded into C', as
   Daniel decided on 2026-10-09; C' includes D and its batch covers both.
+
+## C verification milestone (2026-10-09)
+
+Slice C (items 1 and 3) is implemented in `netcode/prop_controller.gd` on
+`feat/prop-authority-transfer`, based on addon main `f212c65` (D merged, PR #34). The production
+diff is +109 / -18 lines including comments, against the ~90 estimated above; it stays inside the
+400-line budget.
+
+- Transfer (item 1, P7): a HELD owner releases "transfer" when not near, idle for
+  `release_idle_ms`, and a press run has lasted `release_idle_ms` and is still live (newest press at
+  most `transfer_gap_ms` old). Runs reset on CLAIM and RELEASE. Counted in `transfers`, not
+  `denials`, no backoff.
+- Claim offset (item 3): CLAIM places the copy at the last drawn pose with the "now" velocity; the
+  gap rides in the report as `claim_off * k`, `k` from 1 closing by `min(k / tau, max_speed /
+  |off|)` per tick (tau 100 ms, max 150 units/s).
+- Release offset (item 3): the old 100 ms lerp is replaced by the same decay, applied per render
+  frame to `sample + off * k`. `is_blending` is true from RELEASE until the frame that draws `k = 0`.
+- Review (Codex adversarial, fresh context, read-only): **needs-attention, one medium finding.**
+  A re-claim before the next render left `rel_pending` set, so `is_blending` stayed true after the
+  copy took over. Fixed in the same branch: CLAIM clears `rel_pending`. G18 gained a check for a
+  re-claim before any render, and mutant c09 restores the bug.
+- G18 on Godot 4.4 and 4.7 in fresh scratch projects with a plain addon copy: **233/233 on each**,
+  no FAIL, SCRIPT ERROR or Parse Error lines.
+- Existing cases changed on purpose, not to pass: O6 asserts the decaying release offset instead
+  of the 100 ms lerp; E1 expects the g2 press run to end in a **transfer** (the rule fires once
+  the run has lasted 300 ms; the old run waited for the presses to stop), and bounds the press loss
+  to the in-flight window: 16 of 160 sent presses (2 of 20 poke ticks) never reached the owner's
+  copy before the transfer. That is the recovered-press limit in the design (item 2 is still dropped).
+- Full Godot 4.7 mutation pass after the fix: **42/42 killed by their named cases** (33 earlier
+  plus c01-c09 and o16 re-pointed). No survivors.
+- **Open discrepancy, for Daniel:** the design says a release gap under 15 px "fades about as fast
+  as before" as the 100 ms lerp. The frozen formula is exponential (`k / tau`) below the speed cap, so
+  a 10 px release has about a quarter of its offset left at 100 ms and reaches 0 near 0.7 s. The
+  code follows the formula as decided. If small releases should match the old 100 ms feel, tau or
+  the rule needs changing, and that is a decision, not a fix.
+- Demo: unchanged. C' (demo transfer and claim/release gates on the drawn pose) comes next, with
+  the batch covering D. Not started.
