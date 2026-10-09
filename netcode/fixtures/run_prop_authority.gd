@@ -693,7 +693,8 @@ func _case_o1() -> void:
 	_check(CouchPropController.NONE == 0 and CouchPropController.CLAIM == 1 and CouchPropController.RELEASE == 2,
 			"O1: action constants NONE 0, CLAIM 1, RELEASE 2")
 	_check(c.release_idle_ms == 300 and is_equal_approx(c.settle_speed, 10.0) and is_equal_approx(c.release_match, 1.0)
-			and c.blend_ms == 100 and c.extrapolate_cap_ms == 250 and c.claim_grace_ms == 150 and c.claims == 0
+			and c.transfer_gap_ms == 100 and c.offset_tau_ms == 100 and is_equal_approx(c.offset_max_speed, 150.0)
+				and c.extrapolate_cap_ms == 250 and c.claim_grace_ms == 150 and c.claims == 0
 			and c.releases == 0 and c.denials == 0 and c.presses_applied == 0, "O1: defaults (demo 4af9e66 values, counters 0)")
 	_check(not c.set_channels(KIND6, null) and not c.set_channels(KIND_NR, _map6()) and not c.set_channels(77, _map6()),
 			"O1: set_channels refuses null, a map that does not fit, an unregistered kind")
@@ -979,15 +980,145 @@ func _case_o6() -> void:
 			and _close(_dg(p, "rot"), 0.2, 1e-4) and c.is_blending(10), "O6: at 50 ms halfway (lerp), still blending")
 	c.render_pose(10, Vector2(200, 100), 0.0, Vector2(0, 0), 0.0, 1299)
 	_check(c.is_blending(10), "O6: still blending at 99 ms")
+
 	p = c.render_pose(10, Vector2(200, 100), 0.0, Vector2(0, 0), 0.0, 1300)
-	_check(_dg(p, "pos") == Vector2(200, 100) and _close(_dg(p, "rot"), 0.0) and not c.is_blending(10),
-			"O6: at 100 ms the sample; not blending after the frame that draws the end")
+	_check((p["pos"] as Vector2).x > 200.0 and (p["pos"] as Vector2).x < 205.0 and c.is_blending(10),
+			"O6: at 100 ms the release offset is still decaying (slice C: exponential, not the old lerp)")
+	var tt := 1300
+	while c.is_blending(10) and tt < 2000:
+		tt += 10
+		p = c.render_pose(10, Vector2(200, 100), 0.0, Vector2(0, 0), 0.0, tt)
+	_check(not c.is_blending(10) and _dg(p, "pos") == Vector2(200, 100) and _close(_dg(p, "rot"), 0.0),
+			"O6: the offset reaches exactly the sample and stops blending (at %d ms)" % tt)
+
 	o = _held()
 	c = o[1]
 	_snap(o, 102, {10: [200, 100, 0, 0, 0, 0]}, {10: {"ow": "g2"}}, 1200)
 	c.update(10, true, _c6(200, 100, 0, 0, 3.0), 112, 1200, RTT)
+	c.render_pose(10, Vector2(200, 100), -3.0, Vector2(0, 0), 0.0, 1200)
 	p = c.render_pose(10, Vector2(200, 100), -3.0, Vector2(0, 0), 0.0, 1250)
 	_check(absf(_num(_dg(p, "rot"))) > 3.14, "O6: the rotation blend takes the short arc across PI")
+
+
+
+# --- C1 transfer on press (slice C, item 1) -------------------------------------------------
+
+
+## Drives a HELD owner (_held) through a press schedule from t = 1110 to end_t; near at near_t.
+## Returns [reason, time, controller] for the first RELEASE, or ["", -1, controller].
+func _press_run(presses: Array, near_t: int, end_t: int) -> Array:
+	var o := _held()
+	var c: CouchPropController = o[1]
+	var t := 1110
+	while t <= end_t:
+		if presses.has(t):
+			_snap(o, t, {10: [200, 100, 0, 0, 0, 0]}, {10: {"ow": ME, "pr": _pf([0, 1, 0])}}, t)
+		var d := c.update(10, t == near_t, _c6(200, 100), t, t, RTT)
+		if _act(d) == CouchPropController.RELEASE:
+			return [_why(d), t, c]
+		t += 10
+	return ["", -1, c]
+
+
+func _case_c1() -> void:
+	# Presses every 40 ms for 320 ms on an idle owner: transfer at the first update where the run
+	# has lasted release_idle_ms and the owner has been idle that long (1470 ms).
+	var a := []
+	for i in 9:
+		a.append(1150 + 40 * i)
+	var r := _press_run(a, -1, 1500)
+	_check(r[0] == "transfer" and r[1] == 1470 and r[2].transfers == 1 and r[2].denials == 0 and r[2].releases == 1,
+			"C1: a 320 ms press run on an idle owner transfers at 1470 ms (reason transfer, not a denial)")
+	# A gap of exactly transfer_gap_ms keeps the run going.
+	r = _press_run([1150, 1250, 1350, 1450], -1, 1500)
+	_check(r[0] == "transfer" and r[1] == 1450, "C1: a gap of exactly transfer_gap_ms is the same run: transfer at 1450")
+	# A gap just over transfer_gap_ms starts a new run each time: no run reaches 300 ms.
+	r = _press_run([1150, 1260, 1370, 1480, 1590], -1, 1700)
+	_check(r[0] == "", "C1: a gap just over transfer_gap_ms starts a new run each time: no transfer")
+	# Own contact at 1470, the moment the run reaches 300 ms, blocks the transfer; the run dies first.
+	r = _press_run(a, 1470, 1800)
+	_check(r[0] == "", "C1: own contact at 1470 blocks the transfer; the run is no longer live when the idle clock ends")
+
+
+## Claims a prop moving at vx, drawn at (200, 100) and granted at 1100 ms. Returns the reported x
+## for the claim tick and for each of 300 ticks after it (17 ms apart, the peer staying near).
+func _offset_series(vx: float) -> Array:
+	var o := _one([200, 100, 0, vx, 0, 0])
+	var c: CouchPropController = o[1]
+	c.render_pose(10, Vector2(200, 100), 0.0, Vector2(0, 0), 0.0, 900)
+	var d := c.update(10, true, _c6(200, 100, vx), 106, 1000, RTT)
+	var copy: PackedFloat32Array = d["state"]
+	var xs: Array = [_report_x(c.input_fields(106, {10: copy}, {}))]
+	_snap(o, 107, {10: [203, 100, 0, vx, 0, 0]}, {10: {"ow": ME}}, 1100)
+	for i in 300:
+		c.update(10, true, copy, 107 + i, 1100 + 17 * i, RTT)
+		xs.append(_report_x(c.input_fields(107 + i, {10: copy}, {})))
+	return xs
+
+
+func _report_x(f: Variant) -> float:
+	var rep: Variant = _dg(_dg(f, CouchPropAuthority.INPUT_CLAIMS), 10)
+	return _at(_dg(rep, "o"), 0)
+
+
+func _case_c2() -> void:
+	# Claim at the drawn pose (200) with the now velocity: the report starts at the "now" pose
+	# (203), and the gap closes to the copy, monotonically, to exactly 200.
+	var xs := _offset_series(30.0)
+	_check(_close(xs[0], 203.0, 1e-3), "C2: the first report is the 'now' pose (203), not the drawn copy (200)")
+	var steps := 0.0
+	var monotone := true
+	for i in range(1, xs.size()):
+		steps = maxf(steps, absf(xs[i] - xs[i - 1]))
+		monotone = monotone and xs[i] <= xs[i - 1] + 1e-6
+	var first_exact := xs.find(200.0)
+	_check(monotone and xs.back() == 200.0 and first_exact >= 30 and first_exact <= 40,
+			"C2: the report decays monotonically and reaches exactly the copy at tick %d" % first_exact)
+	# A 30 px offset closes at the 150 units/s cap: the largest per-tick step is 2.5 px (first tick).
+	var fast := _offset_series(300.0)
+	var fast_steps := 0.0
+	for i in range(1, fast.size()):
+		fast_steps = maxf(fast_steps, absf(fast[i] - fast[i - 1]))
+	_check(_close(fast[0], 230.0, 1e-3) and fast_steps <= 150.0 / 60.0 + 1e-3 and fast_steps >= 150.0 / 60.0 - 1e-2
+			and fast.back() == 200.0,
+			"C2: a 30 px offset is capped at 150 units/s: largest step 2.5 px, landing on the copy (max step %.4f)" % fast_steps)
+	var still := _offset_series(0.0)
+	var all_copy := true
+	for x in still:
+		all_copy = all_copy and x == 200.0
+	_check(all_copy, "C2: a zero jump gives a zero offset: the report is the copy on every tick")
+	var o := _held()
+	var c: CouchPropController = o[1]
+	var pose := c.render_pose(10, Vector2(150, 150), 0.0, Vector2(201.25, 99.5), 0.25, 1200)
+	_check(pose["pos"] == Vector2(201.25, 99.5) and _close(_dg(pose, "rot"), 0.25),
+			"C2: while predicting, render_pose returns exactly the copy")
+	# Release: the drawn pose starts at the copy (240) and eases to the sample (200); no frame moves
+	# faster than 150 units/s (2.4 px at 16 ms). is_blending holds until the last drawn frame.
+	var r := _held()
+	var rc: CouchPropController = r[1]
+	_snap(r, 108, {10: [200, 100, 0, 0, 0, 0]}, {10: {"ow": "g2"}}, 1200)
+	var rel := rc.update(10, true, _c6(240, 100), 112, 1200, RTT)
+	_check(_act(rel) == CouchPropController.RELEASE and _why(rel) == "lost" and rc.is_blending(10),
+			"C2: a release by a lost owner is blending at once")
+	# A re-claim before any render ends the release blend at once (review finding).
+	var q := _held()
+	var qc: CouchPropController = q[1]
+	_snap(q, 108, {10: [200, 100, 0, 0, 0, 0]}, {10: {"ow": "g2"}}, 1200)
+	qc.update(10, true, _c6(240, 100), 112, 1200, RTT)
+	_snap(q, 109, {10: [200, 100, 0, 0, 0, 0]}, {}, 1310)
+	var again := qc.update(10, true, _c6(240, 100), 118, 1310, RTT)
+	_check(_act(again) == CouchPropController.CLAIM and not qc.is_blending(10),
+			"C2: a re-claim before any render ends the release blend")
+	var frames: Array = []
+	var tt := 1200
+	while rc.is_blending(10) and frames.size() < 200:
+		frames.append((rc.render_pose(10, Vector2(200, 100), 0.0, Vector2(0, 0), 0.0, tt)["pos"] as Vector2).x)
+		tt += 16
+	var frame_steps := 0.0
+	for i in range(1, frames.size()):
+		frame_steps = maxf(frame_steps, absf(frames[i] - frames[i - 1]))
+	_check(frames[0] == 240.0 and frames.back() == 200.0 and frame_steps <= 150.0 * 0.016 + 1e-3 and frames.size() < 200,
+			"C2: the release offset starts at the copy (240), eases to the sample, moves at most 150 units/s per frame")
 
 
 # --- E1 end to end --------------------------------------------------------------------------
@@ -1151,9 +1282,12 @@ func _case_e1() -> void:
 	_check(owners == ["", "g1", "", "g2", "", HOST, ""], "E1: host owner sequence free, g1, free, g2, free, host, free (got %s)" % [owners])
 	_check(host.grants == 2 and c1.claims == 1 and c2.claims == 2, "E1: two grants (g1, then g2); g1 claimed once, g2 twice")
 	_check(host_err_at_release < 1.0, "E1: the host's body converged to g1's copy (%.3f px at g1's release)" % host_err_at_release)
-	_check(c1.presses_applied > 0 and absf(sent_press.y) > 100.0 and drained.is_equal_approx(sent_press),
-			"E1: g2's presses reached g1's copy in full (sent %s, drained %s)" % [sent_press, drained])
-	_check(reasons[0] == ["settled"] and c1.denials == 0, "E1: g1 idled, settled and released (%s)" % [reasons[0]])
+
+	var lost := sent_press.y - drained.y
+	_check(c1.presses_applied > 0 and absf(sent_press.y) > 100.0 and lost >= 0.0 and lost <= (2 * LINK_TICKS + SNAP_TICKS) * MASS * 2.0,
+			"E1: g2's presses reached g1's copy up to the transfer; the loss is the in-flight window (sent %s, drained %s)" % [sent_press, drained])
+	_check(reasons[0] == ["transfer"] and c1.denials == 0 and c1.transfers == 1,
+			"E1: g1 idled under g2's live press run and transferred, not denied (%s)" % [reasons[0]])
 	_check(granted_g2 and reasons[1] == ["settled", "lost"] and c2.denials == 1,
 			"E1: g2 then claimed, was granted and settled; its claim on the host-held prop was lost (%s)" % [reasons[1]])
 	_check(held_by_host, "E1: the host kept the prop it held while g2 claimed it")
@@ -1255,6 +1389,8 @@ func _run() -> void:
 	_section("O6", _case_o6)
 	_section("E1", _case_e1)
 	_section("D1", _case_d1)
+	_section("C1", _case_c1)
+	_section("C2", _case_c2)
 
 	print("")
 	print("G18 prop authority: %d/%d checks passed" % [_checks - failures, _checks])

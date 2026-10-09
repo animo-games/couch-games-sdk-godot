@@ -18,6 +18,10 @@
 ##   now_ms >= the backoff. The CLAIM state is latest advanced by age = clamp((tick -
 ##   latest.tick) * physics_dt, 0, extrapolate_cap_ms / 1000): x, y by vx, vy; rot (if the
 ##   kind has one) by w, wrapped to [-PI, PI]; every other channel as in the snapshot.
+##   Slice C (item 3): the CLAIM state is the last drawn pose (the "now" state when nothing was
+##   drawn yet) with the "now" velocities; the difference rides in the report as claim_off * k,
+##   k = 1 at the claim, decaying to 0 (see _decay). The drawn pose is the collider, so the claim
+##   never jumps on screen.
 ##   CLAIMING / HELD, in this order:
 ##   1. owner == my_id and now_ms - claim >= int(rtt_ms): granted (HELD). An earlier "mine"
 ##      is the previous grant still on the wire.
@@ -29,8 +33,11 @@
 ##   4. else RELEASE "settled" when ALL of: release_idle_ms since the last contact, the
 ##      copy's speed < settle_speed, the copy's position within release_match of the last
 ##      render_pose sample (none yet: never), no queued press.
+##   5. else (slice C, item 1) HELD and RELEASE "transfer" when not near, release_idle_ms since
+##      the last contact, and a press run is still live (the newest queued press is at most
+##      transfer_gap_ms old) that has lasted release_idle_ms. Not counted as a denial.
 ##   Every RELEASE: releases += 1, the press queue is cleared, the copy's pose at release is
-##   the blend start. on_snapshot queues a non-zero "pp"[eid]["pr"] (left += press,
+##   the release offset's start (slice C, item 3), the claim offset and run tracking reset. on_snapshot queues a non-zero "pp"[eid]["pr"] (left += press,
 ##   ticks_left = snapshot_ticks, presses_applied += 1) only while predicting and named owner;
 ##   otherwise it is dropped (the presser keeps pressing). update() returns {"action": NONE /
 ##   CLAIM / RELEASE, "state": the CLAIM state else empty, "reason": "" except on RELEASE}.
@@ -59,12 +66,15 @@ const _MAX_INT31 := 2147483647
 var release_idle_ms: int = 300      # own contact gap before a settled release
 var settle_speed: float = 10.0      # units/s: the copy must be slower than this to release
 var release_match: float = 1.0      # units: the sample must show the prop this close to the copy
-var blend_ms: int = 100             # release blend from the copy pose to the sample
 var extrapolate_cap_ms: int = 250   # claim: newest snapshot advanced by at most this
 var claim_grace_ms: int = 150       # slack before an unanswered claim is given up
+var transfer_gap_ms: int = 100      # slice C: a press run stays live while presses come this close
+var offset_tau_ms: int = 100        # slice C: claim and release offsets close at k / tau
+var offset_max_speed: float = 150.0 # slice C: units/s; an offset never closes faster than this
 var claims: int = 0
 var releases: int = 0               # every RELEASE decision
 var denials: int = 0                # RELEASE for "lost", "taken-back" or "unanswered"
+var transfers: int = 0              # RELEASE for "transfer" (slice C; not a denial)
 var presses_applied: int = 0        # snapshots whose forwarded press was queued
 
 var _world: CouchReplicatedWorld
@@ -75,7 +85,9 @@ var _snapshot_ms: int = 0
 var _channels: Dictionary = {}
 ## eid -> {"kind", "owner", "predicting", "granted", "claim_ms", "contact_ms", "backoff_ms",
 ## "left": Vector3, "ticks_left", "has_sample", "sample_pos", "from_pos", "from_rot",
-## "blend_ms": blend start, -1 when not blending}
+## slice C: "run_start_ms", "run_last_ms" (-1: no run), "claim_off" Vector2, "claim_rot_off",
+## "claim_k" (report offset weight), "drawn_pos", "drawn_rot", "has_drawn" (last pose drawn),
+## "rel_pending", "rel_off_pos", "rel_off_rot", "rel_k" (release offset weight), "frame_ms"}
 var _props: Dictionary = {}
 
 
@@ -100,7 +112,11 @@ func add_prop(entity_id: int, kind: int) -> bool:
 		"kind": kind, "owner": "", "predicting": false, "granted": false, "claim_ms": 0,
 		"contact_ms": 0, "backoff_ms": 0, "left": Vector3.ZERO, "ticks_left": 0,
 		"has_sample": false, "sample_pos": Vector2.ZERO, "from_pos": Vector2.ZERO,
-		"from_rot": 0.0, "blend_ms": -1,
+		"from_rot": 0.0, "run_start_ms": 0, "run_last_ms": -1,
+		"claim_off": Vector2.ZERO, "claim_rot_off": 0.0, "claim_k": 0.0,
+		"drawn_pos": Vector2.ZERO, "drawn_rot": 0.0, "has_drawn": false,
+		"rel_pending": false, "rel_off_pos": Vector2.ZERO, "rel_off_rot": 0.0, "rel_k": 0.0,
+		"frame_ms": 0,
 	}
 	return true
 
@@ -126,6 +142,10 @@ func on_snapshot(extra: Dictionary, snapshot_ticks: int, now_ms: int) -> void:
 			rec["left"] += press
 			rec["ticks_left"] = snapshot_ticks
 			presses_applied += 1
+			# Slice C: a new run starts after a gap longer than transfer_gap_ms.
+			if int(rec["run_last_ms"]) < 0 or now_ms - int(rec["run_last_ms"]) > transfer_gap_ms:
+				rec["run_start_ms"] = now_ms
+			rec["run_last_ms"] = now_ms
 
 
 ## Once per owner tick per prop, BEFORE the player steps. `copy` is the body's state in the
@@ -135,6 +155,8 @@ func update(entity_id: int, near: bool, copy: PackedFloat32Array, tick: int, now
 		return _decision(NONE, PackedFloat32Array(), "")
 	var rec: Dictionary = _props[entity_id]
 	var owner: String = rec["owner"]
+	if rec["claim_k"] > 0.0:
+		rec["claim_k"] = _decay(rec["claim_k"], (rec["claim_off"] as Vector2).length(), _dt)
 	if not rec["predicting"]:
 		var latest := _world.latest(entity_id)
 		if near and (owner == "" or owner == _my_id) and not latest.is_empty() and now_ms >= int(rec["backoff_ms"]):
@@ -164,6 +186,9 @@ func update(entity_id: int, near: bool, copy: PackedFloat32Array, tick: int, now
 			and rec["has_sample"] and Vector2(copy[ch.x], copy[ch.y]).distance_to(rec["sample_pos"]) < release_match \
 			and int(rec["ticks_left"]) == 0:
 		return _release(rec, copy, now_ms, "settled")
+	if rec["granted"] and _transfer_due(rec, now_ms):
+		transfers += 1
+		return _release(rec, copy, now_ms, "transfer")
 	return _decision(NONE, PackedFloat32Array(), "")
 
 
@@ -186,7 +211,7 @@ func input_fields(tick: int, copies: Dictionary, presses: Dictionary) -> Diction
 	var forwarded: Dictionary = {}
 	for eid in _props:
 		if _props[eid]["predicting"] and typeof(copies.get(eid)) == TYPE_PACKED_FLOAT32_ARRAY:
-			reports[eid] = {"t": tick, "o": (copies[eid] as PackedFloat32Array).duplicate()}
+			reports[eid] = {"t": tick, "o": _with_claim_offset(_props[eid], copies[eid])}
 		elif not _props[eid]["predicting"] and typeof(presses.get(eid)) == TYPE_VECTOR3 and presses[eid] != Vector3.ZERO:
 			var p: Vector3 = presses[eid]
 			forwarded[eid] = PackedFloat32Array([p.x, p.y, p.z])
@@ -199,21 +224,40 @@ func input_fields(tick: int, copies: Dictionary, presses: Dictionary) -> Diction
 
 
 ## Once per render frame per prop: {"pos", "rot"} to DRAW. Predicted: the copy's pose.
-## Otherwise the sample, blended over blend_ms out of the last prediction.
+## Otherwise the sample plus the release offset, decaying out of the last prediction (slice C).
 func render_pose(entity_id: int, sample_pos: Vector2, sample_rot: float, copy_pos: Vector2, copy_rot: float, now_ms: int) -> Dictionary:
 	if not _props.has(entity_id):
 		return {"pos": sample_pos, "rot": sample_rot}
 	var rec: Dictionary = _props[entity_id]
 	rec["sample_pos"] = sample_pos
 	rec["has_sample"] = true
-	if rec["predicting"]:
-		return {"pos": copy_pos, "rot": copy_rot}
-	var a := 1.0
-	if int(rec["blend_ms"]) >= 0:
-		a = clampf(float(now_ms - int(rec["blend_ms"])) / maxi(blend_ms, 1), 0.0, 1.0)
-		if a >= 1.0:
-			rec["blend_ms"] = -1
-	return {"pos": (rec["from_pos"] as Vector2).lerp(sample_pos, a), "rot": lerp_angle(rec["from_rot"], sample_rot, a)}
+	var pose: Dictionary = {"pos": copy_pos, "rot": copy_rot}
+	if not rec["predicting"]:
+		pose = _puppet_pose(rec, sample_pos, sample_rot, now_ms)
+	rec["drawn_pos"] = pose["pos"]
+	rec["drawn_rot"] = pose["rot"]
+	rec["has_drawn"] = true
+	return pose
+
+
+## The puppet's pose: the sample plus the release offset while it decays (slice C, item 3).
+## The offset starts at the copy's pose at release, so the first frame draws where it was.
+func _puppet_pose(rec: Dictionary, sample_pos: Vector2, sample_rot: float, now_ms: int) -> Dictionary:
+	if rec["rel_pending"]:
+		rec["rel_pending"] = false
+		rec["rel_off_pos"] = (rec["from_pos"] as Vector2) - sample_pos
+		rec["rel_off_rot"] = wrapf(rec["from_rot"] - sample_rot, -PI, PI)
+		rec["rel_k"] = 1.0
+		rec["frame_ms"] = now_ms
+	var dt := maxi(now_ms - int(rec["frame_ms"]), 0) / 1000.0
+	rec["frame_ms"] = now_ms
+	if rec["rel_k"] > 0.0:
+		rec["rel_k"] = _decay(rec["rel_k"], (rec["rel_off_pos"] as Vector2).length(), dt)
+	var k: float = rec["rel_k"]
+	return {
+		"pos": sample_pos + (rec["rel_off_pos"] as Vector2) * k,
+		"rot": wrapf(sample_rot + float(rec["rel_off_rot"]) * k, -PI, PI),
+	}
 
 
 func owner_of(entity_id: int) -> String:
@@ -224,9 +268,9 @@ func is_predicting(entity_id: int) -> bool:
 	return _props.has(entity_id) and _props[entity_id]["predicting"]
 
 
-## True until the render_pose that draws the release blend's last frame.
+## True until the render_pose that draws the release offset's last frame.
 func is_blending(entity_id: int) -> bool:
-	return _props.has(entity_id) and int(_props[entity_id]["blend_ms"]) >= 0
+	return _props.has(entity_id) and (_props[entity_id]["rel_pending"] or float(_props[entity_id]["rel_k"]) > 0.0)
 
 
 func _claim(rec: Dictionary, latest: Dictionary, tick: int, now_ms: int) -> Dictionary:
@@ -242,8 +286,29 @@ func _claim(rec: Dictionary, latest: Dictionary, tick: int, now_ms: int) -> Dict
 	rec["granted"] = false
 	rec["claim_ms"] = now_ms
 	rec["contact_ms"] = now_ms
-	rec["blend_ms"] = -1
+	_start_claim_offset(rec, st, ch)
+	rec["run_last_ms"] = -1
+	rec["rel_k"] = 0.0
+	rec["rel_pending"] = false
 	return _decision(CLAIM, st, "")
+
+
+## Slice C (item 3): the claim state is the last drawn pose; the gap to "now" rides in the report
+## as claim_off * k, so the copy the player touches does not jump.
+func _start_claim_offset(rec: Dictionary, st: PackedFloat32Array, ch: CouchBodyChannels) -> void:
+	rec["claim_off"] = Vector2.ZERO
+	rec["claim_rot_off"] = 0.0
+	rec["claim_k"] = 0.0
+	if not rec["has_drawn"]:
+		return
+	var drawn: Vector2 = rec["drawn_pos"]
+	rec["claim_off"] = Vector2(st[ch.x], st[ch.y]) - drawn
+	rec["claim_k"] = 1.0
+	st[ch.x] = drawn.x
+	st[ch.y] = drawn.y
+	if ch.has_rotation():
+		rec["claim_rot_off"] = wrapf(st[ch.rot] - rec["drawn_rot"], -PI, PI)
+		st[ch.rot] = rec["drawn_rot"]
 
 
 func _release(rec: Dictionary, copy: PackedFloat32Array, now_ms: int, reason: String) -> Dictionary:
@@ -254,8 +319,44 @@ func _release(rec: Dictionary, copy: PackedFloat32Array, now_ms: int, reason: St
 	rec["ticks_left"] = 0
 	rec["from_pos"] = Vector2(copy[ch.x], copy[ch.y])
 	rec["from_rot"] = copy[ch.rot] if ch.has_rotation() else 0.0
-	rec["blend_ms"] = now_ms
+	rec["claim_k"] = 0.0
+	rec["rel_pending"] = true
+	rec["run_last_ms"] = -1
 	return _decision(RELEASE, PackedFloat32Array(), reason)
+
+
+## Slice C, item 1 (P7): idle for release_idle_ms AND a press run that has lasted release_idle_ms
+## and is still live (its newest press is at most transfer_gap_ms old). The caller checks HELD
+## and not near.
+func _transfer_due(rec: Dictionary, now_ms: int) -> bool:
+	var last := int(rec["run_last_ms"])
+	return last >= 0 and now_ms - last <= transfer_gap_ms \
+			and last - int(rec["run_start_ms"]) >= release_idle_ms \
+			and now_ms - int(rec["contact_ms"]) >= release_idle_ms
+
+
+## The report: the copy plus the claim offset, which closes to 0 (slice C, item 3).
+func _with_claim_offset(rec: Dictionary, copy: PackedFloat32Array) -> PackedFloat32Array:
+	var out := copy.duplicate()
+	var k: float = rec["claim_k"]
+	if k > 0.0:
+		var ch: CouchBodyChannels = _channels[rec["kind"]]
+		var off: Vector2 = rec["claim_off"]
+		out[ch.x] += off.x * k
+		out[ch.y] += off.y * k
+		if ch.has_rotation():
+			out[ch.rot] = wrapf(out[ch.rot] + float(rec["claim_rot_off"]) * k, -PI, PI)
+	return out
+
+
+## One step of an offset's decay (slice C, item 3): k closes at k / tau, never moving the offset
+## faster than offset_max_speed; exactly 0 below 0.001.
+func _decay(k: float, off_len: float, dt_s: float) -> float:
+	var rate := k / (offset_tau_ms / 1000.0)
+	if off_len > 0.0:
+		rate = minf(rate, offset_max_speed / off_len)
+	var next := maxf(k - rate * dt_s, 0.0)
+	return 0.0 if next < 0.001 else next
 
 
 static func _decision(action: int, state: PackedFloat32Array, reason: String) -> Dictionary:

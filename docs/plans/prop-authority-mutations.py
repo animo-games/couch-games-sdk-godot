@@ -53,7 +53,7 @@ MUTS = {
  "o13-release-keeps-queue": (P, "\trec[\"left\"] = Vector3.ZERO\n\trec[\"ticks_left\"] = 0\n", "", G18, "O4"),
  "o14-report-not-predicted": (P, "if _props[eid][\"predicting\"] and typeof(copies.get(eid))", "if typeof(copies.get(eid))", G18, "O5"),
  "o15-press-on-predicted": (P, "\t\telif not _props[eid][\"predicting\"] and typeof(presses.get(eid))", "\t\tif typeof(presses.get(eid))", G18, "O5"),
- "o16-no-release-blend": (P, "\trec[\"blend_ms\"] = now_ms\n", "\trec[\"blend_ms\"] = -1\n", G18, "O6"),
+ "o16-no-release-blend": (P, "\trec[\"rel_pending\"] = true\n", "\tpass\n", G18, "O6"),
  # Slice D (item 5): refusal after a take-back or forget.
  "d01-no-refusal": (H, "\t(rec[\"refused\"] as Dictionary)[rec[\"owner\"]] = true\n", "\tpass\n", G18, "D1"),
  "d02-refusal-never-cleared": (H, "\t\t(rec[\"refused\"] as Dictionary).erase(peer_id)\n", "\t\tpass\n", G18, "D1"),
@@ -65,6 +65,21 @@ MUTS = {
     "\t\tif claims.has(eid):\n\t\t\tcontinue\n\t\t(rec[\"refused\"] as Dictionary).erase(peer_id)\n",
     "\t\t(rec[\"refused\"] as Dictionary).erase(peer_id)\n\t\tif claims.has(eid):\n\t\t\tcontinue\n",
     G18, "D1"),
+ # Slice C (items 1 and 3): transfer on press, decaying claim and release offsets.
+ "c01-no-transfer": (P, "\tif rec[\"granted\"] and _transfer_due(rec, now_ms):\n", "\tif false:\n", G18, "C1"),
+ "c02-transfer-while-touching": (P, "\tif near:\n\t\trec[\"contact_ms\"] = now_ms\n",
+    "\tif rec[\"granted\"] and near and _transfer_due(rec, now_ms):\n\t\ttransfers += 1\n\t\treturn _release(rec, copy, now_ms, \"transfer\")\n\tif near:\n\t\trec[\"contact_ms\"] = now_ms\n",
+    G18, "C1"),
+ "c03-run-gap-ignored": (P, "if int(rec[\"run_last_ms\"]) < 0 or now_ms - int(rec[\"run_last_ms\"]) > transfer_gap_ms:",
+    "if int(rec[\"run_last_ms\"]) < 0:", G18, "C1"),
+ "c04-claim-at-now-pose": (P, "\tif not rec[\"has_drawn\"]:\n\t\treturn\n", "\trec[\"has_drawn\"] = false\n\tif not rec[\"has_drawn\"]:\n\t\treturn\n", G18, "C2"),
+ "c05-no-speed-cap": (P, "\t\trate = minf(rate, offset_max_speed / off_len)\n", "\t\tpass\n", G18, "C2"),
+ "c06-offset-never-zero": (P, "return 0.0 if next < 0.001 else next", "return next", G18, "C2"),
+ "c07-report-bare-copy": (P, "\tvar k: float = rec[\"claim_k\"]\n\tif k > 0.0:\n", "\tvar k: float = rec[\"claim_k\"]\n\tif false:\n", G18, "C2"),
+ "c08-release-linear-100ms": (P, "\t\trec[\"rel_k\"] = _decay(rec[\"rel_k\"], (rec[\"rel_off_pos\"] as Vector2).length(), dt)\n",
+    "\t\trec[\"rel_k\"] = maxf(0.0, rec[\"rel_k\"] - dt * 10.0)\n", G18, "C2"),
+ "c09-reclaim-keeps-release-blend": (P, "\trec[\"rel_pending\"] = false\n\treturn _decision(CLAIM, st, \"\")", "\treturn _decision(CLAIM, st, \"\")", G18, "C2"),
+
 }
 
 
