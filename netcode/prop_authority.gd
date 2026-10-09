@@ -15,6 +15,8 @@
 ##   both accept; otherwise nothing changes (a rejected first report is not a denial).
 ##   GUEST(g) -> FREE on an input from g without that prop's claim (releases), on update with
 ##   g stale (takebacks; checked BEFORE the host hold) and on forget(g) (takebacks).
+##   A take-back or forget also refuses g's claims on that prop (item 5): they grant nothing
+##   and count in refused_claims until an input from g without that prop's claim clears it.
 ##   Claims on a prop held by anyone else, the host included, are ignored.
 ## on_input order: releases, then claims, then presses ("pr"), so an input releasing a prop
 ## and pressing it returns the press to apply. A bad "pr" entry (key not an added prop's int
@@ -84,7 +86,8 @@ var _host_id: String
 ## kind -> CouchBodyChannels
 var _channels: Dictionary = {}
 ## eid -> {"kind", "mass", "inertia", "targets": CouchOwnerTargets, "owner": String,
-## "host_ms": last time the host was near, "sum": Vector3, "sum_for": owner it was summed for}
+## "host_ms": last time the host was near, "sum": Vector3, "sum_for": owner it was summed for,
+## "refused": {peer: true} whose claims on this prop are refused after a take-back (item 5)}
 var _props: Dictionary = {}
 
 
@@ -114,7 +117,7 @@ func add_prop(entity_id: int, kind: int, mass: float, inertia: float) -> bool:
 	targets.impulse_compensation = false
 	_props[entity_id] = {
 		"kind": kind, "mass": mass, "inertia": inertia, "targets": targets, "owner": "",
-		"host_ms": 0, "sum": Vector3.ZERO, "sum_for": "",
+		"host_ms": 0, "sum": Vector3.ZERO, "sum_for": "", "refused": {},
 	}
 	return true
 
@@ -138,8 +141,7 @@ func update(entity_id: int, host_near: bool, now_ms: int) -> Dictionary:
 		return {}
 	var rec: Dictionary = _props[entity_id]
 	if is_guest_owned(entity_id) and (rec["targets"] as CouchOwnerTargets).is_stale(rec["owner"], now_ms):
-		takebacks += 1
-		_free(rec)
+		_take_back(rec)
 	if host_near:
 		rec["host_ms"] = now_ms
 		if rec["owner"] == "":
@@ -202,8 +204,7 @@ func forget(peer_id: String) -> Dictionary:
 	for eid in _props:
 		var rec: Dictionary = _props[eid]
 		if is_guest_owned(eid) and rec["owner"] == peer_id:
-			takebacks += 1
-			_free(rec)
+			_take_back(rec)
 	return {}
 
 
@@ -227,7 +228,10 @@ static func _is_press(field: Variant) -> bool:
 func _release_unclaimed(peer_id: String, claims: Dictionary) -> void:
 	for eid in _props:
 		var rec: Dictionary = _props[eid]
-		if rec["owner"] == peer_id and is_guest_owned(eid) and not claims.has(eid):
+		if claims.has(eid):
+			continue
+		(rec["refused"] as Dictionary).erase(peer_id)
+		if rec["owner"] == peer_id and is_guest_owned(eid):
 			releases += 1
 			_free(rec)
 
@@ -237,6 +241,9 @@ func _grant_claims(peer_id: String, claims: Dictionary, now_ms: int) -> void:
 		if typeof(eid) != TYPE_INT or not _props.has(eid):
 			continue
 		var rec: Dictionary = _props[eid]
+		if (rec["refused"] as Dictionary).has(peer_id):
+			refused_claims += 1
+			continue
 		var targets: CouchOwnerTargets = rec["targets"]
 		if rec["owner"] == "":
 			if targets.set_owner(peer_id, eid, rec["kind"], rec["mass"], rec["inertia"], now_ms) and targets.note_input(peer_id, claims[eid], now_ms):
@@ -267,3 +274,10 @@ func _route_presses(field: Variant) -> Dictionary:
 func _free(rec: Dictionary) -> void:
 	(rec["targets"] as CouchOwnerTargets).forget(rec["owner"])
 	rec["owner"] = ""
+
+
+## A take-back (stale or forget): free, and refuse the old owner's claims on this prop (item 5).
+func _take_back(rec: Dictionary) -> void:
+	takebacks += 1
+	(rec["refused"] as Dictionary)[rec["owner"]] = true
+	_free(rec)

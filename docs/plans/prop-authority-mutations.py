@@ -24,9 +24,9 @@ MUTS = {
  "h04-let-go-strict": (H, "now_ms - int(rec[\"host_ms\"]) >= release_idle_ms:", "now_ms - int(rec[\"host_ms\"]) > release_idle_ms:", G18, "A3"),
  # The host has no body state, so "waits for the prop to settle" is an extra settle wait.
  "h05-let-go-settle-wait": (H, "now_ms - int(rec[\"host_ms\"]) >= release_idle_ms:", "now_ms - int(rec[\"host_ms\"]) >= release_idle_ms + 200:", G18, "A3"),
- "h06-no-per-eid-release": (H, "and not claims.has(eid):", "and claims.is_empty():", G18, "A4"),
+ "h06-no-per-eid-release": (H, "\t\tif claims.has(eid):\n", "\t\tif not claims.is_empty():\n", G18, "A4"),
  "h07-no-stale-takeback": (H, "and (rec[\"targets\"] as CouchOwnerTargets).is_stale(rec[\"owner\"], now_ms):", "and false:", G18, "A5"),
- "h08-forget-keeps-owner": (H, "\t\t\ttakebacks += 1\n\t\t\t_free(rec)\n", "\t\t\ttakebacks += 1\n", G18, "A5"),
+ "h08-forget-keeps-owner": (H, "\t\t\t_take_back(rec)\n", "\t\t\ttakebacks += 1\n", G18, "A5"),
  "h09-guest-held-applies": (H, "\t\trec[\"sum\"] += press\n\t\treturn false\n", "\t\trec[\"sum\"] += press\n\t\treturn true\n", G18, "A6"),
  "h10-sum-to-new-owner": (H, " and rec[\"sum_for\"] == owner:", ":", G18, "A6"),
  "h11-presses-first": (H,
@@ -54,6 +54,17 @@ MUTS = {
  "o14-report-not-predicted": (P, "if _props[eid][\"predicting\"] and typeof(copies.get(eid))", "if typeof(copies.get(eid))", G18, "O5"),
  "o15-press-on-predicted": (P, "\t\telif not _props[eid][\"predicting\"] and typeof(presses.get(eid))", "\t\tif typeof(presses.get(eid))", G18, "O5"),
  "o16-no-release-blend": (P, "\trec[\"blend_ms\"] = now_ms\n", "\trec[\"blend_ms\"] = -1\n", G18, "O6"),
+ # Slice D (item 5): refusal after a take-back or forget.
+ "d01-no-refusal": (H, "\t(rec[\"refused\"] as Dictionary)[rec[\"owner\"]] = true\n", "\tpass\n", G18, "D1"),
+ "d02-refusal-never-cleared": (H, "\t\t(rec[\"refused\"] as Dictionary).erase(peer_id)\n", "\t\tpass\n", G18, "D1"),
+ "d03-refusal-blocks-every-prop": (H,
+    "\t\tif (rec[\"refused\"] as Dictionary).has(peer_id):\n\t\t\trefused_claims += 1\n\t\t\tcontinue\n",
+    "\t\tvar refused_anywhere := false\n\t\tfor other in _props.values():\n\t\t\trefused_anywhere = refused_anywhere or (other[\"refused\"] as Dictionary).has(peer_id)\n\t\tif refused_anywhere:\n\t\t\trefused_claims += 1\n\t\t\tcontinue\n",
+    G18, "D1"),
+ "d04-cleared-by-any-input": (H,
+    "\t\tif claims.has(eid):\n\t\t\tcontinue\n\t\t(rec[\"refused\"] as Dictionary).erase(peer_id)\n",
+    "\t\t(rec[\"refused\"] as Dictionary).erase(peer_id)\n\t\tif claims.has(eid):\n\t\t\tcontinue\n",
+    G18, "D1"),
 }
 
 

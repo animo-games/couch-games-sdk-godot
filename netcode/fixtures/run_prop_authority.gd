@@ -51,6 +51,9 @@
 ##       props not predicted, {} when neither; var_to_bytes round trip; the host accepts them.
 ##   O6  render: predicted -> the copy, puppet -> the sample, the release lerp at 0/50/100 ms,
 ##       is_blending until the frame that draws the end, the short arc.
+##   D1  refusal (slice D, item 5): after a stale take-back and after forget, in-flight claims
+##       are refused and counted; only a claim-free input clears it; other peers and props are
+##       unaffected; remove_prop drops the marks.
 ##   E1  end to end: one host authority, two controllers, a 3-tick link each way, toy bodies:
 ##       claim, grant, follow, forwarded presses, settled release, re-claim by the other peer,
 ##       a claim on a host-held prop lost; snapshot and bookkeeping invariants.
@@ -385,11 +388,14 @@ func _case_a0() -> void:
 	a.apply_now(41, Vector3(3, 0, 0))
 	_check(_is_empty_dict(a.update(41, false, 1501)) and a.owner_of(41) == "" and a.takebacks == 1,
 			"A0: update returns {} on the call that takes a stale owner's prop back")
+	# The owner stops claiming after a take-back; its claim-free input clears the refusal (D1).
+	a.on_input("g1", _inp({}), 1600)
 	a.on_input("g1", _inp({41: _rep(2, 0, 0)}), 2000)
 	a.apply_now(41, Vector3(3, 0, 0))
 	_check(_is_empty_dict(a.forget("g1")) and a.owner_of(41) == "" and a.takebacks == 2,
 			"A0: forget returns {} on the call that takes the prop back")
 	_check(_is_empty_dict(a.forget("nobody")), "A0: forget of an unknown peer returns {}")
+	a.on_input("g1", _inp({}), 2050)
 	a.on_input("g1", _inp({41: _rep(3, 0, 0), 42: _rep(3, 0, 0)}), 3000)
 	a.apply_now(41, Vector3(5, 0, 0))
 	a.apply_now(42, Vector3(6, 0, 0))
@@ -415,6 +421,7 @@ func _case_a5() -> void:
 	a.update(50, false, 1501)
 	_check(a.owner_of(50) == "" and a.takebacks == 1 and _is_empty_pf(a.target_for(50, 1501)),
 			"A5: stale 501 ms after the last report: taken back on update, target empty")
+	a.on_input("g1", _inp({}), 1600)
 	a.on_input("g1", _inp({50: _rep(2, 10, 10)}), 2000)
 	a.on_input("g1", _inp({50: _rep(3, 10, 10)}), 2400)
 	a.update(50, false, 2900)
@@ -433,6 +440,7 @@ func _case_a5() -> void:
 	a.forget("g1")
 	_check(a.takebacks == 4 and a.releases == 0, "A5: a second forget changes nothing; take-backs are not releases")
 	# A freed prop's inner targets forgot the peer: a new claim starts a fresh tick clock.
+	a.on_input("g1", _inp({}), 3050)
 	a.on_input("g1", _inp({51: _rep(1, 4, 4)}), 3100)
 	_check(a.owner_of(51) == "g1" and _pfclose(a.target_for(51, 3100), [4, 4, 0, 0, 0, 0]),
 			"A5: after forget, the peer's restarted tick 1 is accepted on a new claim")
@@ -1182,6 +1190,45 @@ func _apply_all(state: PackedFloat32Array, presses: Variant) -> PackedFloat32Arr
 	return b
 
 
+# --- D1 refusal (item 5) --------------------------------------------------------------------
+
+
+func _case_d1() -> void:
+	var a := _auth([70, 71, 72])
+	# A stale take-back refuses the old owner's in-flight claims; only a claim-free input clears it.
+	a.on_input("g1", _inp({70: _rep(1, 10, 10)}), 1000)
+	a.update(70, false, 1501)
+	_check(a.owner_of(70) == "" and a.takebacks == 1, "D1: setup: prop 70 taken back after going stale")
+	a.on_input("g1", _inp({70: _rep(2, 20, 20)}), 1600)
+	a.on_input("g1", _inp({70: _rep(3, 25, 25)}), 1650)
+	_check(a.owner_of(70) == "" and a.grants == 1 and a.refused_claims == 2 and _is_empty_pf(a.target_for(70, 1650)),
+			"D1: in-flight claims after a stale take-back are refused and counted; a claim does not clear the refusal")
+	a.on_input("g1", _inp({}), 1700)
+	a.on_input("g1", _inp({70: _rep(4, 30, 30)}), 1800)
+	_check(a.owner_of(70) == "g1" and a.grants == 2 and a.refused_claims == 2
+			and _pfclose(a.target_for(70, 1800), [30, 30, 0, 0, 0, 0]),
+			"D1: a claim-free input clears the refusal; the next claim is granted")
+	# forget refuses the same way; another peer and another prop are unaffected.
+	a.on_input("g2", _inp({71: _rep(1, 5, 5)}), 2000)
+	a.forget("g2")
+	a.on_input("g2", _inp({71: _rep(2, 6, 6)}), 2100)
+	_check(a.owner_of(71) == "" and a.refused_claims == 3 and a.takebacks == 2,
+			"D1: an in-flight claim after forget is refused and counted")
+	a.on_input("g3", _inp({71: _rep(1, 7, 7)}), 2110)
+	_check(a.owner_of(71) == "g3", "D1: another peer can claim the prop the refused peer lost")
+	# One input, both props: 71 stays refused (its claim keeps the mark), 72 is granted.
+	a.on_input("g2", _inp({71: _rep(3, 6, 6), 72: _rep(1, 8, 8)}), 2120)
+	_check(a.owner_of(72) == "g2" and a.owner_of(71) == "g3" and a.refused_claims == 4,
+			"D1: the refused peer's claim on another prop is granted in the same input")
+	# remove_prop drops the marks with the prop: a re-added prop grants the old owner again.
+	a.forget("g2")
+	a.remove_prop(72)
+	a.add_prop(72, KIND6, MASS, INERTIA)
+	a.on_input("g2", _inp({72: _rep(1, 9, 9)}), 2400)
+	_check(a.owner_of(72) == "g2" and a.refused_claims == 4 and a.takebacks == 3,
+			"D1: remove_prop drops the prop's refusals")
+
+
 # --- driver ---------------------------------------------------------------------------------
 
 
@@ -1207,6 +1254,7 @@ func _run() -> void:
 	_section("O5", _case_o5)
 	_section("O6", _case_o6)
 	_section("E1", _case_e1)
+	_section("D1", _case_d1)
 
 	print("")
 	print("G18 prop authority: %d/%d checks passed" % [_checks - failures, _checks])

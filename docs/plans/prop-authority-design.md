@@ -705,6 +705,7 @@ wrote. Survivors get a case, then the script is re-run.
 | d01 | no refusal | D1 |
 | d02 | refusal never cleared | D1 |
 | d03 | refusal blocks every prop of the peer | D1 |
+| d04 | claim-free rule cleared by any input, claims included (added in D) | D1 |
 | c01 | no transfer | C1 |
 | c02 | transfer while the owner touches it | C1 |
 | c03 | run gap ignored | C1 |
@@ -951,3 +952,34 @@ The approved P4 press-loss limit is unchanged. Daniel authorized push and PR cre
 on 2026-10-08; A2 is pushed and PR #33 is open against addon main. This publication
 status update changes docs only; production code remains exactly the verified `664c364`.
 No merge or demo edits yet. Next work is a discussion with Daniel, then B1 after A2 merges.
+
+## D verification milestone (2026-10-09)
+
+Slice D (item 5) is implemented in code commit `fea1ccd` on `feat/prop-authority-refuse`,
+based on addon main `07829c8` (A2 merged, PR #33). The diff is about 21 added and 7 removed
+lines of production code, comments included. The refusal is per (prop, peer); no
+game-specific logic.
+
+- Fresh read-only Codex adversarial review (background job, no build or test commands run
+  concurrently; the reviewer model was not recorded): **approve, no material findings.** It checked
+  the item 5 rule, the host state table, the per-peer and per-prop scope, and the
+  generality check.
+- G18 on Godot 4.4 and 4.7 in fresh scratch projects holding a plain copy of the addon:
+  **220/220 on each**, no FAIL, SCRIPT ERROR or Parse Error lines. That is the 213
+  pre-existing checks plus 7 D1 checks.
+- Two existing A0 and A5 steps now send a claim-free input from the peer between a
+  take-back and its next claim. Without it, the re-claim is the in-flight case this slice
+  refuses, and the old assertions fail. The assertions are unchanged; only the input
+  sequence changed. A real owner sends that claim-free input after a take-back.
+- Full Godot 4.7 mutation pass (`prop-authority-mutations.py` in a scratch copy with no
+  `.git`): **33/33 killed by their named cases**, 29 pre-existing and d01 to d04. No
+  survivors. The two script-error lines belong to h12, as in A2.
+- d03 survived the first D1 draft. Its refused-on-one-prop, granted-on-another step was
+  not in the test, because the claim on the other prop cleared the mark first. The D1 case
+  now sends both props in one input, so the mark stays in force while the other claim is
+  granted.
+- Not added: a mutant for "`remove_prop` keeps marks". Marks live in the prop's record, so
+  removing the prop drops them by construction; a mutant would mean restructuring the record.
+  D1's re-add check covers the behaviour.
+- Demo: unchanged. The demo submodule stays pinned to `07829c8`. D' is folded into C', as
+  Daniel decided on 2026-10-09; C' includes D and its batch covers both.
