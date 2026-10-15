@@ -274,7 +274,10 @@ func stop(reason: String) -> void:
 	if not _engaged:
 		return
 	_engaged = false
-	_steam_baseline_pending = false
+	# A provider outage can invalidate the link and then clear membership.
+	# Keep its baseline barrier through re-entry so hello alone cannot unblock
+	# gameplay. Ordinary departures and voluntary stops clear the barrier.
+	_steam_baseline_pending = _steam_baseline_pending and reason == "lobby-unavailable"
 	_steam_peer_handshakes.clear()
 	_active = false
 	_epoch = CouchEnvelope.UNKNOWN_EPOCH
@@ -743,11 +746,13 @@ func _dispatch(kind: String, envelope: Dictionary, sender_id: String) -> void:
 ## sender's outgoing counters are NOT reset when it adopts a new epoch, because
 ## restarting at 1 against a receiver already at N wedges on epoch churn.
 func _restart_as_guest(reason: String) -> void:
+	var was_active := _active
 	_active = false
 	_local_slot = SLOT_SPECTATOR
 	_peer_name = ""
 	_next_hello_retry_ms = 0
-	session_stopped.emit(reason)
+	if was_active or reason != "steam-link-gap":
+		session_stopped.emit(reason)
 
 
 func _on_transport_gap(peer_id: String, reason: String) -> void:

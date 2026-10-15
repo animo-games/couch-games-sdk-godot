@@ -35,7 +35,10 @@ func _run() -> void:
 	_selection()
 	await _initialization()
 	await _membership_events()
+	await _lobby_session()
 	await _fixture_start_order()
+	await _outage_recovery()
+	await _outage_recovery_limits()
 	await _lifecycle_validation()
 	await _achievements()
 	await _hardening_regressions()
@@ -43,6 +46,7 @@ func _run() -> void:
 	_native_callback_correlation()
 	await _classic_achievements()
 	await _ui()
+	await _active_match_fixture()
 	for node in _owned:
 		if is_instance_valid(node): node.free()
 	print("Steam deterministic contracts: %d checks, %d failures" % [checks, failures])
@@ -99,6 +103,76 @@ func _initialization() -> void:
 	check(not missing.supports("achievements") and not missing.webrtc.is_available, "failed Steam exposes no usable capabilities/WebRTC")
 	missing.free()
 	ProjectSettings.set_setting("couch_games/backend", "auto")
+func _lobby_session() -> void:
+	# CouchLobbySession over fake Steam networking. The guest starts first, the
+	# order that previously left a guest without a baseline.
+	var provider := Bridge.new()
+	var host_backend := _backend(provider)
+	await host_backend.initialize()
+	var response: Dictionary = await host_backend.lobby_host({"max_players": 2})
+	check(response.success, "lobby session host enters")
+	var guest_provider := Bridge.new()
+	guest_provider.user_id = "76561198000000002"
+	guest_provider.hub = provider.hub
+	var guest_backend := _backend(guest_provider)
+	await guest_backend.initialize()
+	response = await guest_backend.lobby_join(host_backend.lobby_id)
+	check(response.success, "lobby session guest joins")
+	var host_lobby := CouchLobby.new()
+	host_lobby.setup(host_backend)
+	root.add_child(host_lobby)
+	_owned.append(host_lobby)
+	var guest_lobby := CouchLobby.new()
+	guest_lobby.setup(guest_backend)
+	root.add_child(guest_lobby)
+	_owned.append(guest_lobby)
+	host_lobby.refresh_players()
+	guest_lobby.refresh_players()
+	# The provider reads this holder at call time; a captured local would be stale.
+	var state := {"revision": 1}
+	var host_net := CouchLobbySession.new()
+	root.add_child(host_net)
+	_owned.append(host_net)
+	host_net.snapshot_provider = func(): return state.duplicate()
+	var guest_net := CouchLobbySession.new()
+	root.add_child(guest_net)
+	_owned.append(guest_net)
+	var snapshots := []
+	var latest := {"revision": 0}
+	guest_net.snapshot_received.connect(func(body):
+		snapshots.append(body)
+		latest.revision = body.revision)
+	var intents := []
+	host_net.intent_received.connect(func(body, sender): intents.append([body, sender]))
+	guest_net.start(guest_lobby)
+	host_net.start(host_lobby)
+	await _pump_sessions(host_backend, guest_backend, func(): return not snapshots.is_empty())
+	check(host_net.is_host() and guest_net.is_active() and not guest_net.is_host(), "helper starts host and guest sessions")
+	check(snapshots.size() >= 1 and snapshots[0].revision == 1, "guest-first start receives the host baseline without game code")
+	state.revision = 2
+	check(host_net.send_snapshot({"revision": 2}), "host publishes an updated snapshot")
+	# Duplicate baselines from hello retries may arrive first, so wait for revision 2 itself.
+	await _pump_sessions(host_backend, guest_backend, func(): return latest.revision == 2)
+	check(latest.revision == 2, "updated snapshot reaches the guest")
+	check(guest_net.send_intent({"action": "pick"}), "guest intent accepted by the helper")
+	await _pump_sessions(host_backend, guest_backend, func(): return not intents.is_empty())
+	check(intents.size() == 1 and intents[0][1] == guest_provider.user_id and intents[0][0].action == "pick", "host receives an authenticated guest intent")
+	host_net.stop()
+	check(not host_net.is_active() and not host_lobby.players_changed.is_connected(host_net._reevaluate), "stop releases session and lobby signals")
+	guest_net.stop()
+	check(not guest_net.is_active(), "guest helper stops")
+	host_backend.shutdown()
+	guest_backend.shutdown()
+
+
+func _pump_sessions(host_backend: Node, guest_backend: Node, done: Callable) -> void:
+	var deadline := Time.get_ticks_msec() + 5000
+	while not done.call() and Time.get_ticks_msec() < deadline:
+		host_backend.poll(Time.get_ticks_msec())
+		guest_backend.poll(Time.get_ticks_msec())
+		await process_frame
+
+
 func _backend(provider: Node) -> Node:
 	var backend := SteamBackend.new()
 	backend.bridge = provider
@@ -221,8 +295,12 @@ func _membership_events() -> void:
 	host.poll(Time.get_ticks_msec())
 	check(intents.size() == 1 and intents[0][1] == guest_provider.user_id, "session authenticates guest intent over Steam lobby transport")
 	var hellos_before := hellos.size()
+	var gap_stops := []
+	guest_session.session_stopped.connect(func(reason): gap_stops.append(reason))
 	provider.peer_failed.emit(guest_provider.user_id, "broken")
 	guest_provider.peer_failed.emit(provider.user_id, "broken")
+	guest_provider.peer_failed.emit(provider.user_id, "still-broken")
+	check(gap_stops == ["steam-link-gap"], "repeated link failures emit one inactive guest stop")
 	check(not guest_session.send_intent({"action": "stale"}), "broken link blocks stale guest gameplay")
 	for step in range(6):
 		host.poll(Time.get_ticks_msec())
@@ -347,6 +425,151 @@ func _fixture_start_order() -> void:
 		guest_lobby.free()
 		host.lobby_leave()
 		guest.lobby_leave()
+
+func _outage_recovery() -> void:
+	var provider := Bridge.new()
+	var host := _backend(provider)
+	await host.initialize()
+	check((await host.lobby_host({})).success, "outage host enters")
+	var original_id: String = host.lobby_id
+	var guest_provider := Bridge.new()
+	guest_provider.user_id = "76561198000000002"
+	guest_provider.hub = provider.hub
+	var guest := _backend(guest_provider)
+	await guest.initialize()
+	check((await guest.lobby_join(original_id)).success, "outage guest enters")
+	var host_lobby := CouchLobby.new()
+	host_lobby.setup(host)
+	host_lobby.refresh_players()
+	var guest_lobby := CouchLobby.new()
+	guest_lobby.setup(guest)
+	guest_lobby.refresh_players()
+	var host_sdk := SDK.new()
+	host_sdk.lobby = host_lobby
+	var guest_sdk := SDK.new()
+	guest_sdk.lobby = guest_lobby
+	var host_driver := _LiveFixture.new()
+	host_driver.sdk = host_sdk
+	var guest_driver := _LiveFixture.new()
+	guest_driver.sdk = guest_sdk
+	host_lobby.players_changed.connect(func(_players): host_driver.session.evaluate(Time.get_ticks_msec()))
+	guest_lobby.players_changed.connect(func(_players): guest_driver.session.evaluate(Time.get_ticks_msec()))
+	host_driver._start_session()
+	guest_driver._start_session()
+	var snapshots := []
+	guest_driver.session.snapshot_received.connect(func(body): snapshots.append(body))
+	var before_baseline := []
+	var intents := []
+	guest_driver.session.session_started.connect(func(_epoch, _host, _slot, _peer, _name):
+		if host_driver._revision == 73:
+			before_baseline.append(guest_driver.session.send_intent({"action": "premature"})))
+	host_driver.session.intent_received.connect(func(body, _sender): intents.append(body))
+	for step in range(6):
+		host.poll(Time.get_ticks_msec())
+		guest.poll(Time.get_ticks_msec())
+		host_driver._process(0.0)
+		guest_driver._process(0.0)
+	check(guest_driver.session.active and not snapshots.is_empty(), "outage starts with applied baseline")
+	var before := snapshots.size()
+	host_driver._revision = 73
+	guest_provider.online = false
+	guest_provider.connection_changed.emit(false)
+	provider.hub.lobbies[original_id].members.erase(guest_provider.user_id)
+	provider.notify_roster(original_id)
+	check(not guest_driver.session.send_intent({"action": "stale"}), "outage rejects stale gameplay")
+	guest_provider.online = true
+	guest_provider.connection_changed.emit(true)
+	for step in range(12):
+		host.poll(Time.get_ticks_msec())
+		guest.poll(Time.get_ticks_msec())
+		host_driver._process(0.0)
+		guest_driver._process(0.0)
+		await process_frame
+	check(guest.state == "joined" and guest.lobby_id == original_id,
+		"outage guest rejoins original lobby without invitation")
+	check(guest_driver.session.active and snapshots.size() > before and snapshots.back().revision == 73,
+		"outage fixture resumes with fresh baseline without Start click")
+	check(not before_baseline.is_empty() and not before_baseline.has(true), "outage blocks gameplay between hello and fresh baseline")
+	check(guest_driver.session.send_intent({"action": "fresh"}), "outage allows gameplay after baseline")
+	host.poll(Time.get_ticks_msec())
+	check(intents == [{"action": "fresh"}], "outage never delivers stale or premature gameplay")
+	# Explicit Leave must cancel a pending automatic rejoin.
+	guest_provider.online = false
+	guest_provider.connection_changed.emit(false)
+	guest.lobby_leave()
+	guest_provider.online = true
+	guest_provider.connection_changed.emit(true)
+	for step in range(4):
+		guest.poll(Time.get_ticks_msec())
+		await process_frame
+	check(guest.state == "idle" and guest.lobby_id.is_empty(), "Leave cancels outage recovery")
+	host_driver.transport.close()
+	guest_driver.transport.close()
+	host_driver.free()
+	guest_driver.free()
+	host_sdk.free()
+	guest_sdk.free()
+	host_lobby.free()
+	guest_lobby.free()
+
+func _outage_recovery_limits() -> void:
+	for scenario in ["host-left", "changed-token", "expired", "cancel-pending", "account-changed", "missing-callback", "second-outage", "transient-failure"]:
+		var provider := Bridge.new()
+		var host := _backend(provider)
+		await host.initialize()
+		await host.lobby_host({})
+		var id: String = host.lobby_id
+		var guest_provider := Bridge.new()
+		guest_provider.user_id = "76561198000000002"
+		guest_provider.hub = provider.hub
+		var guest := _backend(guest_provider)
+		await guest.initialize()
+		await guest.lobby_join(id)
+		guest_provider.online = false
+		if scenario != "missing-callback": guest_provider.connection_changed.emit(false)
+		guest.poll(Time.get_ticks_msec())
+		check(guest.state == "reconnecting", "outage suspends guest: " + scenario)
+		if scenario == "host-left": host.lobby_leave()
+		if scenario == "changed-token": provider.hub.lobbies[id].metadata.couch_token = "different-session"
+		if scenario == "expired": guest.get("_recovery").deadline = 0
+		if scenario in ["cancel-pending", "second-outage", "transient-failure"]: guest_provider.hold_membership = true
+		if scenario == "account-changed": guest_provider.app_id = "456"
+		guest_provider.online = true
+		guest_provider.connection_changed.emit(true)
+		guest.poll(Time.get_ticks_msec())
+		if scenario == "cancel-pending":
+			check(guest.state == "joining" and guest_provider.requests.size() == 1, "automatic native join can be pending")
+			guest.lobby_leave()
+			guest_provider.complete_next()
+		elif scenario == "second-outage":
+			guest_provider.online = false
+			guest_provider.connection_changed.emit(false)
+			guest_provider.complete_next()
+			check(guest.state == "joining" and not guest.lobby_is_available(), "offline native entry cannot finish recovery")
+			guest_provider.online = true
+			guest_provider.connection_changed.emit(true)
+		elif scenario == "transient-failure":
+			guest_provider.requests[0].code = "unavailable"
+			# A refused native join does not establish membership. The fake
+			# ordinarily pre-adds it before delivering its successful callback.
+			provider.hub.lobbies[id].members.erase(guest_provider.user_id)
+			guest_provider.complete_next()
+			check(guest.state == "reconnecting", "transient native join failure retains recovery")
+			guest.poll(Time.get_ticks_msec() + 2001)
+			guest_provider.complete_next()
+		for step in range(4):
+			await process_frame
+			guest.poll(Time.get_ticks_msec())
+		if scenario in ["host-left", "changed-token", "expired"]:
+			check(guest.state == "failed" and guest.lobby_id.is_empty() and guest.get("_recovery").is_empty(),
+				"outage rejects unsafe or expired recovery: " + scenario)
+		elif scenario == "cancel-pending":
+			check(guest.state == "idle" and not provider.hub.lobbies[id].members.has(guest_provider.user_id),
+				"late automatic join cannot resurrect membership after Leave")
+		elif scenario == "account-changed":
+			check(not guest.is_available() and guest.get("_recovery").is_empty(), "account change cancels recovery")
+		else:
+			check(guest.state == "joined" and guest.lobby_id == id, "outage completes recovery: " + scenario)
 
 func _award_call(awards: Node, key: String, job: Dictionary) -> void:
 	job.result = await awards.unlock(key)
@@ -567,6 +790,84 @@ func _lifecycle_validation() -> void:
 	check(ordering.size() == 2, "identical refresh does not duplicate roster signals")
 	host.shutdown()
 	guest.shutdown()
+
+func _active_match_fixture() -> void:
+	for lost_membership in [false, true]:
+		var host_provider := Bridge.new()
+		var original_host := _backend(host_provider)
+		await original_host.initialize()
+		await original_host.lobby_host({})
+		var original_id: String = original_host.lobby_id
+		var provider := Bridge.new()
+		provider.user_id = "76561198000000012"
+		provider.hub = host_provider.hub
+		var backend := SteamBackend.new()
+		backend.bridge = provider
+		backend.game_id = "sdk-fixture"
+		var sdk := SDK.new()
+		sdk.backend_override = backend
+		root.add_child(sdk)
+		await sdk.init()
+		check((await sdk.lobby.join(original_id)).success, "active-match fixture joins original lobby")
+		var panel := _LiveFixture.FixtureLobbyPanel.new()
+		panel.sdk = sdk
+		root.add_child(panel)
+		await process_frame
+		var driver := _LiveFixture.new()
+		driver.sdk = sdk
+		driver._panel = panel
+		driver._add_match_controls()
+		driver._match_toggle.button_pressed = true
+		check(panel.match_active and panel.get("_start").disabled, "fixture toggle sets actual panel active-match guard")
+		var replacement_provider := Bridge.new()
+		replacement_provider.user_id = "76561198000000013"
+		replacement_provider.hub = provider.hub
+		var replacement := _backend(replacement_provider)
+		await replacement.initialize()
+		await replacement.lobby_host({})
+		var target_id: String = replacement.lobby_id
+		if lost_membership:
+			original_host.lobby_leave()
+			host_provider.notify_roster(original_id)
+			check(sdk.lobby.state == "failed" and panel.match_active, "fixture retains active match after old lobby disappears")
+		var before_id: String = sdk.lobby.lobby_id
+		var left_before := provider.left.size()
+		provider.hold_membership = true
+		provider.join_requested.emit(target_id)
+		check(panel.get("_confirmation").visible and provider.requests.is_empty()
+			and provider.left.size() == left_before and sdk.lobby.lobby_id == before_id,
+			"active invitation waits for confirmation; lost_membership=%s" % lost_membership)
+		panel.get("_confirmation").canceled.emit()
+		panel.get("_confirmation").hide()
+		check(panel.match_active and driver._match_toggle.button_pressed and provider.requests.is_empty()
+			and sdk.lobby.lobby_id == before_id and panel.get("_pending_invite").is_empty(),
+			"cancel preserves match and membership without native join")
+		provider.join_requested.emit(target_id)
+		check(panel.get("_confirmation").visible, "second invitation asks again after cancel")
+		panel.get("_confirmation").confirmed.emit()
+		panel.get("_confirmation").hide()
+		check(not panel.match_active and not driver._match_toggle.button_pressed
+			and sdk.lobby.state == "joining" and provider.requests.size() == 1,
+			"confirmed invitation explicitly ends test match and begins one join")
+		provider.complete_next()
+		await process_frame
+		check(sdk.lobby.state == "joined" and sdk.lobby.lobby_id == target_id
+			and not panel.match_active, "confirmed switch joins replacement lobby")
+		driver._match_toggle.button_pressed = true
+		panel._on_leave()
+		check(panel.get("_confirmation").visible and sdk.lobby.lobby_id == target_id,
+			"active Leave also waits for confirmation")
+		panel.get("_confirmation").canceled.emit()
+		panel.get("_confirmation").hide()
+		check(panel.match_active and sdk.lobby.lobby_id == target_id, "canceling Leave preserves active match")
+		panel._on_leave()
+		panel.get("_confirmation").confirmed.emit()
+		panel.get("_confirmation").hide()
+		check(sdk.lobby.state == "idle" and not panel.match_active
+			and not driver._match_toggle.button_pressed, "confirmed Leave clears test-match flag and leaves")
+		driver.free()
+		panel.free()
+		sdk.free()
 
 func _ui() -> void:
 	var provider := Bridge.new()

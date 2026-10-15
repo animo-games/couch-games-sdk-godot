@@ -67,7 +67,7 @@ func _button(label: String, callback: Callable) -> Button:
 
 func _refresh() -> void:
 	if sdk == null: return
-	var entering: bool = sdk.lobby.state in ["creating", "joining", "leaving"]
+	var entering: bool = sdk.lobby.state in ["creating", "joining", "leaving", "reconnecting"]
 	var joined: bool = sdk.lobby.state == "joined"
 	_host.visible = sdk.supports("lobby_host")
 	_join.visible = sdk.supports("lobby_join")

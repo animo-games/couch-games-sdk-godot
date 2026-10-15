@@ -20,6 +20,28 @@ The achievement control stays disabled until a published API name is supplied
 with `--achievement NAME`. This enables manual read/award testing; no achievement
 is awarded merely by starting the launcher.
 
+For active-match invitation testing, switch on **Test match active (confirm
+invitations / leave)** after establishing the initial lobby/session. This sets
+the reusable panel's actual game-owned `match_active` flag. Session startup alone
+does not set it. A canceled invitation or Leave keeps the flag on; confirming
+either clears it explicitly. Disconnection does not silently end this simulated
+local match.
+
+With two accounts, host on Windows and invite Linux, then start both local
+sessions and check the Linux baseline. On Linux switch the test match on, click
+Leave and cancel its confirmation; the existing lobby must remain usable.
+Next, Windows leaves and hosts a new lobby. Linux retains its active-match flag
+even after the old host departs. Windows invites Linux to the new lobby. Accept
+the Steam invitation and cancel the fixture's confirmation: Linux must keep its
+flag and must not enter the replacement lobby. Invite again, accept in Steam,
+then confirm in the fixture: Linux should clear the flag, join the replacement
+lobby and apply a fresh baseline. Verify new events in both directions.
+
+This two-account test covers consent with a retained local match after the
+old lobby disappears. Preserving a still-connected old lobby while a different
+host invites the guest requires another test account. Record which case was
+actually exercised; the checkbox simulates local match state, not game progress.
+
 The example deliberately hosts a public two-slot SDK test lobby for joining by
 ID. On one computer, click **Host**. Copy the lobby ID displayed beside `joined`
 into the other computer's **Lobby ID** field and click **Join**. Send the

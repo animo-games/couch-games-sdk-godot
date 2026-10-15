@@ -11,6 +11,8 @@ var transport: Object
 var _revision := 0
 var _output: RichTextLabel
 var _lines := PackedStringArray()
+var _panel: FixtureLobbyPanel
+var _match_toggle: CheckButton
 func _ready() -> void:
 	var app_id := 0
 	var api_name := ""
@@ -31,9 +33,10 @@ func _ready() -> void:
 	sdk = load("res://addons/couch-games-sdk/core/couch_games_sdk.gd").new()
 	add_child(sdk)
 	var panel := FixtureLobbyPanel.new()
+	_panel = panel
 	panel.sdk = sdk
 	panel.visibility = visibility
-	panel.title = "Steam SDK acceptance fixture (%s lobby)" % visibility
+	panel.title = "Steam SDK invitation confirmation fixture (%s lobby)" % visibility
 	add_child(panel)
 	panel.start_game_requested.connect(_start_session)
 	sdk.lobby.players_changed.connect(func(_players):
@@ -54,12 +57,33 @@ func _ready() -> void:
 	baseline.text = "Start local session"
 	baseline.pressed.connect(_start_session)
 	panel.add_child(baseline)
+	_add_match_controls()
 	_output = RichTextLabel.new()
 	_output.custom_minimum_size = Vector2(540, 180)
 	_output.scroll_following = true
 	panel.add_child(_output)
 	await sdk.init()
 	_log("INITIALIZATION %s / %s %s" % [sdk.backend_name, sdk.initialization_state, sdk.initialization_error])
+
+func _add_match_controls() -> void:
+	_match_toggle = CheckButton.new()
+	_match_toggle.text = "Test match active (confirm invitations / leave)"
+	_match_toggle.tooltip_text = "Simulates the game's active-match flag. It stays set through disconnection and cancellation; confirmation or switching it off ends this test match."
+	_match_toggle.toggled.connect(_set_match_active)
+	_panel.add_child(_match_toggle)
+	_panel.get("_confirmation").confirmed.connect(_on_match_confirmed)
+	_panel.get("_confirmation").canceled.connect(func(): _log("MATCH CHANGE CANCELED"))
+
+func _set_match_active(value: bool) -> void:
+	_panel.match_active = value
+	_match_toggle.set_pressed_no_signal(value)
+	_panel._refresh()
+	_log("MATCH ACTIVE %s" % value)
+
+func _on_match_confirmed() -> void:
+	if _panel.match_active:
+		_set_match_active(false)
+		_log("MATCH CHANGE CONFIRMED")
 
 func _log(message: String, display := "") -> void:
 	print(message)
@@ -90,6 +114,9 @@ func _start_session() -> void:
 		return
 	transport = CouchLobbyTransport.new(sdk.lobby)
 	session = CouchSession.new(sdk.lobby, transport)
+	# Entry can publish its roster while still joining. Re-evaluate only after
+	# the backend confirms joined, including reuse after an automatic rejoin.
+	sdk.lobby.state_changed.connect(_on_lobby_state)
 	session.hello_received.connect(_send_baseline)
 	session.snapshot_received.connect(func(body): _log("BASELINE %s" % str(body)))
 	session.session_started.connect(func(epoch, host, slot, _peer, _name):
@@ -103,6 +130,10 @@ func _start_session() -> void:
 	session.evaluate(Time.get_ticks_msec())
 func _send_baseline(_sender: String) -> void:
 	_log("BASELINE ACCEPTED %s" % str(session.broadcast_snapshot({"fixture": true, "revision": _revision})))
+func _on_lobby_state(state: String) -> void:
+	_log("LOBBY STATE %s" % state)
+	if session != null:
+		session.evaluate(Time.get_ticks_msec())
 func _process(_delta: float) -> void:
 	if session != null:
 		transport.poll(Time.get_ticks_msec())

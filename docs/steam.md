@@ -195,12 +195,78 @@ existing session hello and snapshot. Guests
 block gameplay sends until that baseline; host `hello_received` handlers must
 send a complete snapshot. There is no second Steam authority or snapshot system.
 
+When an already joined guest loses its Steam connection, the backend enters
+`reconnecting`, clears its unusable membership, and remembers the original lobby,
+authority and session token for at most two minutes. Once Steam is online it
+attempts re-entry through the normal native join and compatibility validation;
+transient failures retry every two seconds within that window. A changed
+authority/token or expired window ends recovery with a visible operation error.
+Explicit Leave, a different invitation handled through Leave, shutdown, or an
+account/App ID change cancels recovery. No replacement lobby or authority is
+created automatically. Steam still controls private-lobby admission; a live
+test must establish whether prior invitation permission allows automatic re-entry.
+
+Games retaining a session object must evaluate it after the lobby's `joined`
+state notification: roster updates can arrive before join validation completes.
+The acceptance fixture does this automatically once its local session has been
+started. After a Steam outage the guest cannot send gameplay until it receives
+the fresh authoritative baseline. Repeated gaps during the same inactive guest
+recovery do not emit repeated session-stop messages.
+
 Instantiate `ui/couch_lobby_panel.tscn`, set title, connect
 `start_game_requested`, and set `match_active` from your game. The panel offers
 Host/Join/Invite/Leave according to capabilities, shows roster and status, handles
 both invitation entry paths, and asks before abandoning an active match. Couch
 and local relay retain their existing entry workflows. The panel owns no game
 rules. Listen to session state and leave events to dispose game sessions.
+
+The interactive acceptance fixture has **Test match active (confirm invitations
+/ leave)** to exercise this guard deliberately. It preserves the test match
+through cancellation or loss of lobby membership, and clears it only when the
+tester switches it off or confirms abandonment. Deterministic checks use the
+actual fixture checkbox and panel to cover invitation cancel/confirm with both
+an intact and a lost old lobby, plus Leave cancel/confirm. The two-account live
+procedure in `fixtures/steam/README.md` exercises the retained-local-match case.
+
+### Session helper: `CouchLobbySession`
+
+`CouchLobbySession` is an opt-in node for the common host/guest game. It owns the
+lobby transport and `CouchSession`, polls them, re-evaluates on lobby and roster
+changes, and applies the baseline rules: the host answers each guest hello with
+a snapshot and publishes one when its own session starts. Games that need
+finer control keep using `CouchSession` directly.
+
+```gdscript
+var net := CouchLobbySession.new()
+add_child(net)
+net.snapshot_provider = func(): return {"revision": _revision, "board": _board}
+net.snapshot_received.connect(_apply_snapshot)
+net.intent_received.connect(_on_intent)   # host only: validate, apply, then broadcast
+net.start(CouchGames.lobby)               # or net.start() with the CouchGames autoload
+```
+
+Host: call `net.send_snapshot(state)` after each accepted change. Guest: call
+`net.send_intent(action)`; the host alone decides shared changes. `is_host()`,
+`is_active()`, and `session` (the underlying `CouchSession`) are available.
+`session_started`, `session_stopped(reason)`, `rejected`, and `transport_gap`
+are forwarded. `stop()` also runs on exit.
+
+### Steam project settings
+
+Configure Steam in Project Settings (or directly in `project.godot`) rather than
+on the command line:
+
+| Setting | Use |
+| --- | --- |
+| `couch_games/backend` | `steam` forces Steam in the editor; leave `auto` for normal editor work |
+| `couch_games/steam/app_id` | Your application ID |
+| `couch_games/steam/game_id` | Stable identifier that keeps other games' lobbies out |
+| `couch_games/steam/protocol_version` / `content_version` | Bump when incompatible |
+
+Native exports select Steam automatically through the `steam` feature, so the
+editor setting is only needed for editor testing. Enabling the editor plugin
+registers these settings with their defaults and documentation. A project that
+does not enable the plugin can still set them in `project.godot`.
 
 ## Checks and live acceptance
 

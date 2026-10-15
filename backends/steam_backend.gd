@@ -26,6 +26,10 @@ var _closed := false
 var _pinned_account := ""
 var _launch_invite := ""
 var _roster_wait_until := 0
+const RECOVERY_WINDOW_MS := 120000
+const RECOVERY_RETRY_MS := 2000
+var _recovery: Dictionary = {}
+var _was_connected := false
 
 func initialize() -> void:
 	if _closed or _active:
@@ -53,6 +57,7 @@ func initialize() -> void:
 	if not _active:
 		return
 	_pinned_account = bridge.app_id + "/" + bridge.user_id
+	_was_connected = bridge.connected()
 	if game_id.is_empty():
 		game_id = str(ProjectSettings.get_setting("couch_games/steam/game_id", ProjectSettings.get_setting("application/config/name", "")))
 	if game_id.is_empty():
@@ -118,6 +123,18 @@ func poll(now_ms: int) -> void:
 		return
 	if _awards != null:
 		_awards.poll(now_ms)
+	var connected: bool = bridge.connected()
+	if connected != _was_connected:
+		_on_connection_changed(connected)
+	if not _recovery.is_empty():
+		if now_ms >= int(_recovery.deadline):
+			_end_recovery("reconnect-timeout", "Could not restore the original lobby before recovery expired")
+		elif connected and state == "reconnecting" and now_ms >= int(_recovery.next_retry):
+			var operation := _begin_operation("joining")
+			operation.requested_id = _recovery.id
+			operation.recovery = true
+			if not bridge.join_lobby(_generation, _recovery.id):
+				_finish_operation(false, "busy", "A native membership request is still outstanding")
 	if not _operation.is_empty() and not _operation.done:
 		if now_ms >= int(_operation.deadline):
 			_finish_operation(false, "timeout", "Steam membership operation timed out")
@@ -205,12 +222,16 @@ func _on_entered(generation: int, id: String, code: String) -> void:
 	_validate_entry()
 
 func _validate_entry() -> void:
+	if not bridge.connected(): return # Await restored provider or operation timeout.
 	var values := {}
 	for key in ["game", "wire", "protocol", "content", "match", "authority", "token", "slots"]:
 		values[key] = bridge.metadata(lobby_id, "couch_" + key)
 		if values[key].is_empty(): return # bounded by operation deadline
 	if values.game != game_id or values.wire != str(_Events.WIRE_VERSION) or values.protocol != protocol_version or values.content != content_version or values.match not in ["lobby", "playing"]:
 		_finish_operation(false, "incompatible", "Lobby game/protocol/content is incompatible")
+		return
+	if not _recovery.is_empty() and (values.authority != _recovery.authority or values.token != _recovery.token):
+		_finish_operation(false, "host-left", "The original lobby authority or session changed")
 		return
 	var members: Array = bridge.lobby_members(lobby_id)
 	if not members.has(bridge.user_id):
@@ -241,13 +262,24 @@ func _finish_operation(success: bool, code := "", message := "") -> void:
 	_operation.done = true
 	_operation.result = {"success": true, "payload": {"lobby_id": lobby_id}} if success else _failure(code, message)
 	if success:
+		_recovery.clear()
 		_set_state("joined")
 	else:
+		var generation := _generation
 		_clear_membership()
-		_set_state("failed")
-		lobby_operation_failed.emit(code, message)
+		if generation != _generation or _closed: return
+		if _operation.get("recovery", false) and not _recovery.is_empty():
+			if code in ["timeout", "unavailable", "busy", "metadata-timeout"]:
+				_recovery.next_retry = Time.get_ticks_msec() + RECOVERY_RETRY_MS
+				_set_state("reconnecting")
+			else:
+				_end_recovery(code, message)
+		else:
+			_set_state("failed")
+			lobby_operation_failed.emit(code, message)
 
 func lobby_leave() -> void:
+	_recovery.clear()
 	if state == "idle" and lobby_id.is_empty(): return
 	_generation += 1
 	_set_state("leaving")
@@ -278,6 +310,10 @@ func _set_state(value: String) -> void:
 
 func _on_roster_changed(id: String) -> void:
 	if not is_available() or lobby_id.is_empty() or (not id.is_empty() and id != lobby_id): return
+	# Offline provider caches cannot establish authority or membership loss.
+	if not bridge.connected():
+		_on_connection_changed(false)
+		return
 	if state == "joined": _refresh_roster()
 	elif _operation.get("entered", false) and not _operation.get("done", true): _validate_entry()
 
@@ -294,7 +330,7 @@ func _fail_membership(code: String, message: String) -> void:
 func _refresh_roster() -> bool:
 	var members: Array = bridge.lobby_members(lobby_id)
 	if not members.has(_authority) or bridge.lobby_owner(lobby_id) != _authority or not members.has(bridge.user_id):
-		var code := "host-left" if not members.has(_authority) or bridge.lobby_owner(lobby_id) != _authority else "unavailable"
+		var code := "unavailable" if not members.has(bridge.user_id) else "host-left"
 		_fail_membership(code, "Original authority or local member left the lobby")
 		return false
 	for id in _members:
@@ -384,12 +420,34 @@ func _on_peer_failure(id: String, reason: String) -> void:
 		bridge.close_peer(id)
 		transport_gap.emit(id, "steam:" + reason)
 func _on_connection_changed(connected: bool) -> void:
+	if _closed or not _active: return
+	_was_connected = connected
 	capabilities_changed.emit()
 	if not connected:
 		for id in _members:
 			if id != bridge.user_id:
 				bridge.close_peer(id)
 				transport_gap.emit(id, "steam:disconnected")
+		if state == "joined" and _authority != bridge.user_id and _recovery.is_empty():
+			_recovery = {"id": lobby_id, "authority": _authority, "token": _token,
+				"deadline": Time.get_ticks_msec() + RECOVERY_WINDOW_MS, "next_retry": 0}
+			_generation += 1
+			var generation := _generation
+			_set_state("reconnecting")
+			if generation != _generation or _closed: return
+			_clear_membership()
+
+func _end_recovery(code: String, message: String) -> void:
+	_recovery.clear()
+	_generation += 1
+	if not _operation.is_empty() and not _operation.done:
+		_operation.done = true
+		_operation.result = _failure(code, message)
+	var generation := _generation
+	_clear_membership()
+	if generation != _generation or _closed: return
+	_set_state("failed")
+	lobby_operation_failed.emit(code, message)
 func unlock_achievement(key: String) -> Dictionary:
 	if _awards == null: return _failure("unavailable", "Achievements unavailable")
 	var result: Dictionary = await _awards.unlock(key)
