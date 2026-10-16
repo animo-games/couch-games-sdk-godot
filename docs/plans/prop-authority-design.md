@@ -197,6 +197,9 @@ func is_blending(entity_id: int) -> bool
 Slice C adds (and removes `blend_ms`):
 ```gdscript
 var transfer_gap_ms: int = 100       # forwarded presses closer than this are one continuous run
+                                     # (transfer tuning, 2026-10-16: now the FLOOR of the run gap)
+var transfer_jitter_ms: int = 50     # transfer tuning: run gap = max(floor, 3 * snapshot_ms + this)
+var transfer_run_ms: int = 200       # transfer tuning: run length (was release_idle_ms, 300)
 var offset_tau_ms: int = 100         # decay time constant of the claim and release offsets
 var offset_max_speed: float = 150.0  # units/s: an offset never closes faster than this
 var transfers: int = 0               # RELEASE for "transfer"
@@ -902,6 +905,11 @@ Ruling: option 1, as recommended.
 2. Transfer on the first press while idle. Faster, but a brush against an idle-held prop moves its
    ownership, and with item 2 dropped each transfer costs a round trip of presses.
 
+**Revised 2026-10-16 (Daniel, on Fable's recommendation; see "Transfer tuning" below):** the owner
+stays idle for `release_idle_ms` (300), but the press run is its own `transfer_run_ms` (200, less half
+a snapshot interval), with a run gap derived from the snapshot interval, and never fewer than three
+presses.
+
 ## Risks
 
 - The eased host target can sit a few px inside a wall the claimer's copy stopped at; physics holds
@@ -1020,3 +1028,52 @@ diff is +109 / -18 lines including comments, against the ~90 estimated above; it
   the rule needs changing, and that is a decision, not a fix.
 - Demo: unchanged. C' (demo transfer and claim/release gates on the drawn pose) comes next, with
   the batch covering D. Not started.
+
+## Transfer tuning (2026-10-16)
+
+The C' demo batch (36 runs per transport at 40/15) missed one transfer in 54 under lobby loss. The
+presser is stopped by a copy that moves a round trip later, so its steady contact lasts only
+~430-470 ms before it turns intermittent (gaps 69-400 ms). The 300 ms run had to fit that window,
+and presses arrive inside snapshots (33 ms apart), so one lost snapshot plus jitter and tick
+rounding (96-112 ms) broke a run at the fixed 100 ms gap. Fable's review, adopted by Daniel:
+
+- **Run gap** = `max(transfer_gap_ms, 3 * snapshot_ms + transfer_jitter_ms)`: 149 ms at
+  `snapshot_every` 2, two lost snapshots plus jitter, and it scales with the snapshot interval.
+  The liveness check uses the same gap.
+- **Run length** `transfer_run_ms` = 200, separate from `release_idle_ms`: the idle clock is the
+  owner's own contact (no network noise); the run is a lossy remote signal. A shorter run also
+  hands over earlier in the steady window, so the presser is stuck for less time.
+- **Off-by-one:** `last - start >= S` with arrivals a snapshot apart needs one arrival more than
+  `S / interval`, so the threshold is `S - snapshot_ms / 2` (184 ms).
+- **Taps** (deviation from Fable's exact formula, same intent): the run must also span more than
+  one gap (`gap + 1`), so it always takes at least three presses. At the defaults this changes
+  nothing (184 > 150); at `snapshot_every` 4 (gap 248) or a raised floor, two taps would
+  otherwise transfer.
+
+Gates: G18 C1 rewritten (derived gap at 33 and 66 ms intervals, floor, 180 vs 190 ms span, taps,
+liveness at 110 ms, own contact). Mutants c10-c16 added; c03's search string follows the code.
+
+### Deferred: the presser's copy yields locally (Fable, 2026-10-16)
+
+The intermittent tail is intrinsic to Rev 3: the presser is blocked by a copy that responds a round
+trip late. Fable's suggestion: let the presser's copy yield locally under its own press (a predicted
+nudge drawn through the same decaying offset as item 3), or let the presser's controller slide on
+remotely simulated props instead of stopping dead. This changes the Rev 3 rule ("solid as drawn, the
+response a round trip late") and is not slice E (host-acknowledged release). Daniel 2026-10-16:
+note it and come back when it fits the plan, after the 250 ms clip.
+
+
+### Transfer tuning verification (2026-10-16)
+
+- Gate first: the rewritten C1 failed 5 checks against the unchanged controller (plus a SCRIPT
+  ERROR for the missing `transfer_jitter_ms`).
+- G18 on Godot 4.4 and 4.7 in fresh scratch projects with a plain addon copy: **243/243 on each**
+  (233 before; C1 grew from 4 to 14 checks). G15 237/237, G16 375/375, G17 197/197 unchanged. No
+  FAIL, SCRIPT ERROR or Parse Error lines.
+- Two draft expectations were wrong, not the code: `_held()` is last near at 1100, so the idle
+  clock gated every case until 1400 (schedules moved 100 ms later); and with a gap wider than the
+  run, two presses transferred, which led to the three-press minimum.
+- Full Godot 4.7 mutation pass: **49/49 killed by their named cases** (42 earlier plus c10-c16).
+  c16 (liveness at a fixed 100 ms) survived the first draft; the 110 ms liveness case kills it.
+  h12 still emits script errors (as in A2); o16 now logs one too but is killed by 7 O6 asserts.
+- Demo: C' (branch `feat/prop-transfer-demo`) will pin this commit and rerun its batch.

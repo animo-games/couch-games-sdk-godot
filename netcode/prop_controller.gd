@@ -34,8 +34,12 @@
 ##      copy's speed < settle_speed, the copy's position within release_match of the last
 ##      render_pose sample (none yet: never), no queued press.
 ##   5. else (slice C, item 1) HELD and RELEASE "transfer" when not near, release_idle_ms since
-##      the last contact, and a press run is still live (the newest queued press is at most
-##      transfer_gap_ms old) that has lasted release_idle_ms. Not counted as a denial.
+##      the last contact, and a press run is still live (the newest queued press is at most the
+##      run gap old) that spans transfer_run_ms less half a snapshot interval, and always more
+##      than one run gap (so never fewer than three presses: two taps never transfer). The run gap is
+##      max(transfer_gap_ms, 3 * snapshot_ms + transfer_jitter_ms): presses arrive inside
+##      snapshots, so it tolerates two lost snapshots plus jitter at any snapshot interval. Not
+##      counted as a denial.
 ##   Every RELEASE: releases += 1, the press queue is cleared, the copy's pose at release is
 ##   the release offset's start (slice C, item 3), the claim offset and run tracking reset. on_snapshot queues a non-zero "pp"[eid]["pr"] (left += press,
 ##   ticks_left = snapshot_ticks, presses_applied += 1) only while predicting and named owner;
@@ -68,7 +72,9 @@ var settle_speed: float = 10.0      # units/s: the copy must be slower than this
 var release_match: float = 1.0      # units: the sample must show the prop this close to the copy
 var extrapolate_cap_ms: int = 250   # claim: newest snapshot advanced by at most this
 var claim_grace_ms: int = 150       # slack before an unanswered claim is given up
-var transfer_gap_ms: int = 100      # slice C: a press run stays live while presses come this close
+var transfer_gap_ms: int = 100      # slice C: floor of the run gap (see rule 5)
+var transfer_jitter_ms: int = 50    # run gap = max(transfer_gap_ms, 3 * snapshot_ms + this)
+var transfer_run_ms: int = 200      # a press run this long (less half a snapshot) transfers
 var offset_tau_ms: int = 100        # slice C: claim and release offsets close at k / tau
 var offset_max_speed: float = 150.0 # slice C: units/s; an offset never closes faster than this
 var claims: int = 0
@@ -142,8 +148,8 @@ func on_snapshot(extra: Dictionary, snapshot_ticks: int, now_ms: int) -> void:
 			rec["left"] += press
 			rec["ticks_left"] = snapshot_ticks
 			presses_applied += 1
-			# Slice C: a new run starts after a gap longer than transfer_gap_ms.
-			if int(rec["run_last_ms"]) < 0 or now_ms - int(rec["run_last_ms"]) > transfer_gap_ms:
+			# Slice C: a new run starts after a gap longer than the run gap.
+			if int(rec["run_last_ms"]) < 0 or now_ms - int(rec["run_last_ms"]) > _run_gap_ms():
 				rec["run_start_ms"] = now_ms
 			rec["run_last_ms"] = now_ms
 
@@ -325,14 +331,22 @@ func _release(rec: Dictionary, copy: PackedFloat32Array, now_ms: int, reason: St
 	return _decision(RELEASE, PackedFloat32Array(), reason)
 
 
-## Slice C, item 1 (P7): idle for release_idle_ms AND a press run that has lasted release_idle_ms
-## and is still live (its newest press is at most transfer_gap_ms old). The caller checks HELD
-## and not near.
+## Slice C, item 1 (P7): idle for release_idle_ms AND a live press run (newest press at most the
+## run gap old) spanning transfer_run_ms less half a snapshot interval (arrivals are a snapshot
+## apart, so a flat 200 would need one arrival more than the span), and more than one run gap: a
+## wide gap (long snapshot interval or a raised floor) must not let two taps transfer. The caller
+## checks HELD and not near.
 func _transfer_due(rec: Dictionary, now_ms: int) -> bool:
 	var last := int(rec["run_last_ms"])
-	return last >= 0 and now_ms - last <= transfer_gap_ms \
-			and last - int(rec["run_start_ms"]) >= release_idle_ms \
+	return last >= 0 and now_ms - last <= _run_gap_ms() \
+			and last - int(rec["run_start_ms"]) >= maxi(transfer_run_ms - _snapshot_ms / 2, _run_gap_ms() + 1) \
 			and now_ms - int(rec["contact_ms"]) >= release_idle_ms
+
+
+## The press-run gap: forwarded presses arrive inside snapshots, so two lost snapshots plus
+## jitter must not end a run (1 in 54 demo runs missed a transfer at a fixed 100 ms under 2% loss).
+func _run_gap_ms() -> int:
+	return maxi(transfer_gap_ms, 3 * _snapshot_ms + transfer_jitter_ms)
 
 
 ## The report: the copy plus the claim offset, which closes to 0 (slice C, item 3).

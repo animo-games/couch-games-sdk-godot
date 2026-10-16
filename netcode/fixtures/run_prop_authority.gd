@@ -693,7 +693,8 @@ func _case_o1() -> void:
 	_check(CouchPropController.NONE == 0 and CouchPropController.CLAIM == 1 and CouchPropController.RELEASE == 2,
 			"O1: action constants NONE 0, CLAIM 1, RELEASE 2")
 	_check(c.release_idle_ms == 300 and is_equal_approx(c.settle_speed, 10.0) and is_equal_approx(c.release_match, 1.0)
-			and c.transfer_gap_ms == 100 and c.offset_tau_ms == 100 and is_equal_approx(c.offset_max_speed, 150.0)
+			and c.transfer_gap_ms == 100 and c.transfer_jitter_ms == 50 and c.transfer_run_ms == 200
+			and c.offset_tau_ms == 100 and is_equal_approx(c.offset_max_speed, 150.0)
 				and c.extrapolate_cap_ms == 250 and c.claim_grace_ms == 150 and c.claims == 0
 			and c.releases == 0 and c.denials == 0 and c.presses_applied == 0, "O1: defaults (demo 4af9e66 values, counters 0)")
 	_check(not c.set_channels(KIND6, null) and not c.set_channels(KIND_NR, _map6()) and not c.set_channels(77, _map6()),
@@ -1005,14 +1006,17 @@ func _case_o6() -> void:
 
 
 ## Drives a HELD owner (_held) through a press schedule from t = 1110 to end_t; near at near_t.
+## ticks: the snapshot interval passed with each press; gap_floor: transfer_gap_ms (-1 = default).
 ## Returns [reason, time, controller] for the first RELEASE, or ["", -1, controller].
-func _press_run(presses: Array, near_t: int, end_t: int) -> Array:
+func _press_run(presses: Array, near_t: int, end_t: int, ticks: int = SNAP_TICKS, gap_floor: int = -1) -> Array:
 	var o := _held()
 	var c: CouchPropController = o[1]
+	if gap_floor >= 0:
+		c.transfer_gap_ms = gap_floor
 	var t := 1110
 	while t <= end_t:
 		if presses.has(t):
-			_snap(o, t, {10: [200, 100, 0, 0, 0, 0]}, {10: {"ow": ME, "pr": _pf([0, 1, 0])}}, t)
+			_snap(o, t, {10: [200, 100, 0, 0, 0, 0]}, {10: {"ow": ME, "pr": _pf([0, 1, 0])}}, t, true, ticks)
 		var d := c.update(10, t == near_t, _c6(200, 100), t, t, RTT)
 		if _act(d) == CouchPropController.RELEASE:
 			return [_why(d), t, c]
@@ -1021,23 +1025,56 @@ func _press_run(presses: Array, near_t: int, end_t: int) -> Array:
 
 
 func _case_c1() -> void:
-	# Presses every 40 ms for 320 ms on an idle owner: transfer at the first update where the run
-	# has lasted release_idle_ms and the owner has been idle that long (1470 ms).
+	# Snapshot interval 33 ms: the run gap is max(transfer_gap_ms 100, 3 * 33 + transfer_jitter_ms
+	# 50) = 149 ms, and a run is due once it spans transfer_run_ms 200 less half an interval (16):
+	# 184 ms. The owner was last near at 1100 (_held), so it is idle from 1400; runs start at 1250.
 	var a := []
 	for i in 9:
-		a.append(1150 + 40 * i)
-	var r := _press_run(a, -1, 1500)
-	_check(r[0] == "transfer" and r[1] == 1470 and r[2].transfers == 1 and r[2].denials == 0 and r[2].releases == 1,
-			"C1: a 320 ms press run on an idle owner transfers at 1470 ms (reason transfer, not a denial)")
-	# A gap of exactly transfer_gap_ms keeps the run going.
-	r = _press_run([1150, 1250, 1350, 1450], -1, 1500)
-	_check(r[0] == "transfer" and r[1] == 1450, "C1: a gap of exactly transfer_gap_ms is the same run: transfer at 1450")
-	# A gap just over transfer_gap_ms starts a new run each time: no run reaches 300 ms.
-	r = _press_run([1150, 1260, 1370, 1480, 1590], -1, 1700)
-	_check(r[0] == "", "C1: a gap just over transfer_gap_ms starts a new run each time: no transfer")
-	# Own contact at 1470, the moment the run reaches 300 ms, blocks the transfer; the run dies first.
-	r = _press_run(a, 1470, 1800)
-	_check(r[0] == "", "C1: own contact at 1470 blocks the transfer; the run is no longer live when the idle clock ends")
+		a.append(1250 + 40 * i)
+	var r := _press_run(a, -1, 1600)
+	_check(r[0] == "transfer" and r[1] == 1450 and r[2].transfers == 1 and r[2].denials == 0 and r[2].releases == 1,
+			"C1: presses every 40 ms on an idle owner transfer at 1450 ms, a 200 ms span (reason transfer, not a denial)")
+	# The run gap is derived from the snapshot interval: 110 ms gaps (over the old fixed 100) and
+	# 140 ms gaps are one run; 150 ms gaps (over 149) start a new run each time.
+	r = _press_run([1250, 1360, 1470], -1, 1700)
+	_check(r[0] == "transfer" and r[1] == 1470, "C1: 110 ms gaps are one run (gap 149 at a 33 ms interval): transfer at 1470")
+	r = _press_run([1250, 1390, 1530], -1, 1800)
+	_check(r[0] == "transfer" and r[1] == 1530, "C1: 140 ms gaps are one run: transfer at 1530")
+	r = _press_run([1250, 1400, 1550, 1700, 1850], -1, 2000)
+	_check(r[0] == "", "C1: 150 ms gaps (over the derived 149) start a new run each time: no transfer")
+	# A longer snapshot interval widens the gap: 4 ticks = 66 ms -> 3 * 66 + 50 = 248. The run must
+	# then span more than one gap (249), so it takes a third press.
+	r = _press_run([1250, 1480, 1710], -1, 1900, 4)
+	_check(r[0] == "transfer" and r[1] == 1710, "C1: at a 66 ms interval 230 ms gaps are one run (gap 248): transfer at 1710")
+	r = _press_run([1250, 1480], -1, 1900, 4)
+	_check(r[0] == "", "C1: at a 66 ms interval two taps 230 ms apart do not transfer (the run must span more than one gap)")
+	# transfer_gap_ms is a floor over the derived gap.
+	r = _press_run([1250, 1500, 1750], -1, 1900, SNAP_TICKS, 260)
+	_check(r[0] == "transfer" and r[1] == 1750, "C1: transfer_gap_ms 260 is a floor over the derived 149: 250 ms gaps are one run")
+	r = _press_run([1250, 1500], -1, 1900, SNAP_TICKS, 260)
+	_check(r[0] == "", "C1: transfer_gap_ms 260: two taps 250 ms apart do not transfer")
+	# The run length: 184 ms is due, a 180 ms span is not (half an interval of slack, not 200 flat
+	# and not release_idle_ms 300).
+	r = _press_run([1250, 1340, 1430], -1, 1800)
+	_check(r[0] == "", "C1: a run spanning 180 ms (< 184) does not transfer")
+	r = _press_run([1250, 1340, 1440], -1, 1800)
+	_check(r[0] == "transfer" and r[1] == 1440, "C1: a run spanning 190 ms (>= 200 - 16) transfers at 1440")
+	# A tap is not a run: two presses 140 ms apart span too little, and a lone press never transfers.
+	r = _press_run([1250, 1390], -1, 1900)
+	_check(r[0] == "", "C1: two taps 140 ms apart do not transfer")
+	r = _press_run([1250], -1, 1900)
+	_check(r[0] == "", "C1: a single tap does not transfer")
+	# Liveness uses the same derived gap: own contact at 1300 moves the idle clock to 1600, when the
+	# newest press (1490) is 110 ms old: still live under 149 (it would not be under a fixed 100).
+	var b := []
+	for i in 7:
+		b.append(1250 + 40 * i)
+	r = _press_run(b, 1300, 1800)
+	_check(r[0] == "transfer" and r[1] == 1600, "C1: a run whose newest press is 110 ms old is still live when the idle clock ends: transfer at 1600")
+	# Own contact at 1450, the moment the run is due, blocks the transfer; its idle clock restarts
+	# (due at 1750) and the run is no longer live by then (newest press 1570 + 149 = 1719).
+	r = _press_run(a, 1450, 1900)
+	_check(r[0] == "", "C1: own contact at 1450 blocks the transfer; the run is no longer live when the idle clock ends")
 
 
 ## Claims a prop moving at vx, drawn at (200, 100) and granted at 1100 ms. Returns the reported x
