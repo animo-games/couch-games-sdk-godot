@@ -70,7 +70,7 @@ MUTS = {
  "c02-transfer-while-touching": (P, "\tif near:\n\t\trec[\"contact_ms\"] = now_ms\n",
     "\tif rec[\"granted\"] and near and _transfer_due(rec, now_ms):\n\t\ttransfers += 1\n\t\treturn _release(rec, copy, now_ms, \"transfer\")\n\tif near:\n\t\trec[\"contact_ms\"] = now_ms\n",
     G18, "C1"),
- "c03-run-gap-ignored": (P, "if int(rec[\"run_last_ms\"]) < 0 or now_ms - int(rec[\"run_last_ms\"]) > transfer_gap_ms:",
+ "c03-run-gap-ignored": (P, "if int(rec[\"run_last_ms\"]) < 0 or now_ms - int(rec[\"run_last_ms\"]) > _run_gap_ms():",
     "if int(rec[\"run_last_ms\"]) < 0:", G18, "C1"),
  "c04-claim-at-now-pose": (P, "\tif not rec[\"has_drawn\"]:\n\t\treturn\n", "\trec[\"has_drawn\"] = false\n\tif not rec[\"has_drawn\"]:\n\t\treturn\n", G18, "C2"),
  "c05-no-speed-cap": (P, "\t\trate = minf(rate, offset_max_speed / off_len)\n", "\t\tpass\n", G18, "C2"),
@@ -79,6 +79,15 @@ MUTS = {
  "c08-release-linear-100ms": (P, "\t\trec[\"rel_k\"] = _decay(rec[\"rel_k\"], (rec[\"rel_off_pos\"] as Vector2).length(), dt)\n",
     "\t\trec[\"rel_k\"] = maxf(0.0, rec[\"rel_k\"] - dt * 10.0)\n", G18, "C2"),
  "c09-reclaim-keeps-release-blend": (P, "\trec[\"rel_pending\"] = false\n\treturn _decision(CLAIM, st, \"\")", "\treturn _decision(CLAIM, st, \"\")", G18, "C2"),
+ # Transfer tuning (Fable, 2026-10-16): run gap from the snapshot interval, transfer_run_ms,
+ # half-interval slack, three-press minimum.
+ "c10-gap-fixed-100": (P, "\treturn maxi(transfer_gap_ms, 3 * _snapshot_ms + transfer_jitter_ms)", "\treturn transfer_gap_ms", G18, "C1"),
+ "c11-gap-no-jitter": (P, "\treturn maxi(transfer_gap_ms, 3 * _snapshot_ms + transfer_jitter_ms)", "\treturn maxi(transfer_gap_ms, 3 * _snapshot_ms)", G18, "C1"),
+ "c12-gap-floor-ignored": (P, "\treturn maxi(transfer_gap_ms, 3 * _snapshot_ms + transfer_jitter_ms)", "\treturn 3 * _snapshot_ms + transfer_jitter_ms", G18, "C1"),
+ "c13-run-is-idle-300": (P, "maxi(transfer_run_ms - _snapshot_ms / 2, _run_gap_ms() + 1)", "maxi(release_idle_ms - _snapshot_ms / 2, _run_gap_ms() + 1)", G18, "C1"),
+ "c14-run-no-slack": (P, "maxi(transfer_run_ms - _snapshot_ms / 2, _run_gap_ms() + 1)", "maxi(transfer_run_ms, _run_gap_ms() + 1)", G18, "C1"),
+ "c15-two-taps-transfer": (P, "maxi(transfer_run_ms - _snapshot_ms / 2, _run_gap_ms() + 1)", "transfer_run_ms - _snapshot_ms / 2", G18, "C1"),
+ "c16-live-check-fixed-100": (P, "\treturn last >= 0 and now_ms - last <= _run_gap_ms() \\", "\treturn last >= 0 and now_ms - last <= transfer_gap_ms \\", G18, "C1"),
 
 }
 
