@@ -467,6 +467,20 @@ func get_experience_data() -> Dictionary:
 	return _js_to_dict(await _await_promise(sdk.getExperienceData()))
 
 
+func list_experiences() -> Dictionary:
+	var sdk = _get_sdk()
+	if not sdk:
+		return {"success": false, "error": "SDK not available"}
+	return _js_to_dict(await _await_promise(sdk.listExperiences()))
+
+
+func open_experience(experience_id: String) -> Dictionary:
+	var sdk = _get_sdk()
+	if not sdk:
+		return {"success": false, "error": "SDK not available"}
+	return _js_to_dict(await _await_promise(sdk.openExperience(experience_id)))
+
+
 func get_experience_date() -> Variant:
 	var sdk = _get_sdk()
 	if sdk:

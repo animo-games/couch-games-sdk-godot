@@ -4,6 +4,9 @@ class_name CouchGamesSDKResponse
 var success: bool = false
 var error: String = ""
 var payload: Dictionary = {}
+## Array payloads, including list_experiences(). Keeps payload's existing
+## Dictionary type intact for games that infer their own types from it.
+var payload_array: Array = []
 var metadata: Dictionary = {}
 
 ## Save writes only. True only when the platform confirmed the blob was stored.
@@ -53,6 +56,8 @@ static func from_dict(response: Dictionary) -> CouchGamesSDKResponse:
 	var payload: Variant = response.get('payload', {})
 	if payload is Dictionary:
 		res.payload = payload
+	elif payload is Array:
+		res.payload_array = payload
 	elif payload is String and (payload as String).length() > 0:
 		# A save blob that is valid JSON but not an object (an array, a bare
 		# scalar, "null") parses to something unassignable. Degrade rather than

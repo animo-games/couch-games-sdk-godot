@@ -15,6 +15,8 @@
 # Extends the mock backend, so classic verbs (saves/stats/metadata) and the
 # debug overlay keep working. Overlay-faked players on the host are part of the
 # shared roster and visible to real guest instances too.
+# Archive listing and switching also inherit the mock implementation, like
+# get_experience_data(). Switching refuses while other players share the roster.
 class_name CouchGamesLocalBackend
 extends CouchGamesMockBackend
 
