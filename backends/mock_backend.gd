@@ -47,6 +47,35 @@ signal mock_event_logged(entry: Dictionary)
 ## assumptions. 0 still suspends one frame for web await-parity.
 var latency_ms: int = 0
 
+## Configurable archive rows in platform shape, oldest first. An empty array
+## simulates an empty archive. Configure before opening the archive screen.
+## A row without "players" is answered with one built from the roster: the
+## local player reads the row's state, every other member "none".
+var experiences: Array[Dictionary] = [{
+	"id": "mock-experience",
+	"experienceIndex": 0,
+	"number": 1,
+	"title": null,
+	"activatedAt": "2026-01-01T00:00:00Z",
+	"live": false,
+	"state": "none",
+}, {
+	"id": "mock-experience-2",
+	"experienceIndex": 1,
+	"number": 2,
+	"title": "Mock challenge 2",
+	"activatedAt": "2026-01-02T00:00:00Z",
+	"live": true,
+	"state": "none",
+}]
+
+## The streak list_experiences() and gameplay_completed() report. The mock does
+## not count completions; set it to rehearse a streak display.
+var streak: int = 0
+
+var _current_experience_id := "mock-experience"
+var _opening_experience := false
+
 ## The local player's identity. The local-relay backend overrides these on
 ## guest instances; all routing below goes through them, never the const.
 var local_user_id: String = LOCAL_USER_ID
@@ -338,7 +367,7 @@ func gameplay_completed() -> Dictionary:
 	_fold_gameplay_time()
 	_session_stats["gameplayCompleted"] = true
 	_write_json("session_stats.json", _session_stats)
-	return {"success": true}
+	return {"success": true, "streak": streak}
 
 
 func get_experience_data() -> Dictionary:
@@ -346,10 +375,62 @@ func get_experience_data() -> Dictionary:
 	return {"success": true, "payload": _mock_experience_payload()}
 
 
+func list_experiences() -> Dictionary:
+	await _tick()
+	var rows: Array = []
+	for entry in experiences:
+		var row: Dictionary = entry.duplicate(true)
+		if not row.has("players"):
+			var players := {}
+			for player in _players:
+				var uid := str(player.get("userId", ""))
+				players[uid] = row.get("state", "none") if uid == local_user_id else "none"
+			row["players"] = players
+		rows.append(row)
+	return {"success": true, "payload": _round_trip(rows), "streak": streak}
+
+
+## Simulates a switch. On the platform every lobby member's game gets the event;
+## the mock only has this player, so it delivers one event with initiatedByMe true.
+func open_experience(experience_id: String) -> Dictionary:
+	if _opening_experience:
+		return {"success": false, "error": "Experience switch in progress"}
+	_opening_experience = true
+	await _tick()
+	var error := ""
+	if experience_id.is_empty():
+		error = "Experience id required"
+	elif experience_id == _current_experience_id:
+		error = "Already on this experience"
+	else:
+		var next: Dictionary = {}
+		for entry in experiences:
+			if entry.get("id") == experience_id:
+				next = entry
+				break
+		if next.is_empty():
+			error = "Unknown experience"
+		else:
+			var payload: Variant = _round_trip({
+				"experienceId": experience_id,
+				"experienceIndex": next.get("experienceIndex"),
+				"number": next.get("number"),
+				"activatedAt": next.get("activatedAt"),
+				"initiatedByMe": true,
+			})
+			var event := "couchgames:experience-changed"
+			_log_event("in", event, payload, "", {}, [local_user_id])
+			await _deliver_local(event, payload, "")
+	if not error.is_empty():
+		_opening_experience = false
+		return {"success": false, "error": error}
+	return {"success": true}
+
+
 func get_experience_date() -> Variant:
 	# NOTE: the web bridge returns a JS Date object here; a datetime string is
 	# the closest local equivalent. No game code consumes the value directly.
-	return Time.get_datetime_string_from_system()
+	return _mock_experience_payload().get("activatedAt")
 
 
 # --- Experience files ---
@@ -527,7 +608,7 @@ func lobby_is_available() -> bool:
 
 
 func lobby_get_current_game() -> Dictionary:
-	return {"gameId": "mock-game", "experienceId": "mock-experience"}
+	return {"gameId": "mock-game", "experienceId": _current_experience_id}
 
 
 func lobby_get_players() -> Array:
@@ -622,6 +703,11 @@ func _emit_play_mode_selected() -> void:
 
 func _deliver_local(event: String, payload: Variant, sender_user_id: String) -> void:
 	await _tick()
+	if event == "couchgames:experience-changed":
+		# The handler may immediately use the SDK, including starting a switch.
+		if payload is Dictionary:
+			_current_experience_id = str(payload.get("experienceId", _current_experience_id))
+		_opening_experience = false
 	lobby_event_received.emit(event, payload, sender_user_id)
 
 
@@ -680,13 +766,19 @@ func _mock_experience_payload() -> Dictionary:
 	if experience_name.is_empty():
 		experience_name = str(ProjectSettings.get_setting("application/config/name", "Mock Game"))
 	var experience_url := str(ProjectSettings.get_setting(_EXPERIENCE_URL_SETTING, "https://couch.games/mock"))
+	var current: Dictionary = {}
+	for entry in experiences:
+		if entry.get("id") == _current_experience_id:
+			current = entry
+			break
 	return {
-		"activatedAt": Time.get_datetime_string_from_system(true),
+		"activatedAt": current.get("activatedAt"),
 		"files": {},
 		"type": "game",
-		"experienceIndex": 0,
-		"title": experience_name,
-		"experienceId": "mock-experience",
+		"experienceIndex": current.get("experienceIndex", 0),
+		"number": current.get("number"),
+		"title": current.get("title") if current.get("title") != null else experience_name,
+		"experienceId": _current_experience_id,
 		"experienceUrl": experience_url,
 		"experienceName": experience_name,
 		"gameId": "mock-game",

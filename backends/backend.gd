@@ -168,6 +168,17 @@ func get_experience_data() -> Dictionary:
 	return _not_implemented()
 
 
+## Openable challenges, oldest first, with the player's own state and each
+## lobby member's (players), plus the player's streak beside the payload.
+func list_experiences() -> Dictionary:
+	return _not_implemented()
+
+
+## Switches experiences; the reserved lobby event precedes a successful answer.
+func open_experience(_experience_id: String) -> Dictionary:
+	return _not_implemented()
+
+
 func get_experience_date() -> Variant:
 	return null
 

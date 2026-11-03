@@ -158,6 +158,128 @@ CouchGames.mock.simulate_host_authoritative = true # pretend this player joined
 `simulate_unread_save()` clears the way the real one does — call
 `load_save_result()`, and the next write is admitted again.
 
+## Experience archive API
+
+`await CouchGames.list_experiences()` returns a `CouchGamesSDKResponse` with
+openable challenges in `payload_array`, oldest first. The existing `payload`
+field remains a Dictionary for compatibility. Call when the archive screen
+opens, not every frame: each platform call is a server round trip. Listing
+works before a session starts; the campaign-first lock returns an empty list.
+The campaign itself is excluded.
+
+```gdscript
+var result := await CouchGames.list_experiences()
+if result.success:
+    if result.streak != null:
+        show_streak(result.streak)
+    for exp in result.payload_array:
+        var day: String = exp.activatedAt.substr(0, 10) if exp.activatedAt != null else ""
+        var nobody_done: bool = not exp.players.values().has("completed")
+        print(exp.id, exp.number, exp.title, day, exp.live, exp.state, nobody_done)
+else:
+    push_warning(result.error)
+```
+
+Each row has `id` (String), `experienceIndex` (number or null), `number`
+(number or null), `title` (String or null), `activatedAt` (ISO instant or null),
+`live` (bool), `state` (`"none"`, `"started"`, or `"completed"`), and `players`
+(Dictionary). `number` is the player-facing "No. N"; `experienceIndex` is the
+stored index. Use the UTC date of `activatedAt` for a daily. Anonymous players
+get `state: "none"` for every row. Bridge numbers arrive as floats, so check for
+null before converting to int.
+
+`players` maps each lobby member, you included, by user id (each
+`user_id` from `lobby.get_players()`) to that member's state of the row. Solo it holds
+only you. An anonymous member reads `"none"`, and a second seat on the host's
+own account reads the host's state. If the lobby isn't on your game, or can't
+be confirmed at that moment, it holds only you. Use it for "which ones neither
+of us has done".
+
+`result.streak` is your current streak in this game (challenges completed in a
+row, each before the next went live), an int beside the rows, `0` for an
+anonymous player, and sent with every successful answer, the empty list
+included. It is null when the answer carries none: a failed call, or an older
+platform build. `streak: 0` can also mean the read failed, so it is not proof
+the streak broke.
+
+`await CouchGames.gameplay_completed()` returns a `CouchGamesSDKResponse` too,
+with `streak` already counting this completion, so a live challenge just
+finished shows the new count. A completion from the archive doesn't add to it,
+and a refused completion (`success: false`) answers `0`. Games that ignore the
+result keep working.
+
+`get_experience_data()`'s payload carries `number` as well (null when
+unnumbered), beside `experienceIndex` (0 when unnumbered): show `number`, not
+`experienceIndex`, to the player.
+
+`await CouchGames.open_experience(id)` switches to an id from the list. It
+returns a `CouchGamesSDKResponse`; a refusal has `success: false` and its
+platform message in `error`, with no event afterward. The platform flushes
+the old experience's saves, starts the new session, swaps files and updates
+the page URL. On success the reserved event has already been delivered.
+
+**After calling `open_experience`, do nothing with the SDK until
+`couchgames:experience-changed` arrives or the call answers `success: false`;
+requests meanwhile are refused with `Experience switch in progress`.**
+`load_save_result()` reports `unavailable` during the handover. Subscribe before
+calling, and clear your board and load the new puzzle from the event handler:
+
+```gdscript
+func _ready() -> void:
+    await CouchGames.init()
+    CouchGames.lobby.event_received.connect(_on_lobby_event)
+
+func _open_puzzle(experience_id: String) -> void:
+    var result := await CouchGames.open_experience(experience_id)
+    if not result.success:
+        push_warning(result.error)
+
+func _on_lobby_event(event: String, data: Variant, _sender_user_id: String) -> void:
+    if event == CouchGames.EXPERIENCE_CHANGED_EVENT:
+        # Clear the board and load this puzzle; SDK calls now use the new experience.
+        print(data.experienceId, data.number, data.initiatedByMe)
+```
+
+`CouchGames.EXPERIENCE_CHANGED_EVENT` is `"couchgames:experience-changed"`.
+It arrives through `lobby.event_received` even in solo games, with an empty
+`sender_user_id`. Its payload has `experienceId` (String), `experienceIndex`
+(number or null), `number` (number or null), `activatedAt` (ISO instant or
+null), and `initiatedByMe` (bool). From the event onward, experience files,
+saves, metadata, dates, experience data and completion refer to the new
+experience. Read its identity from the event or `get_experience_data()`;
+`lobby.get_current_game()` remains lobby-only on the platform.
+
+The autoload's `experience_data` property is a startup snapshot; use the
+awaitable getter for fresh data. Existing pack mounts remain idempotent by
+filename: `load_pack()`/`load_all_packs()` do not remount an already mounted
+name after a switch. Use fresh file reads or distinct pack filenames when
+loading the next puzzle.
+
+In a lobby, any member may switch and every member's game switches with them,
+so the event can also arrive because another member switched, with
+`initiatedByMe: false`; handlers should not depend on having called
+`open_experience()` themselves. Requests made meanwhile are refused with
+`Experience switch in progress` even in a game that did not call it. Other refusals include a missing/unknown id,
+the current experience, a locked challenge, no session yet, an ongoing switch,
+or an unsupported preview/joined-guest context. A campaign-lock refusal leaves
+the current experience selected and starts a new session on it. A separate
+build per experience reloads the target build as a fresh start, without an
+event in the old build.
+
+Offline, `CouchGames.mock.experiences` is a configurable `Array[Dictionary]`
+in the row format above, with two default challenges. Keep it oldest first;
+an empty array simulates an empty archive. A row without `players` is answered
+with one built from the mock roster: you read the row's `state`, every faked or
+relay player `"none"`. `CouchGames.mock.streak` (int, default 0) is the streak
+both `list_experiences()` and `gameplay_completed()` report; the mock doesn't
+count completions, so set it yourself. Opening a listed id updates mock
+experience data/date and emits the reserved event through the usual lobby
+channel before returning success. Fake guests and local relay peers prevent
+switching. The local backend inherits this behavior. This is a lightweight
+archive simulation: files still come from the configured mock directory and
+saves/metadata keep their existing shared mock storage; it does not simulate
+the platform's full handover or campaign/session eligibility checks.
+
 ## Lobby events
 
 `CouchGames.lobby` is the session: the roster of everyone in it, and a tunnel
@@ -214,7 +336,8 @@ func _on_lobby_event(event: String, data: Variant, sender_user_id: String) -> vo
             _start_match(int(data.get("seed", 0)))
 ```
 
-Event names are yours to choose, with one reservation: `couch-net` belongs to
+Event names are yours to choose, except platform-reserved `couchgames:*` events
+(including `couchgames:experience-changed`) and `couch-net`, which belongs to
 `CouchSession`, which frames its own netcode over the same tunnel. If you are
 sending state at frame rate, use that instead of hand-rolling it on top of
 `send_event` — see [Sessions](#sessions). The tunnel is a relay through the

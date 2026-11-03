@@ -13,6 +13,9 @@ extends Node
 ## "2-devices"); empty when none has been made (or not on the platform).
 signal play_mode_selected(mode: String, code: String)
 
+## Delivered through lobby.event_received, including in solo games.
+const EXPERIENCE_CHANGED_EVENT := "couchgames:experience-changed"
+
 const _FORCE_MOCK_SETTING := "couch_games/mock/force_mock"
 const _OVERLAY_ENABLED_SETTING := "couch_games/mock/enable_debug_overlay"
 const _LOCAL_ENABLED_SETTING := "couch_games/local/enabled"
@@ -205,8 +208,9 @@ func gameplay_end() -> void:
 	await _backend.gameplay_end()
 
 
-func gameplay_completed() -> void:
-	await _backend.gameplay_completed()
+## The answer's streak counts this completion. Ignoring the result is fine.
+func gameplay_completed() -> CouchGamesSDKResponse:
+	return CouchGamesSDKResponse.from_dict(await _backend.gameplay_completed())
 
 
 func get_experience_date() -> Variant:
@@ -215,6 +219,21 @@ func get_experience_date() -> Variant:
 
 func get_experience_data() -> CouchGamesSDKResponse:
 	return CouchGamesSDKResponse.from_dict(await _backend.get_experience_data())
+
+
+## Openable challenges, oldest first. Call when opening the archive, not per frame.
+## Rows are in response.payload_array; response.payload stays a Dictionary.
+## The player's streak is in response.streak.
+func list_experiences() -> CouchGamesSDKResponse:
+	return CouchGamesSDKResponse.from_dict(await _backend.list_experiences())
+
+
+## Switches to an id from list_experiences(). In a lobby, every member switches.
+## After calling, do nothing with the SDK until EXPERIENCE_CHANGED_EVENT arrives
+## or the answer has success: false. Other requests are refused meanwhile with
+## "Experience switch in progress". The event precedes a successful answer.
+func open_experience(experience_id: String) -> CouchGamesSDKResponse:
+	return CouchGamesSDKResponse.from_dict(await _backend.open_experience(experience_id))
 
 
 func get_game_metadata() -> CouchGamesSDKResponse:
