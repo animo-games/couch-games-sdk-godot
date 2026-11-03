@@ -40,6 +40,12 @@ var conflict: bool = false
 ## null there — never require it to recover from a conflict.
 var current_revision: Variant = null
 
+## list_experiences() and gameplay_completed() only. The player's current streak
+## in this game as an int, or null when the platform did not send one (an
+## older platform build). 0 for a guest and for a refused completion, and also
+## when the streak could not be read just then: 0 is not proof it broke.
+var streak: Variant = null
+
 static func from_dict(response: Dictionary) -> CouchGamesSDKResponse:
 	var res = new()
 	res.success = response.get("success", false)
@@ -87,5 +93,7 @@ static func from_dict(response: Dictionary) -> CouchGamesSDKResponse:
 	var revision: Variant = response.get("currentRevision", null)
 	# Numbers cross the JS bridge through JSON, so an int arrives as a float.
 	res.current_revision = int(revision) if (revision is int or revision is float) else null
+	var streak: Variant = response.get("streak", null)
+	res.streak = int(streak) if (streak is int or streak is float) else null
 
 	return res

@@ -208,8 +208,9 @@ func gameplay_end() -> void:
 	await _backend.gameplay_end()
 
 
-func gameplay_completed() -> void:
-	await _backend.gameplay_completed()
+## The answer's streak counts this completion. Ignoring the result is fine.
+func gameplay_completed() -> CouchGamesSDKResponse:
+	return CouchGamesSDKResponse.from_dict(await _backend.gameplay_completed())
 
 
 func get_experience_date() -> Variant:
@@ -222,6 +223,7 @@ func get_experience_data() -> CouchGamesSDKResponse:
 
 ## Openable challenges, oldest first. Call when opening the archive, not per frame.
 ## Rows are in response.payload_array; response.payload stays a Dictionary.
+## The player's streak is in response.streak.
 func list_experiences() -> CouchGamesSDKResponse:
 	return CouchGamesSDKResponse.from_dict(await _backend.list_experiences())
 

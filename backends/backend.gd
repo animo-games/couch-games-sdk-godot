@@ -168,7 +168,8 @@ func get_experience_data() -> Dictionary:
 	return _not_implemented()
 
 
-## Openable challenges, oldest first, with the player's own state.
+## Openable challenges, oldest first, with the player's own state and each
+## lobby member's (players), plus the player's streak beside the payload.
 func list_experiences() -> Dictionary:
 	return _not_implemented()
 

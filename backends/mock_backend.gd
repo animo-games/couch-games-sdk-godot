@@ -49,6 +49,8 @@ var latency_ms: int = 0
 
 ## Configurable archive rows in platform shape, oldest first. An empty array
 ## simulates an empty archive. Configure before opening the archive screen.
+## A row without "players" is answered with one built from the roster: the
+## local player reads the row's state, every other member "none".
 var experiences: Array[Dictionary] = [{
 	"id": "mock-experience",
 	"experienceIndex": 0,
@@ -66,6 +68,10 @@ var experiences: Array[Dictionary] = [{
 	"live": true,
 	"state": "none",
 }]
+
+## The streak list_experiences() and gameplay_completed() report. The mock does
+## not count completions; set it to rehearse a streak display.
+var streak: int = 0
 
 var _current_experience_id := "mock-experience"
 var _opening_experience := false
@@ -361,7 +367,7 @@ func gameplay_completed() -> Dictionary:
 	_fold_gameplay_time()
 	_session_stats["gameplayCompleted"] = true
 	_write_json("session_stats.json", _session_stats)
-	return {"success": true}
+	return {"success": true, "streak": streak}
 
 
 func get_experience_data() -> Dictionary:
@@ -371,7 +377,17 @@ func get_experience_data() -> Dictionary:
 
 func list_experiences() -> Dictionary:
 	await _tick()
-	return {"success": true, "payload": _round_trip(experiences)}
+	var rows: Array = []
+	for entry in experiences:
+		var row: Dictionary = entry.duplicate(true)
+		if not row.has("players"):
+			var players := {}
+			for player in _players:
+				var uid := str(player.get("userId", ""))
+				players[uid] = row.get("state", "none") if uid == local_user_id else "none"
+			row["players"] = players
+		rows.append(row)
+	return {"success": true, "payload": _round_trip(rows), "streak": streak}
 
 
 ## Simulates a switch. On the platform every lobby member's game gets the event;

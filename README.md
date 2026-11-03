@@ -170,20 +170,47 @@ The campaign itself is excluded.
 ```gdscript
 var result := await CouchGames.list_experiences()
 if result.success:
+    if result.streak != null:
+        show_streak(result.streak)
     for exp in result.payload_array:
         var day: String = exp.activatedAt.substr(0, 10) if exp.activatedAt != null else ""
-        print(exp.id, exp.number, exp.title, day, exp.live, exp.state)
+        var nobody_done: bool = not exp.players.values().has("completed")
+        print(exp.id, exp.number, exp.title, day, exp.live, exp.state, nobody_done)
 else:
     push_warning(result.error)
 ```
 
 Each row has `id` (String), `experienceIndex` (number or null), `number`
 (number or null), `title` (String or null), `activatedAt` (ISO instant or null),
-`live` (bool), and `state` (`"none"`, `"started"`, or `"completed"`). `number` is
-the player-facing "No. N"; `experienceIndex` is the stored index reported by
-`get_experience_data()`. Use the UTC date of `activatedAt` for a daily.
-Anonymous players get `state: "none"` for every row. Bridge numbers arrive as
-floats, so check for null before converting to int.
+`live` (bool), `state` (`"none"`, `"started"`, or `"completed"`), and `players`
+(Dictionary). `number` is the player-facing "No. N"; `experienceIndex` is the
+stored index. Use the UTC date of `activatedAt` for a daily. Anonymous players
+get `state: "none"` for every row. Bridge numbers arrive as floats, so check for
+null before converting to int.
+
+`players` maps each lobby member, you included, by user id (each
+`user_id` from `lobby.get_players()`) to that member's state of the row. Solo it holds
+only you. An anonymous member reads `"none"`, and a second seat on the host's
+own account reads the host's state. If the lobby isn't on your game, or can't
+be confirmed at that moment, it holds only you. Use it for "which ones neither
+of us has done".
+
+`result.streak` is your current streak in this game (challenges completed in a
+row, each before the next went live), an int beside the rows, `0` for an
+anonymous player, and sent with every successful answer, the empty list
+included. It is null when the answer carries none: a failed call, or an older
+platform build. `streak: 0` can also mean the read failed, so it is not proof
+the streak broke.
+
+`await CouchGames.gameplay_completed()` returns a `CouchGamesSDKResponse` too,
+with `streak` already counting this completion, so a live challenge just
+finished shows the new count. A completion from the archive doesn't add to it,
+and a refused completion (`success: false`) answers `0`. Games that ignore the
+result keep working.
+
+`get_experience_data()`'s payload carries `number` as well (null when
+unnumbered), beside `experienceIndex` (0 when unnumbered): show `number`, not
+`experienceIndex`, to the player.
 
 `await CouchGames.open_experience(id)` switches to an id from the list. It
 returns a `CouchGamesSDKResponse`; a refusal has `success: false` and its
@@ -241,7 +268,11 @@ event in the old build.
 
 Offline, `CouchGames.mock.experiences` is a configurable `Array[Dictionary]`
 in the row format above, with two default challenges. Keep it oldest first;
-an empty array simulates an empty archive. Opening a listed id updates mock
+an empty array simulates an empty archive. A row without `players` is answered
+with one built from the mock roster: you read the row's `state`, every faked or
+relay player `"none"`. `CouchGames.mock.streak` (int, default 0) is the streak
+both `list_experiences()` and `gameplay_completed()` report; the mock doesn't
+count completions, so set it yourself. Opening a listed id updates mock
 experience data/date and emits the reserved event through the usual lobby
 channel before returning success. Fake guests and local relay peers prevent
 switching. The local backend inherits this behavior. This is a lightweight
