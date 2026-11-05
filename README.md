@@ -13,7 +13,7 @@ registers a `CouchGames` autoload, and everything goes through it:
 
 ```gdscript
 await CouchGames.init()
-await CouchGames.save_game({"level": 3}, 0.25)
+await CouchGames.save_game({"level": 3}, 25)
 CouchGames.lobby.send_event("ready", {"slot": 1})
 var res := await CouchGames.webrtc.connect_signaling()
 ```
@@ -55,16 +55,18 @@ else:
     _state = _new_game()          # show them something, but do NOT save it
     _saving_enabled = false
 
-var write := await CouchGames.save_game(_state, 0.25)
+var write := await CouchGames.save_game(_state, 25)
 if not write.persisted:
     push_warning("Save did not land: %s" % write.error)
 ```
 
+`progress` is a whole percent, 0 to 100 (the platform rounds it), so `25` is a quarter of the way.
+
 Two rules: **`load_save_result()` decides whether a player is new**, and
 **`save_game()` is judged by `persisted`, not `success`**. The guide explains why:
-[`loadSaveResult()`](https://developer.couchgames.com/docs#load-save-result),
-[`loadLatestSave()`](https://developer.couchgames.com/docs#load-latest-save) and
-[refused saves](https://developer.couchgames.com/docs#refused-saves).
+[`loadSaveResult()`](https://developer.couchgames.com/docs/saves#load-save-result),
+[`loadLatestSave()`](https://developer.couchgames.com/docs/saves#load-latest-save) and
+[refused saves](https://developer.couchgames.com/docs/saving-progress#refused-saves).
 
 | `load_save_result()` | Meaning | Safe to start fresh? |
 | --- | --- | --- |
@@ -85,7 +87,7 @@ Branch on `persisted`; the SDK treats a missing `persisted` as "did not land".
 If your retries are capped, ask for an honest failure:
 
 ```gdscript
-var res := await CouchGames.save_game(state, 0.25, null, "error")
+var res := await CouchGames.save_game(state, 25, null, "error")
 # a refusal now arrives as success = false, persisted = false, conflict = true
 ```
 
@@ -142,18 +144,18 @@ else:
 ```
 
 The rows' fields, and what `players` and `streak` mean, are in the guide's
-[`listExperiences()`](https://developer.couchgames.com/docs#list-experiences). Bridge numbers arrive as floats, so
+[`listExperiences()`](https://developer.couchgames.com/docs/experiences#list-experiences). Bridge numbers arrive as floats, so
 check for null before converting to int. `result.streak` is null when the
 answer carries none (a failed call).
 
 `await CouchGames.gameplay_completed()` returns a `CouchGamesSDKResponse` too,
-with the [streak](https://developer.couchgames.com/docs#gameplay-complete) counting this completion. Games that
+with the [streak](https://developer.couchgames.com/docs/gameplay#gameplay-complete) counting this completion. Games that
 ignore the result keep working. `get_experience_data()`'s payload carries
 `number` (null when unnumbered): show it to the player, not `experienceIndex`.
 
 `await CouchGames.open_experience(id)` switches to an id from the list. It
 returns a `CouchGamesSDKResponse`; a refusal has `success: false` and the
-platform's message in `error` ([the list](https://developer.couchgames.com/docs#open-experience)), with no event
+platform's message in `error` ([the list](https://developer.couchgames.com/docs/experiences#open-experience)), with no event
 afterward. On success the event has already been delivered. **Until the event
 arrives or the call fails, make no other SDK calls.** Subscribe before calling,
 and clear your board and load the new puzzle from the event handler:
@@ -177,7 +179,7 @@ func _on_lobby_event(event: String, data: Variant, _sender_user_id: String) -> v
 `CouchGames.EXPERIENCE_CHANGED_EVENT` is `"couchgames:experience-changed"`.
 It arrives through `lobby.event_received` even in solo games, with an empty
 `sender_user_id`, and in a lobby it can arrive because another member switched
-([the event](https://developer.couchgames.com/docs#reserved-event-couchgamesexperience-changed)).
+([the event](https://developer.couchgames.com/docs/experiences#reserved-event-couchgamesexperience-changed)).
 `lobby.get_current_game()` is lobby-only, so read the new experience from the
 event or `get_experience_data()`.
 
@@ -237,9 +239,9 @@ together when you pass both.
 
 **You never receive your own event back,** so apply the local effect when you
 send (the example below does this in `_mark_ready()`). Delivery rules are in
-the [lobby guide](https://developer.couchgames.com/docs#talk-through-the-lobby),
+the [lobby guide](https://developer.couchgames.com/docs/multiplayer#talk-through-the-lobby),
 and what to do after a dropped connection in
-[Recover from dropped connections](https://developer.couchgames.com/docs#recover-from-dropped-connections).
+[Recover from dropped connections](https://developer.couchgames.com/docs/multiplayer#recover-from-dropped-connections).
 
 `data` must be JSON-serializable — dictionaries, arrays, strings, numbers,
 bools, null. `Vector2` and friends are not; pack them yourself. Payloads go
@@ -519,7 +521,7 @@ then `session_started`. Proven by `netcode/fixtures/run_session_players.gd`.
 ## Experience files
 
 Files uploaded to an experience are addressed by **basename**, never by URL
-([guide](https://developer.couchgames.com/docs#experience-files)).
+([guide](https://developer.couchgames.com/docs/level-files#experience-files)).
 
 ```gdscript
 func _ready() -> void:
@@ -637,7 +639,7 @@ byte and URL calls are asynchronous. `get_shared_file()` accepts an optional
 no-byte timeout as build-file downloads. Concurrent reads of the same immutable
 file share one transfer; only the caller that starts it receives progress.
 
-Paths follow the guide's [rules](https://developer.couchgames.com/docs#shared-game-assets); the SDK encodes
+Paths follow the guide's [rules](https://developer.couchgames.com/docs/level-files#shared-game-assets); the SDK encodes
 them. Empty shared files are valid for raw reads; `load_shared_pack()` rejects
 empty and invalid pack bytes.
 
