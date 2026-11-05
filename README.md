@@ -22,7 +22,8 @@ Outside the platform (editor runs, standalone builds) the same API is served by
 a local mock, so game code needs no changes to stay testable. F10 opens the
 mock's debug overlay for faking lobby players and events. Run several instances
 at once (Debug > Run Multiple Instances) and they form a real lobby over a
-loopback socket instead of a faked one.
+loopback socket instead of a faked one. `CouchGames.is_mock()` is true when the
+mock is answering.
 
 ## Layout
 
@@ -299,6 +300,7 @@ final roster.
 var everyone := CouchGames.lobby.get_players()   # Array[CouchLobbyPlayer]
 var host     := CouchGames.lobby.get_host()
 var guests   := CouchGames.lobby.get_guests()
+var sam      := CouchGames.lobby.get_player(user_id)  # null when they aren't here
 var me       := CouchGames.lobby.get_me()        # null when no lobby is active
 if CouchGames.lobby.is_host():
     ...
@@ -570,6 +572,7 @@ var bytes   := await CouchGames.experience.get_file("layout.bin")
 var text    := await CouchGames.experience.get_file_text("notes.txt")
 var config  := await CouchGames.experience.get_file_json("rules.json")
 var names   := CouchGames.experience.list_files()
+var has_it  := CouchGames.experience.has_file("rules.json")
 ```
 
 An `await` resolves whether the download finished before or after you asked.
@@ -745,6 +748,15 @@ The plugin registers these under Project Settings (Advanced), all optional:
 or `--couch-role=guest` pins an instance's role in the loopback lobby.
 
 ## WebRTC connections
+
+Beside the calls in the guide, `CouchGames.webrtc` has helpers of its own:
+
+| Member | What it's for |
+| --- | --- |
+| `room_id_for_code(code)` | The signaling room id for a share code, so host and guest land in the same room; it normalizes with `normalize_room_code(code)` (upper case, no spaces) |
+| `local_peer_id`, `is_signaling_connected()` | Your peer id (the lobby `userId`) after a connect, and whether the socket is open |
+| `get_present_peers()` | The peers in the room right now, never including you |
+| `is_path_probe_available()`, `get_connection_paths()`, `get_connection_state_events()` | Diagnostics: which network path each WebRTC connection took (UDP or TCP, relayed or not) and how its state changed. Web exports only; read them at diagnostics rate, never per frame |
 
 `CouchGames.webrtc` remains the low-level signaling API. Games that want an
 engine `MultiplayerPeer` can use the additive high-level façade:
