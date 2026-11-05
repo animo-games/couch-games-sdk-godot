@@ -237,7 +237,7 @@ together when you pass both.
 
 **You never receive your own event back,** so apply the local effect when you
 send (the example below does this in `_mark_ready()`). Delivery rules are in
-the guide's [lobby guide](https://developer.couchgames.com/docs#talk-through-the-lobby),
+the [lobby guide](https://developer.couchgames.com/docs#talk-through-the-lobby),
 and what to do after a dropped connection in
 [Recover from dropped connections](https://developer.couchgames.com/docs#recover-from-dropped-connections).
 
