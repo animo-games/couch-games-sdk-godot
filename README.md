@@ -238,7 +238,7 @@ together when you pass both.
 **You never receive your own event back,** so apply the local effect when you
 send (the example below does this in `_mark_ready()`). Delivery rules and the
 reconnect events are in the guide's
-[Lobby API](https://developer.couchgames.com/docs#lobby-api-multiplayer-coordination).
+[Recover from dropped connections](https://developer.couchgames.com/docs#recover-from-dropped-connections).
 
 `data` must be JSON-serializable — dictionaries, arrays, strings, numbers,
 bools, null. `Vector2` and friends are not; pack them yourself. Payloads go
