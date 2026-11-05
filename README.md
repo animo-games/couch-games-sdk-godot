@@ -203,6 +203,26 @@ archive simulation: files still come from the configured mock directory and
 saves/metadata keep their existing shared mock storage; it does not simulate
 the platform's full handover or campaign/session eligibility checks.
 
+## Campaign, saves, metadata and telemetry
+
+```gdscript
+var done := await CouchGames.complete_campaign()     # done.already_completed on a repeat
+var sent := await CouchGames.flush_saves()           # sent.persisted, sent.flushed
+await CouchGames.delete_game_metadata("settings", "volume")
+await CouchGames.clear_game_metadata()
+CouchGames.track("level_complete", {"level": 3, "success": true})
+await CouchGames.flush_telemetry()
+```
+
+What each one does is in the guide:
+[`completeCampaign()`](https://developer.couchgames.com/docs/gameplay#complete-campaign),
+[`flushSaves()`](https://developer.couchgames.com/docs/saves#flush-saves),
+[game metadata](https://developer.couchgames.com/docs/game-metadata) and
+[telemetry](https://developer.couchgames.com/docs/telemetry). The mock records
+`complete_campaign()` once (it doesn't know which experience is the campaign),
+answers `flush_saves()` with nothing waiting, and keeps every `track()` call in
+`CouchGames.mock.tracked_events` instead of sending it.
+
 ## Lobby events
 
 `CouchGames.lobby` is the session: the roster of everyone in it, and a tunnel

@@ -46,6 +46,16 @@ var current_revision: Variant = null
 ## when the streak could not be read just then: 0 is not proof it broke.
 var streak: Variant = null
 
+## complete_campaign() only: true when this player had already finished the
+## campaign, so this call recorded nothing new.
+var already_completed: bool = false
+
+## unlock_achievement() only: true when the player already had it.
+var already_unlocked: bool = false
+
+## flush_saves() only: how many saves it sent (0 when none were waiting).
+var flushed: int = 0
+
 static func from_dict(response: Dictionary) -> CouchGamesSDKResponse:
 	var res = new()
 	res.success = response.get("success", false)
@@ -95,5 +105,11 @@ static func from_dict(response: Dictionary) -> CouchGamesSDKResponse:
 	res.current_revision = int(revision) if (revision is int or revision is float) else null
 	var streak: Variant = response.get("streak", null)
 	res.streak = int(streak) if (streak is int or streak is float) else null
+	var already_completed: Variant = response.get("alreadyCompleted", false)
+	res.already_completed = already_completed if already_completed is bool else false
+	var already_unlocked: Variant = response.get("alreadyUnlocked", false)
+	res.already_unlocked = already_unlocked if already_unlocked is bool else false
+	var flushed: Variant = response.get("flushed", 0)
+	res.flushed = int(flushed) if (flushed is int or flushed is float) else 0
 
 	return res

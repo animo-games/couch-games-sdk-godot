@@ -107,6 +107,11 @@ var simulate_host_authoritative := false
 var _session_stats: Dictionary = {"cumulativeGameplayTimeMs": 0.0, "gameplayCompleted": false}
 var _metadata: Dictionary = {}
 var _achievements: Dictionary = {}  # key -> {"unlockedAt": iso}
+var _campaign_completed := false
+## Every track() call since the run started, oldest first, as
+## {"name": String, "properties": Dictionary}: what the platform would have
+## queued. The mock sends nothing anywhere.
+var tracked_events: Array = []
 
 
 func is_available() -> bool:
@@ -221,6 +226,8 @@ func reset_persistence() -> void:
 	_session_stats = {"cumulativeGameplayTimeMs": 0.0, "gameplayCompleted": false}
 	_metadata = {}
 	_achievements = {}
+	_campaign_completed = false
+	tracked_events = []
 	_gameplay_started_at_ms = -1
 	var dir := DirAccess.open(SAVE_DIR)
 	if dir:
@@ -368,6 +375,23 @@ func gameplay_completed() -> Dictionary:
 	_session_stats["gameplayCompleted"] = true
 	_write_json("session_stats.json", _session_stats)
 	return {"success": true, "streak": streak}
+
+
+## Mock saves are written as save_game() is called, so nothing is ever waiting.
+func flush_saves() -> Dictionary:
+	await _tick()
+	return {"success": true, "persisted": true, "flushed": 0, "message": ""}
+
+
+## Write-once, like the platform's. The mock doesn't know whether the current
+## experience is the campaign, so it always records.
+func complete_campaign() -> Dictionary:
+	await _tick()
+	var already := _campaign_completed
+	if not already:
+		_campaign_completed = true
+		_write_json("campaign.json", {"completed": true})
+	return {"success": true, "message": "", "alreadyCompleted": already}
 
 
 func get_experience_data() -> Dictionary:
@@ -566,7 +590,43 @@ func set_game_metadata(category: String, key: String, value: Variant) -> Diction
 	# Root-level spread mirrors the platform's cache shape (back-compat reads).
 	_metadata[key] = stored
 	_write_json("metadata.json", _metadata)
-	return {"success": true}
+	return {"success": true, "payload": _round_trip(_metadata)}
+
+
+func delete_game_metadata(category: String, key: String) -> Dictionary:
+	await _tick()
+	var bucket: Variant = _metadata.get(category)
+	if bucket is Dictionary:
+		bucket.erase(key)
+		# A category left with no keys disappears, as on the platform.
+		if bucket.is_empty():
+			_metadata.erase(category)
+	# The root mirror goes too, unless another category still holds that key.
+	var still_held := false
+	for other in _metadata.keys():
+		if _metadata[other] is Dictionary and (_metadata[other] as Dictionary).has(key):
+			_metadata[key] = _metadata[other][key]
+			still_held = true
+			break
+	if not still_held:
+		_metadata.erase(key)
+	_write_json("metadata.json", _metadata)
+	return {"success": true, "message": "", "payload": _round_trip(_metadata)}
+
+
+func clear_game_metadata() -> Dictionary:
+	await _tick()
+	_metadata = {}
+	_write_json("metadata.json", _metadata)
+	return {"success": true, "message": ""}
+
+
+func track(event_name: String, properties: Dictionary) -> void:
+	tracked_events.append({"name": event_name, "properties": _round_trip(properties)})
+
+
+func flush_telemetry() -> void:
+	await _tick()
 
 
 func unlock_achievement(key: String) -> Dictionary:
@@ -578,16 +638,19 @@ func unlock_achievement(key: String) -> Dictionary:
 	return {"success": true, "alreadyUnlocked": already}
 
 
+## The platform answers an array (in response.payload_array): every visible
+## achievement with `earned`. The mock knows only the ones unlocked here, so it
+## lists those, earned.
 func get_achievements() -> Dictionary:
 	await _tick()
 	var unlocked := []
 	for key in _achievements.keys():
-		var entry: Dictionary = {"key": key}
+		var entry: Dictionary = {"key": key, "earned": true}
 		var details = _achievements[key]
 		if details is Dictionary:
 			entry.merge(details)
 		unlocked.append(entry)
-	return {"success": true, "payload": {"achievements": unlocked}}
+	return {"success": true, "payload": unlocked}
 
 
 func get_session_stats() -> Dictionary:
@@ -814,6 +877,7 @@ func _load_persisted() -> void:
 		{"cumulativeGameplayTimeMs": 0.0, "gameplayCompleted": false})
 	_metadata = _read_json("metadata.json", {})
 	_achievements = _read_json("achievements.json", {})
+	_campaign_completed = _read_json("campaign.json", {}).get("completed", false) == true
 
 
 func _read_json(file_name: String, fallback: Dictionary) -> Dictionary:

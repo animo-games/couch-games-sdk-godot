@@ -200,6 +200,14 @@ func load_save_result() -> CouchGamesSaveLoadResult:
 	return CouchGamesSaveLoadResult.from_dict(await _backend.load_save_result())
 
 
+## Sends saves already made without waiting for the platform's next batch (at
+## most one every 5 seconds). Await it before a moment that matters, such as the
+## end of a level. It can't send state you never passed to save_game().
+## Branch on `persisted`; `flushed` is how many saves it sent.
+func flush_saves() -> CouchGamesSDKResponse:
+	return CouchGamesSDKResponse.from_dict(await _backend.flush_saves())
+
+
 func gameplay_start() -> void:
 	await _backend.gameplay_start()
 
@@ -211,6 +219,14 @@ func gameplay_end() -> void:
 ## The answer's streak counts this completion. Ignoring the result is fine.
 func gameplay_completed() -> CouchGamesSDKResponse:
 	return CouchGamesSDKResponse.from_dict(await _backend.gameplay_completed())
+
+
+## For games with a campaign and challenges: call once, when the player finishes
+## the campaign (its last level or its ending), not per level. Recorded once per
+## player; a repeat succeeds with `already_completed` true. Only a campaign
+## session can record it ("Not a campaign session" otherwise).
+func complete_campaign() -> CouchGamesSDKResponse:
+	return CouchGamesSDKResponse.from_dict(await _backend.complete_campaign())
 
 
 func get_experience_date() -> Variant:
@@ -242,6 +258,32 @@ func get_game_metadata() -> CouchGamesSDKResponse:
 
 func set_game_metadata(category: String, key: String, value: Variant) -> CouchGamesSDKResponse:
 	return CouchGamesSDKResponse.from_dict(await _backend.set_game_metadata(category, key, value))
+
+
+## Removes one key. A category left with no keys disappears. `payload` is the
+## metadata after the delete.
+func delete_game_metadata(category: String, key: String) -> CouchGamesSDKResponse:
+	return CouchGamesSDKResponse.from_dict(await _backend.delete_game_metadata(category, key))
+
+
+## Deletes all of the player's metadata for this game.
+func clear_game_metadata() -> CouchGamesSDKResponse:
+	return CouchGamesSDKResponse.from_dict(await _backend.clear_game_metadata())
+
+
+## Queues an optional gameplay event for your own analysis. Never fails; the
+## platform sends the queue every 5 seconds or at 25 events. `properties` is a
+## flat Dictionary of Strings, numbers, bools and nulls (at most 32 keys).
+## Telemetry doesn't replace gameplay_start() / gameplay_end() /
+## gameplay_completed() and doesn't save anything.
+func track(event_name: String, properties: Dictionary = {}) -> void:
+	_backend.track(event_name, properties)
+
+
+## Sends queued events now instead of at the next automatic send. Reports
+## nothing back: resolving doesn't mean the events were stored.
+func flush_telemetry() -> void:
+	await _backend.flush_telemetry()
 
 
 func unlock_achievement(key: String) -> CouchGamesSDKResponse:
