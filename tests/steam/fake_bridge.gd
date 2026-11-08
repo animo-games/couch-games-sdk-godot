@@ -20,6 +20,7 @@ var initialization_calls := 0
 var shutdown_calls := 0
 var definitions: Dictionary = {"ACH_A": false, "ACH_B": false}
 var init_ok := true
+var init_code := "steam-init-failed"
 var metadata_writes := 0
 var fail_metadata_after := -1
 
@@ -30,7 +31,7 @@ func initialize(_id: int) -> Dictionary:
 	initialization_calls += 1
 	initialized = init_ok
 	hub.peers[user_id] = self
-	return {"success": initialized, "error": "fake initialization failed" if not initialized else ""}
+	return {"success": initialized, "error": "fake initialization failed" if not initialized else "", "code": init_code if not initialized else ""}
 func shutdown() -> void:
 	shutdown_calls += 1
 	hub.peers.erase(user_id)

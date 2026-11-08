@@ -12,7 +12,27 @@ signal capabilities_changed
 var backend_name := ""
 var initialization_state := "initializing"
 var initialization_error := ""
+## Stable code for a failed initialization, for game UI and localization:
+## steam-not-running, steam-no-account, steam-version-mismatch, steam-init-failed,
+## steam-not-installed, steam-incompatible, steam-misconfigured, timeout,
+## no-platform, unsupported-platform, unsupported-backend or unavailable.
+var initialization_error_code := ""
 var initialization_timeout_ms := 10000
+
+# Failures the player can fix without restarting the game.
+const _RETRYABLE_CODES := ["steam-not-running", "steam-no-account", "steam-version-mismatch", "steam-init-failed"]
+const _USER_MESSAGES := {
+	"steam-not-running": "Steam isn't running. Start Steam and sign in, then try again.",
+	"steam-no-account": "Steam couldn't confirm your account. Make sure you're signed in to Steam and own this game, then try again.",
+	"steam-version-mismatch": "Steam needs an update. Restart Steam to update it, then try again.",
+	"steam-init-failed": "Couldn't connect to Steam. Make sure Steam is running, then try again.",
+	"steam-not-installed": "This copy of the game is missing its Steam support. Reinstall it through Steam.",
+	"steam-incompatible": "This copy of the game is missing its Steam support. Reinstall it through Steam.",
+	"steam-misconfigured": "This copy of the game is missing its Steam support. Reinstall it through Steam.",
+	"timeout": "Couldn't connect in time. Check your connection and restart the game.",
+	"no-platform": "Online play isn't available in this build.",
+	"unsupported-platform": "Online play isn't available on this platform.",
+}
 var backend_override: CouchGamesBackend # Test injection before entering the tree.
 var achievements: CouchAchievements
 const _Achievements := preload("res://addons/couch-games-sdk/achievements/couch_achievements.gd")
@@ -108,7 +128,7 @@ func _ready() -> void:
 	game.setup(_backend)
 	add_child(game)
 	if _backend.is_mock():
-		print("CouchGames SDK: using mock backend (persistence at %s)" % _MockBackend.SAVE_DIR)
+		print("CouchGames SDK: using %s backend (mock persistence at %s)" % [backend_name, _MockBackend.SAVE_DIR])
 		if _overlay_enabled():
 			add_child(_Overlay.create(_backend as CouchGamesMockBackend))
 
@@ -124,6 +144,8 @@ func init() -> void:
 	_init_generation += 1
 	_init_job = {"done": false, "generation": _init_generation}
 	var job := _init_job
+	initialization_error = ""
+	initialization_error_code = ""
 	_set_initialization_state("initializing")
 	_initialize_backend(job)
 	var deadline := Time.get_ticks_msec() + maxi(1, int(ProjectSettings.get_setting("couch_games/initialization_timeout_ms", initialization_timeout_ms)))
@@ -132,10 +154,12 @@ func init() -> void:
 	if not job.done:
 		_init_generation += 1
 		initialization_error = "Backend initialization timed out"
+		initialization_error_code = "timeout"
 		_backend.shutdown()
 		_set_initialization_state("failed")
 	elif not _backend.initialization_error.is_empty() or not _backend.is_available():
 		initialization_error = _backend.initialization_error if not _backend.initialization_error.is_empty() else "Backend unavailable"
+		initialization_error_code = _backend.initialization_error_code if not _backend.initialization_error_code.is_empty() else "unavailable"
 		_set_initialization_state("failed")
 	else:
 		achievements.setup(_backend, ProjectSettings.get_setting("couch_games/achievements/catalog", {}))
@@ -151,8 +175,36 @@ func init() -> void:
 			var metadata_deadline := mini(deadline, Time.get_ticks_msec() + maxi(0, int(ProjectSettings.get_setting("couch_games/experience_metadata_timeout_ms", 1000))))
 			while not metadata_job.done and Time.get_ticks_msec() < metadata_deadline:
 				await get_tree().process_frame
+	if initialization_state == "failed":
+		# Players see get_user_error_message(); keep the raw provider text in the log.
+		push_warning("CouchGames SDK: %s initialization failed (%s): %s" % [backend_name, initialization_error_code, initialization_error])
 	_initializing = false
 	_initialized = true
+
+## True when initialization failed for a reason the player can fix while the
+## game runs, such as starting Steam.
+func can_retry_init() -> bool:
+	return initialization_state == "failed" and initialization_error_code in _RETRYABLE_CODES
+
+
+## Runs initialization again after a retryable failure. Resolves like init().
+func retry_init() -> void:
+	# The failed state is announced before the attempt finishes; let it finish.
+	while _initializing:
+		await get_tree().process_frame
+	if not can_retry_init():
+		return
+	_initialized = false
+	await init()
+
+
+## Player-facing text for the current failure; empty when not failed. Games that
+## localize should map initialization_error_code instead.
+func get_user_error_message() -> String:
+	if initialization_state != "failed":
+		return ""
+	return _USER_MESSAGES.get(initialization_error_code, "Online play is unavailable right now.")
+
 
 func _initialize_backend(job: Dictionary) -> void:
 	await _backend.initialize()
@@ -184,13 +236,15 @@ func _on_capabilities_changed() -> void:
 			_set_initialization_state("ready")
 
 ## Pure selection policy: extension presence is deliberately not an input.
+## The mock is used only when explicitly requested; auto never falls back to it,
+## so an undetected platform fails visibly instead of faking success.
 static func select_backend(requested: String, force_mock: bool, couch_detected: bool, web: bool, steam_feature: bool, debug: bool, local_enabled: bool) -> String:
 	if force_mock: return "mock"
 	if requested != "auto": return requested
 	if couch_detected: return "couch"
 	if steam_feature: return "steam"
 	if not web and debug and local_enabled: return "local"
-	return "mock"
+	return "none"
 
 func _create_backend() -> CouchGamesBackend:
 	backend_name = select_backend(str(ProjectSettings.get_setting("couch_games/backend", "auto")), ProjectSettings.get_setting(_FORCE_MOCK_SETTING, false) or OS.get_cmdline_user_args().has("--couch-mock"), _WebBackend.detect(), OS.has_feature("web"), OS.has_feature("steam"), OS.is_debug_build(), ProjectSettings.get_setting(_LOCAL_ENABLED_SETTING, true))
@@ -203,7 +257,13 @@ func _create_backend() -> CouchGamesBackend:
 			if not OS.has_feature("web"):
 				return load("res://addons/couch-games-sdk/backends/steam_backend.gd").new()
 	var unavailable := CouchGamesBackend.new()
-	unavailable.initialization_error = "Unsupported backend/platform selection: " + backend_name
+	if backend_name == "none":
+		unavailable.initialization_error = "No platform detected: run inside Couch, export with the steam feature, or set couch_games/backend (mock is explicit only)"
+		unavailable.initialization_error_code = "no-platform"
+	else:
+		unavailable.initialization_error = "Unsupported backend/platform selection: " + backend_name
+		# Known backends fail here only on a platform that cannot host them (e.g. Steam on Web).
+		unavailable.initialization_error_code = "unsupported-platform" if backend_name in ["steam", "local"] else "unsupported-backend"
 	return unavailable
 
 func _exit_tree() -> void:

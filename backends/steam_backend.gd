@@ -34,26 +34,30 @@ var _was_connected := false
 func initialize() -> void:
 	if _closed or _active:
 		return
+	initialization_error = ""
+	initialization_error_code = ""
 	if OS.has_feature("web"):
 		initialization_error = "Steam is unsupported on Web"
+		initialization_error_code = "unsupported-platform"
 		return
 	if bridge == null:
 		bridge = load("res://addons/couch-games-sdk/steam/steam_bridge.gd").new()
 	bridge.name = "SteamBridge"
 	if bridge.get_parent() == null:
 		add_child(bridge)
-	bridge.request_entered.connect(_on_entered)
-	bridge.roster_changed.connect(_on_roster_changed)
-	bridge.join_requested.connect(_on_invite)
-	bridge.peer_requested.connect(_on_peer_request)
-	bridge.peer_failed.connect(_on_peer_failure)
-	bridge.connection_changed.connect(_on_connection_changed)
+	# A failed attempt can be retried (for example after the player starts Steam),
+	# so connect each bridge signal only once.
+	for link in [[bridge.request_entered, _on_entered], [bridge.roster_changed, _on_roster_changed], [bridge.join_requested, _on_invite],
+			[bridge.peer_requested, _on_peer_request], [bridge.peer_failed, _on_peer_failure], [bridge.connection_changed, _on_connection_changed]]:
+		if not link[0].is_connected(link[1]):
+			link[0].connect(link[1])
 	var response: Dictionary = await bridge.initialize(int(ProjectSettings.get_setting("couch_games/steam/app_id", 0)))
 	if _closed:
 		bridge.shutdown()
 		return
 	_active = bool(response.get("success", false))
 	initialization_error = str(response.get("error", "Steam initialization failed")) if not _active else ""
+	initialization_error_code = str(response.get("code", "steam-init-failed")) if not _active else ""
 	if not _active:
 		return
 	_pinned_account = bridge.app_id + "/" + bridge.user_id

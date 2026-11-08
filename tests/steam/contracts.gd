@@ -46,6 +46,7 @@ func _run() -> void:
 	_native_callback_correlation()
 	await _classic_achievements()
 	await _ui()
+	await _player_facing_failure()
 	await _active_match_fixture()
 	for node in _owned:
 		if is_instance_valid(node): node.free()
@@ -56,7 +57,11 @@ func _selection() -> void:
 	check(SDK.select_backend("auto", false, true, true, true, true, true) == "couch", "parent Couch precedes Steam feature")
 	check(SDK.select_backend("auto", false, false, false, true, true, true) == "steam", "native Steam feature selects Steam")
 	check(SDK.select_backend("auto", false, false, false, false, true, true) == "local", "editor auto retains local")
-	check(SDK.select_backend("auto", false, false, true, false, true, true) == "mock", "standalone Web retains mock")
+	check(SDK.select_backend("auto", false, false, true, false, true, true) == "none", "standalone Web never falls back to mock")
+	check(SDK.select_backend("auto", false, false, false, false, false, true) == "none", "native release without Steam never falls back to mock")
+	check(SDK.select_backend("auto", false, false, false, false, true, false) == "none", "editor with local relay disabled never falls back to mock")
+	check(SDK.select_backend("mock", false, false, false, false, false, true) == "mock", "explicit mock selection still honored")
+	check(SDK.select_backend("auto", true, false, false, false, false, true) == "mock", "forced mock still honored")
 	check(SDK.select_backend("steam", false, false, true, false, true, true) == "steam", "explicit Steam Web does not silently fall back")
 	check(ExportFilter.excludes_from_web("res://addons/godotsteam/godotsteam.gdextension"), "Web excludes extension descriptor")
 	check(ExportFilter.excludes_from_web("res://addons/godotsteam/linux64/libsteam_api.so"), "Web excludes Steam runtime")
@@ -101,8 +106,18 @@ func _initialization() -> void:
 	await missing.init()
 	check(missing.backend_name == "steam" and missing.initialization_state == "failed", "missing Steam dependency stays failed Steam")
 	check(not missing.supports("achievements") and not missing.webrtc.is_available, "failed Steam exposes no usable capabilities/WebRTC")
+	check(missing.initialization_error_code == "steam-not-installed" and not missing.can_retry_init()
+		and missing.get_user_error_message().contains("Reinstall"), "missing extension reports a non-retryable player message")
 	missing.free()
+	ProjectSettings.set_setting("couch_games/backend", "bogus")
+	var unknown := SDK.new()
+	root.add_child(unknown)
+	await unknown.init()
+	check(unknown.initialization_error_code == "unsupported-backend" and not unknown.get_user_error_message().is_empty(), "unknown backend has a code and fallback message")
+	unknown.free()
 	ProjectSettings.set_setting("couch_games/backend", "auto")
+	check(ProductionBridge.init_failure_code(2) == "steam-not-running" and ProductionBridge.init_failure_code(3) == "steam-version-mismatch"
+		and ProductionBridge.init_failure_code(1) == "steam-init-failed", "native init status maps to stable codes")
 func _lobby_session() -> void:
 	# CouchLobbySession over fake Steam networking. The guest starts first, the
 	# order that previously left a guest without a baseline.
@@ -925,6 +940,42 @@ func _ui() -> void:
 	provider.online = true
 	provider.connection_changed.emit(true)
 	check(sdk.initialization_state == "ready", "restored provider updates readiness")
+	panel.free()
+	sdk.free()
+
+func _player_facing_failure() -> void:
+	# Steam not running at launch: the player sees plain guidance and can retry
+	# after starting Steam, without restarting the game.
+	var provider := Bridge.new()
+	provider.init_ok = false
+	provider.init_code = "steam-not-running"
+	var backend := SteamBackend.new()
+	backend.bridge = provider
+	backend.game_id = "sdk-retry-fixture"
+	var sdk := SDK.new()
+	sdk.backend_override = backend
+	root.add_child(sdk)
+	var retryable_on_signal := []
+	sdk.initialization_state_changed.connect(func(state): if state == "failed": retryable_on_signal.append(sdk.can_retry_init()))
+	var panel := CouchLobbyPanel.new()
+	panel.sdk = sdk
+	root.add_child(panel)
+	await sdk.init()
+	await process_frame
+	check(sdk.initialization_state == "failed" and sdk.initialization_error_code == "steam-not-running", "Steam not running reports a stable code")
+	check(retryable_on_signal == [true], "failed state listeners already see a retryable failure")
+	check(sdk.get_user_error_message().begins_with("Steam isn't running") and not sdk.get_user_error_message().contains("IPC"), "player message replaces raw Steam text")
+	check(panel.get("_status").text == sdk.get_user_error_message() and panel.get("_retry").visible, "panel shows the player message and Retry")
+	provider.init_ok = true
+	panel.get("_retry").pressed.emit()
+	var deadline := Time.get_ticks_msec() + 3000
+	while sdk.initialization_state != "ready" and Time.get_ticks_msec() < deadline:
+		await process_frame
+	await process_frame
+	check(sdk.initialization_state == "ready" and sdk.initialization_error_code.is_empty() and sdk.get_user_error_message().is_empty(), "retry after Steam starts initializes without restarting")
+	check(provider.initialization_calls == 2 and not panel.get("_retry").visible and panel.get("_host").visible, "retry runs Steam initialization once more and restores entry controls")
+	check(sdk.supports("lobby_host") and (await sdk.lobby.host()).success, "retried backend hosts with singly connected bridge signals")
+	sdk.lobby.leave()
 	panel.free()
 	sdk.free()
 

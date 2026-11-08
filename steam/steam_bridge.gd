@@ -9,21 +9,27 @@ var _joining_id := ""
 var _created_id := ""
 var _create_entry: Dictionary = {}
 var _connections: Array = []
+## Maps steamInitEx's ESteamAPIInitResult status to a stable SDK error code.
+static func init_failure_code(status: int) -> String:
+	match status:
+		2: return "steam-not-running"       # k_ESteamAPIInitResult_NoSteamClient
+		3: return "steam-version-mismatch"  # k_ESteamAPIInitResult_VersionMismatch
+	return "steam-init-failed"
 func initialize(requested_app_id: int) -> Dictionary:
 	if initialized:
 		return {"success": true}
 	if OS.has_feature("web") or not Engine.has_singleton("Steam"):
-		return {"success": false, "error": "GodotSteam is not installed on this platform"}
+		return {"success": false, "code": "steam-not-installed", "error": "GodotSteam is not installed on this platform"}
 	if ProjectSettings.get_setting("steam/initialization/processes/initialize_on_startup", false) or ProjectSettings.get_setting("steam/initialization/processes/embed_callbacks", false):
-		return {"success": false, "error": "Disable GodotSteam automatic initialization and embedded callbacks; CouchGames owns both"}
+		return {"success": false, "code": "steam-misconfigured", "error": "Disable GodotSteam automatic initialization and embedded callbacks; CouchGames owns both"}
 	_native = Engine.get_singleton("Steam")
 	for method in ["steamInitEx", "getAppID", "getSteamID", "run_callbacks", "sendMessageToUser", "receiveMessagesOnChannel", "getAchievement", "storeStats", "steamShutdown", "loggedOn", "createLobby", "joinLobby", "leaveLobby", "getNumLobbyMembers", "getLobbyMemberByIndex", "getLobbyOwner", "getFriendPersonaName", "setLobbyData", "getLobbyData", "requestLobbyData", "isOverlayEnabled", "activateGameOverlayInviteDialog", "acceptSessionWithUser", "closeSessionWithUser", "setAchievement"]:
 		if not _native.has_method(method):
-			return {"success": false, "error": "Incompatible GodotSteam: missing " + method}
+			return {"success": false, "code": "steam-incompatible", "error": "Incompatible GodotSteam: missing " + method}
 	for event in ["lobby_created", "lobby_joined", "lobby_chat_update", "lobby_data_update", "persona_state_change", "join_requested", "network_messages_session_request", "network_messages_session_failed", "user_stats_stored", "steam_server_connected", "steam_server_disconnected"]:
 		if not _native.has_signal(event):
 			shutdown()
-			return {"success": false, "error": "Incompatible GodotSteam: missing signal " + event}
+			return {"success": false, "code": "steam-incompatible", "error": "Incompatible GodotSteam: missing signal " + event}
 	_link("lobby_created", _on_created)
 	_link("lobby_joined", _on_joined)
 	_link("lobby_chat_update", func(id, _changed, _actor, _state): roster_changed.emit(str(id)))
@@ -42,10 +48,10 @@ func initialize(requested_app_id: int) -> Dictionary:
 		user_id = str(_native.call("getSteamID"))
 		if app_id == "0" or user_id == "0":
 			shutdown()
-			return {"success": false, "error": "Steam did not identify the app/account"}
+			return {"success": false, "code": "steam-no-account", "error": "Steam did not identify the app/account"}
 	if not initialized:
 		shutdown()
-		return {"success": false, "error": str(result.get("verbal", "Steam initialization failed"))}
+		return {"success": false, "code": init_failure_code(int(result.get("status", -1))), "error": str(result.get("verbal", "Steam initialization failed"))}
 	return {"success": true, "error": ""}
 func _link(event: String, callback: Callable) -> void:
 	_native.connect(event, callback)

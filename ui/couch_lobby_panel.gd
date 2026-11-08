@@ -12,6 +12,7 @@ var _leave: Button
 var _start: Button
 var _id: LineEdit
 var _status: Label
+var _retry: Button
 var _roster: Label
 var _confirmation: ConfirmationDialog
 var _pending_invite := ""
@@ -36,6 +37,8 @@ func _ready() -> void:
 	_status = Label.new()
 	_status.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	add_child(_status)
+	_retry = _button("Retry", _on_retry)
+	_retry.visible = false
 	_confirmation = ConfirmationDialog.new()
 	_confirmation.dialog_text = "Leave the current match? Unsaved match progress may be lost."
 	_confirmation.confirmed.connect(_accept_switch)
@@ -53,10 +56,23 @@ func _ready() -> void:
 	await sdk.init()
 	_refresh()
 	_entry_ready = true
+	_enter_launch_invitation()
+
+# A launch invitation (+connect_lobby) is captured once the backend is ready,
+# which can be after a retry.
+func _enter_launch_invitation() -> void:
 	var launch_id: String = sdk.lobby.consume_join_request()
 	if launch_id.is_empty(): launch_id = _pending_invite
 	_pending_invite = ""
 	if not launch_id.is_empty(): _on_join_requested(launch_id)
+
+func _on_retry() -> void:
+	_retry.disabled = true
+	await sdk.retry_init()
+	_retry.disabled = false
+	_refresh()
+	if sdk.initialization_state != "failed":
+		_enter_launch_invitation()
 
 func _button(label: String, callback: Callable) -> Button:
 	var button := Button.new()
@@ -84,7 +100,9 @@ func _refresh() -> void:
 	for player in sdk.lobby.get_players():
 		lines.append("%s (%s)" % [player.username, player.role])
 	_roster.text = "\n".join(lines)
-	_status.text = sdk.initialization_error if sdk.initialization_state == "failed" else sdk.lobby.state + (" · " + sdk.lobby.lobby_id if joined else "")
+	var failed: bool = sdk.initialization_state == "failed"
+	_retry.visible = failed and sdk.can_retry_init()
+	_status.text = sdk.get_user_error_message() if failed else sdk.lobby.state + (" · " + sdk.lobby.lobby_id if joined else "")
 
 func _on_host() -> void:
 	_show_response(await sdk.lobby.host())

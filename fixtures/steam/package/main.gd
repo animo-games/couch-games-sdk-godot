@@ -32,9 +32,11 @@ func _ready() -> void:
 		if OS.has_feature("web"):
 			check(not ResourceLoader.exists("res://addons/couch-games-sdk/backends/steam_backend.gd"), "Web adapter excluded")
 			check(not ResourceLoader.exists("res://addons/godotsteam/godotsteam.gdextension"), "Web extension excluded")
+	elif mode == "auto" and not OS.is_debug_build():
+		check(sdk.backend_name == "none" and sdk.initialization_state == "failed" and not sdk.is_mock, "release auto without a platform fails visibly instead of using the mock")
+		check(not sdk.initialization_error.is_empty() and not sdk.supports("lobby_events"), "no-platform failure exposes error and disables capabilities")
 	else:
-		var expected := mode
-		if mode == "auto": expected = "local" if OS.is_debug_build() else "mock"
+		var expected := "local" if mode == "auto" else mode
 		check(sdk.backend_name == expected and sdk.initialization_state in ["ready", "degraded"], "shared initialization selects usable " + expected)
 		check(sdk.lobby.is_available and sdk.lobby.get_players().size() > 0, "shared lobby usable")
 		if mode == "couch":

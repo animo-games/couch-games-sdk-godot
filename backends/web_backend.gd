@@ -40,7 +40,7 @@ var _build_root := ""
 
 ## True when this export can reach the platform SDK. False for web exports
 ## hosted outside the platform (itch.io, a local http server), in which case
-## the autoload falls back to the mock backend.
+## auto selection reports no platform; the mock is explicit only.
 static func detect() -> bool:
 	if not OS.has_feature("web"):
 		return false

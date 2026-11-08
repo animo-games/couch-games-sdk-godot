@@ -14,11 +14,17 @@ CouchGames.lobby.send_event("ready", {"slot": 1})
 var res := await CouchGames.webrtc.connect_signaling()
 ```
 
-Outside the platform (editor runs, standalone builds) the same API is served by
-a local mock, so game code needs no changes to stay testable. F10 opens the
-mock's debug overlay for faking lobby players and events. Run several instances
-at once (Debug > Run Multiple Instances) and they form a real lobby over a
-loopback socket instead of a faked one.
+In editor and other native debug runs the same API is served by a local relay,
+so game code needs no changes to stay testable. F10 opens its debug overlay for
+faking lobby players and events. Run several instances at once (Debug > Run
+Multiple Instances) and they form a real lobby over a loopback socket instead of
+a faked one.
+
+The SDK never falls back to the mock on its own. A build that detects no
+platform (a release export without the `steam` feature, or a Web build outside
+Couch) reports `backend_name == "none"` with a failed initialization. Use the
+mock only by asking for it: `couch_games/backend = "mock"`,
+`couch_games/mock/force_mock`, or `--couch-mock`.
 
 ## Layout
 
@@ -335,7 +341,8 @@ people did.
 
 ### Trying it without the platform
 
-Off-platform the lobby is served by the mock, so all of the above runs in the
+In editor debug runs the lobby is served by the local relay (or the mock, when
+selected explicitly), so all of the above runs in the
 editor. F10 opens the debug overlay: add fake guests, send an event **as** one
 of them with the same targeting filters the server applies, and watch the event
 log, which shows each event's direction and who it was delivered to. For

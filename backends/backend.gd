@@ -45,6 +45,8 @@ signal lobby_operation_failed(code: String, message: String)
 signal event_send_failed(code: String, message: String, peer_id: String)
 signal transport_gap(peer_id: String, reason: String)
 var initialization_error := ""
+## Stable code for initialization_error (for example "steam-not-running"); empty on success.
+var initialization_error_code := ""
 
 func supports(capability: String) -> bool:
 	match capability:

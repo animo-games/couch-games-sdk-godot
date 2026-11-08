@@ -73,8 +73,10 @@ frame by default (configurable 1–256). No transparent replay of stale actions.
 Set `couch_games/backend` to `auto`, `couch`, `steam`, `local`, or `mock`.
 The existing force-mock setting and `--couch-mock` take precedence. Auto selects
 Couch's detected parent bridge, then the custom `steam` export feature, then
-native debug local relay, then mock. Installing GodotSteam alone never selects
-Steam in the editor. Explicit Steam failure remains failed Steam.
+native debug local relay. Otherwise it selects `none`, a failed backend with a
+visible error; auto never falls back to the mock, which is explicit only.
+Installing GodotSteam alone never selects Steam in the editor. Explicit Steam
+failure remains failed Steam.
 
 Disable both GodotSteam settings:
 
@@ -107,6 +109,29 @@ WebRTC facade remains present and unavailable; its path probe is never installed
 for Steam. Unsupported experience metadata is skipped. Responsive Couch/local metadata
 still populates `experience_data` before init returns; a stuck read is limited to
 a one-second optional grace period within the total init deadline.
+
+### Player-facing initialization errors
+
+A failed initialization sets `initialization_error_code` and logs the raw
+provider text as a warning. Show `get_user_error_message()` to players, or map the
+code to your own localized text:
+
+| Code | Cause | Retryable |
+| --- | --- | --- |
+| `steam-not-running` | Steam client not running (`steamInitEx` status 2) | Yes |
+| `steam-no-account` | Steam could not identify the app or account | Yes |
+| `steam-version-mismatch` | Steam client too old (status 3) | Yes |
+| `steam-init-failed` | Other Steam initialization failure | Yes |
+| `steam-not-installed`, `steam-incompatible`, `steam-misconfigured` | Missing or wrong GodotSteam, or auto-init settings left on | No |
+| `timeout` | Initialization exceeded `initialization_timeout_ms` | No |
+| `no-platform` | `auto` found no platform (see selection above) | No |
+| `unsupported-platform`, `unsupported-backend` | Backend cannot run here, or unknown name | No |
+
+When `can_retry_init()` is true, `await retry_init()` runs initialization again,
+for example after the player starts Steam, without restarting the game. A launch
+invitation (`+connect_lobby`) is captured once initialization succeeds, so it
+still applies after a retry. `CouchLobbyPanel` shows the message and a Retry
+button automatically.
 
 ## Achievements
 
