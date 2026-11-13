@@ -28,7 +28,10 @@
 ##       change), newest wins, peer_section follows the newest accepted snapshot.
 ##   W4  interpolation: LERP / ANGLE (short arc across +/-PI, wrapped) / SNAP against the
 ##       contract formulas at non-tick-aligned render times; render never runs backwards.
-##   W4b history_size eviction then hold-oldest.
+##   W4b history eviction: history_size alone (history_ticks 0), the default tick window,
+##       and history_size as a floor under sparse snapshots; then hold-oldest.
+##   W4c the default history brackets render times down to CouchNetClockPolicy's
+##       render_delay_max_ticks behind the newest, at snapshots every 1, 2 and 3 ticks.
 ##   W5  extrapolation formula, the cap, hold beyond it, once-per-call counters, resume.
 ##   W6  spawn/despawn signals at render time: ordering rules, skipped lives, no re-fire
 ##       when render goes backwards, kind change, reappearing id is a new life.
@@ -52,6 +55,8 @@
 ##       delay with post-warmup held_frames == 0). Only sanity checks, no threshold.
 ##   S1c S1 with one client cut off for 3.5 s: events expire host-side, the inbox reports
 ##       the gap, and the accounting still closes.
+##   S1d S1 with the adaptive render delay from a floor of 3 ticks: held 0, extrapolated
+##       <= 1% (S1-S1c pin the fixed mode).
 ##   S2  new epoch: reset() on world / ring / inbox / clock then a clean rebuild; no stale
 ##       event re-applied, ids restart at 1, old lives gone, lower ticks accepted again.
 ##
@@ -784,13 +789,14 @@ func _case_w4b() -> void:
 	print("W4b: history eviction")
 	var c := _new_world(0)
 	c.history_size = 3
+	c.history_ticks = 0   # count only
 	var rec := _Rec.new(c)
 	for t in range(1, 7):
 		c.ingest(_body(c, t, [[1, 1, [t * 10, -t * 10]]]))
 	var s1 := c.sample(2500)
 	_check(
 		c.newest_tick() == 6 and _near(s1.get(1), [40, -40]) and rec.take() == ["S:1:1"],
-		"W4b: history_size 3 keeps ticks 4..6; render time 2500 (before the oldest kept) holds the oldest sample [40, -40] (got %s)" % str(s1.get(1))
+		"W4b: history_size 3 with history_ticks 0 keeps ticks 4..6; render time 2500 (before the oldest kept) holds the oldest sample [40, -40] (got %s)" % str(s1.get(1))
 	)
 	var s2 := c.sample(4500)
 	_check(
@@ -799,12 +805,42 @@ func _case_w4b() -> void:
 		"W4b: interpolation resumes inside the kept window (4500 -> [45, -45]); tick 3 was evicted, tick 4 kept"
 	)
 	var d := _new_world(0)
-	for t in range(1, 11):
+	for t in range(1, 61):
 		d.ingest(_body(d, t, [[1, 1, [t, t]]]))
 	_check(
-		d.history_size == 8 and d.state_at(1, 3) == _pf([3, 3]) and d.state_at(1, 2).is_empty() and d.state_at(1, 10) == _pf([10, 10]),
-		"W4b: the default history_size is 8: of ticks 1..10 only 3..10 are kept"
+		d.history_size == 8 and d.history_ticks == 34 and d.state_at(1, 26) == _pf([26, 26])
+		and d.state_at(1, 25).is_empty() and d.state_at(1, 60) == _pf([60, 60]),
+		"W4b: the defaults (history_size 8, history_ticks 34) keep of ticks 1..60 exactly 26..60: back to newest - 34"
 	)
+	var e := _new_world(0)
+	for t in range(10, 201, 10):
+		e.ingest(_body(e, t, [[1, 1, [t, t]]]))
+	_check(
+		e.state_at(1, 130) == _pf([130, 130]) and e.state_at(1, 120).is_empty(),
+		"W4b: snapshots 10 ticks apart: history_size still keeps 8 samples (130..200) though 34 ticks need only 5"
+	)
+
+
+func _case_w4c() -> void:
+	print("W4c: the default history brackets render times down to the adaptive delay's cap")
+	var cap := CouchNetClockPolicy.new().render_delay_max_ticks
+	var keep := CouchReplicatedWorld.new().history_ticks
+	_check(
+		keep >= cap + 2,
+		"W4c: history_ticks %d covers render_delay_max_ticks %d plus at least one 2-tick snapshot interval" % [keep, cap]
+	)
+	for every in [1, 2, 3]:
+		var c := _new_world(0)
+		for t in range(every, 121, every):
+			c.ingest(_body(c, t, [[1, 1, [t, -t]]]))
+		var newest := c.newest_tick()
+		var r := (newest - cap) * 1000 - 500
+		var s := c.sample(r)
+		var x := float(r) / 1000.0
+		_check(
+			_near(s.get(1), [x, -x]),
+			"W4c: snapshots every %d ticks, render time newest - %d.5 ticks interpolates to [%.1f, %.1f] (got %s)" % [every, cap, x, -x, str(s.get(1))]
+		)
 
 
 # --- W5 ---------------------------------------------------------------------------------------
@@ -1571,6 +1607,7 @@ class _WSim extends RefCounted:
 			p.next_t = 7 + i * 5
 			p.policy = CouchNetClockPolicy.new()
 			p.policy.render_delay_ticks = render_delay
+			p.policy.render_delay_adaptive = false   # S1d switches it on
 			p.clock = CouchNetClock.new(p.policy)
 			p.world = CouchReplicatedWorld.new()
 			p.world.register_kind(1, [LERP, LERP])
@@ -1888,6 +1925,30 @@ func _case_s1b() -> void:
 	_check(all_ran, "S1b: all seven sweep runs synced and produced post-warmup samples for every client (report only, no threshold on the delay)")
 
 
+func _case_s1d() -> void:
+	print("S1d: the S1 network with the adaptive render delay from a floor of 3 ticks")
+	var s := _WSim.new(4242, 3, 15_000)
+	for p in s.peers:
+		p.policy.render_delay_adaptive = true
+	s.run_until(15_000)
+	for p in s.peers:
+		var lbl: String = p.id
+		var c: CouchNetClock = p.clock
+		print("  S1d/%s: render delay %d milliticks (target %d), %d late snapshots, %d extrapolated of %d post-warmup frames" % [lbl, c.render_delay_milli, c.render_target_milli, c.late_snapshots, p.ext_post(), p.post_frames])
+		_check(
+			p.post_frames > 500 and p.held_post() == 0 and p.ext_post() * 100 <= p.post_frames and p.render_violations == 0,
+			"S1d/%s: post-warmup held 0 and extrapolated %d of %d frames (<= 1%%; fixed 3 ticks: ~65%%), render never backwards" % [lbl, p.ext_post(), p.post_frames]
+		)
+		_check(
+			p.track_frames > 500 and p.track_err_render <= 0.05,
+			"S1d/%s: the mover's sampled x is within 0.05 of truth at the render tick (worst %.4f)" % [lbl, p.track_err_render]
+		)
+		_check(
+			c.render_delay_milli >= 3000 and c.render_delay_milli <= 12_000,
+			"S1d/%s: the delay settled between the floor and 12 ticks (%d)" % [lbl, c.render_delay_milli]
+		)
+
+
 func _case_s1c() -> void:
 	print("S1c: client 1 cut off for 3.5 s")
 	var s := _WSim.new(777, S1_DELAY, 25_000, 1, 8000, 11_500)
@@ -2018,6 +2079,7 @@ func _run() -> void:
 	_case_w3()
 	_case_w4()
 	_case_w4b()
+	_case_w4c()
 	_case_w5()
 	_case_w6()
 	_case_w6b()
@@ -2029,6 +2091,7 @@ func _run() -> void:
 	_case_s1()
 	_case_s1b()
 	_case_s1c()
+	_case_s1d()
 	_case_s2()
 
 	print("")

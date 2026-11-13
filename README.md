@@ -3,13 +3,17 @@
 Godot 4 addon for games running on the Couch Games platform: saves, achievements,
 metadata, session stats, a multiplayer lobby and WebRTC signaling.
 
+**What each call does, and the rules around it, are in the
+[developer guide](https://developer.couchgames.com/docs).** This README covers the Godot names, what only Godot
+has (sessions, packs, the build and upload tools), and the local mock.
+
 Install it at `addons/couch-games-sdk/` in your project, then enable
 "Couch Games SDK" under Project > Project Settings > Plugins. The plugin
 registers a `CouchGames` autoload, and everything goes through it:
 
 ```gdscript
 await CouchGames.init()
-await CouchGames.save_game({"level": 3}, 0.25)
+await CouchGames.save_game({"level": 3}, 25)
 CouchGames.lobby.send_event("ready", {"slot": 1})
 var res := await CouchGames.webrtc.connect_signaling()
 ```
@@ -18,7 +22,8 @@ In editor and other native debug runs the same API is served by a local relay,
 so game code needs no changes to stay testable. F10 opens its debug overlay for
 faking lobby players and events. Run several instances at once (Debug > Run
 Multiple Instances) and they form a real lobby over a loopback socket instead of
-a faked one.
+a faked one. `CouchGames.is_mock` is true when the local relay or the mock is
+answering.
 
 The SDK never falls back to the mock on its own. A build that detects no
 platform (a release export without the `steam` feature, or a Web build outside
@@ -57,85 +62,47 @@ else:
     _state = _new_game()          # show them something, but do NOT save it
     _saving_enabled = false
 
-var write := await CouchGames.save_game(_state, 0.25)
+var write := await CouchGames.save_game(_state, 25)
 if not write.persisted:
     push_warning("Save did not land: %s" % write.error)
 ```
 
-Two rules carry all of this: **`load_save_result()` decides whether a player is
-new**, and **`save_game()` is judged by `persisted`, not `success`**.
+`progress` is a whole percent, 0 to 100 (the platform rounds it), so `25` is a quarter of the way.
 
-### Why `load_latest_save()` cannot tell you
+Two rules: **`load_save_result()` decides whether a player is new**, and
+**`save_game()` is judged by `persisted`, not `success`**. The guide explains why:
+[`loadSaveResult()`](https://developer.couchgames.com/docs/saves#load-save-result),
+[`loadLatestSave()`](https://developer.couchgames.com/docs/saves#load-latest-save) and
+[refused saves](https://developer.couchgames.com/docs/saving-progress#refused-saves).
 
-`load_latest_save()` reads the save the platform handed your session at startup.
-It costs no round-trip, but its empty payload is ambiguous — it means any of:
-
-- this player genuinely has no save;
-- the session had not finished starting when you asked;
-- they joined **someone else's** session, so their own save was withheld on
-  purpose (a co-op guest must see the host's board, not their solo game).
-
-Only the first makes it safe to start fresh. A game that reads the other two as
-"new player" initialises empty state, and its next whole-document save destroys
-real progress — which is exactly the bug this API exists to prevent. Use
-`load_latest_save()` only to re-read state you have already established.
-
-`load_save_result()` awaits the real answer and says which case you are in:
-
-| | Meaning | Safe to start fresh? |
+| `load_save_result()` | Meaning | Safe to start fresh? |
 | --- | --- | --- |
-| `is_new_player()` | Confirmed: no save exists | **Yes** — the only status that is |
-| `is_found()` | `payload` holds the stored save | No — merge into `payload` |
-| `is_unavailable()` | Could not be read; one may well exist | No — and keep writes off |
+| `is_new_player()` (also `is_safe_to_start_fresh()`) | No save exists | **Yes**, the only one |
+| `is_found()` | `payload` holds the save | No: merge into it |
+| `is_unavailable()` | It couldn't be read; one may exist | No, and keep saving off |
 
-`is_safe_to_start_fresh()` is `is_new_player()` under a name that says what the
-answer is for. On `unavailable`, put the player somewhere sensible and leave
-saving **disabled** for the session rather than guessing.
-
-It also returns `revision` (what you read, see below), `metadata`, and
-`host_authoritative`.
-
-### Guests: `host_authoritative`
-
-When `host_authoritative` is true you are a player who joined someone else's
-session. `payload` is **your own** save, but the host owns the shared board. Use
-it as a **merge base** — read it, merge this session's contributions into it,
-write that back. Rendering it as live state would show a guest their solo game
-in place of the host's.
+It also returns `revision`, `metadata` and `host_authoritative` (true for a
+player who joined someone else's session: merge into `payload` rather than
+showing it). `load_latest_save()` reads the save handed to the session at
+startup; use it only to re-read state you already have, since an empty payload
+doesn't mean the player is new.
 
 ### `persisted`, not `success`
 
-The platform refuses a write that would replace a save this session has never
-read, and by default it reports that refusal as:
+A refused save arrives as `{ success = true, persisted = false, conflict = true }`.
+Branch on `persisted`; the SDK treats a missing `persisted` as "did not land".
+If your retries are capped, ask for an honest failure:
 
 ```gdscript
-{ success = true, persisted = false, conflict = true }
-```
-
-`success: true` on a write that did not happen looks wrong, and it is
-deliberate: this SDK is compiled into your exported build, so games already
-published cannot be updated from the platform, and many of them branch on
-`success` alone with an unbounded retry loop. An honest failure would spin them
-for a whole session.
-
-So **branch on `response.persisted`**. It is accurate whichever mode you ask
-for. `conflict` tells you the write was refused rather than broken, and a
-response that omits `persisted` means the platform took the call as a no-op —
-treat a missing value as "did not land", which is what this SDK does.
-
-If your retry loop is **bounded**, you can ask for an honest failure instead:
-
-```gdscript
-var res := await CouchGames.save_game(state, 0.25, null, "error")
+var res := await CouchGames.save_game(state, 25, null, "error")
 # a refusal now arrives as success = false, persisted = false, conflict = true
 ```
 
-The SDK never sets this for you — only your game knows whether its retry is
-capped.
+The SDK never sets this for you.
 
 ### Recovering from a refusal
 
-Always the same, and it needs nothing from `current_revision`:
+Always the same:
 
 ```gdscript
 if write.conflict:
@@ -144,11 +111,8 @@ if write.conflict:
         await CouchGames.save_game(_merge_into(res.payload), progress, res.revision)
 ```
 
-Passing `res.revision` as `expected_revision` asserts which state you are
-replacing, and is the reliable way to overwrite deliberately. `current_revision`
-on the response is the revision your write produced (or, on a refusal the server
-made, the one stored) — it is absent when the refusal happened client-side, so
-never require it.
+Don't require `current_revision`: it's absent when the refusal happened in the
+browser.
 
 ### Trying it without the platform
 
@@ -161,8 +125,110 @@ CouchGames.mock.simulate_load_unavailable = true   # load_save_result reports "u
 CouchGames.mock.simulate_host_authoritative = true # pretend this player joined
 ```
 
-`simulate_unread_save()` clears the way the real one does — call
-`load_save_result()`, and the next write is admitted again.
+After `simulate_unread_save()`, calling `load_save_result()` lets the next save
+through again, as on the platform.
+
+## Experience archive API
+
+`await CouchGames.list_experiences()` returns a `CouchGamesSDKResponse` with
+openable challenges in `payload_array`, oldest first. The existing `payload`
+field remains a Dictionary for compatibility. Call when the archive screen
+opens, not every frame: each platform call is a server round trip. Listing
+works before a session starts; the campaign-first lock returns an empty list.
+The campaign itself is excluded.
+
+```gdscript
+var result := await CouchGames.list_experiences()
+if result.success:
+    if result.streak != null:
+        show_streak(result.streak)
+    for exp in result.payload_array:
+        var day: String = exp.activatedAt.substr(0, 10) if exp.activatedAt != null else ""
+        var nobody_done: bool = not exp.players.values().has("completed")
+        print(exp.id, exp.number, exp.title, day, exp.live, exp.state, nobody_done)
+else:
+    push_warning(result.error)
+```
+
+The rows' fields, and what `players` and `streak` mean, are in the guide's
+[`listExperiences()`](https://developer.couchgames.com/docs/experiences#list-experiences). Bridge numbers arrive as floats, so
+check for null before converting to int. `result.streak` is null when the
+answer carries none (a failed call).
+
+`await CouchGames.gameplay_completed()` returns a `CouchGamesSDKResponse` too,
+with the [streak](https://developer.couchgames.com/docs/gameplay#gameplay-complete) counting this completion. Games that
+ignore the result keep working. `get_experience_data()`'s payload carries
+`number` (null when unnumbered): show it to the player, not `experienceIndex`.
+
+`await CouchGames.open_experience(id)` switches to an id from the list. It
+returns a `CouchGamesSDKResponse`; a refusal has `success: false` and the
+platform's message in `error` ([the list](https://developer.couchgames.com/docs/experiences#open-experience)), with no event
+afterward. On success the event has already been delivered. **Until the event
+arrives or the call fails, make no other SDK calls.** Subscribe before calling,
+and clear your board and load the new puzzle from the event handler:
+
+```gdscript
+func _ready() -> void:
+    await CouchGames.init()
+    CouchGames.lobby.event_received.connect(_on_lobby_event)
+
+func _open_puzzle(experience_id: String) -> void:
+    var result := await CouchGames.open_experience(experience_id)
+    if not result.success:
+        push_warning(result.error)
+
+func _on_lobby_event(event: String, data: Variant, _sender_user_id: String) -> void:
+    if event == CouchGames.EXPERIENCE_CHANGED_EVENT:
+        # Clear the board and load this puzzle; SDK calls now use the new experience.
+        print(data.experienceId, data.number, data.initiatedByMe)
+```
+
+`CouchGames.EXPERIENCE_CHANGED_EVENT` is `"couchgames:experience-changed"`.
+It arrives through `lobby.event_received` even in solo games, with an empty
+`sender_user_id`, and in a lobby it can arrive because another member switched
+([the event](https://developer.couchgames.com/docs/experiences#reserved-event-couchgamesexperience-changed)).
+`lobby.get_current_game()` is lobby-only, so read the new experience from the
+event or `get_experience_data()`.
+
+The autoload's `experience_data` property is a startup snapshot; use the
+awaitable getter for fresh data. Existing pack mounts remain idempotent by
+filename: `load_pack()`/`load_all_packs()` do not remount an already mounted
+name after a switch. Use fresh file reads or distinct pack filenames when
+loading the next puzzle.
+
+Offline, `CouchGames.mock.experiences` is a configurable `Array[Dictionary]`
+in the row format above, with two default challenges. Keep it oldest first;
+an empty array simulates an empty archive. A row without `players` is answered
+with one built from the mock roster: you read the row's `state`, every faked or
+relay player `"none"`. `CouchGames.mock.streak` (int, default 0) is the streak
+both `list_experiences()` and `gameplay_completed()` report; the mock doesn't
+count completions, so set it yourself. Opening a listed id updates mock
+experience data/date and emits the reserved event through the usual lobby
+channel before returning success. Fake guests and local relay peers prevent
+switching. The local backend inherits this behavior. This is a lightweight
+archive simulation: files still come from the configured mock directory and
+saves/metadata keep their existing shared mock storage; it does not simulate
+the platform's full handover or campaign/session eligibility checks.
+
+## Campaign, saves, metadata and telemetry
+
+```gdscript
+var done := await CouchGames.complete_campaign()     # done.already_completed on a repeat
+var sent := await CouchGames.flush_saves()           # sent.persisted, sent.flushed
+await CouchGames.delete_game_metadata("settings", "volume")
+await CouchGames.clear_game_metadata()
+CouchGames.track("level_complete", {"level": 3, "success": true})
+await CouchGames.flush_telemetry()
+```
+
+What each one does is in the guide:
+[`completeCampaign()`](https://developer.couchgames.com/docs/gameplay#complete-campaign),
+[`flushSaves()`](https://developer.couchgames.com/docs/saves#flush-saves),
+[game metadata](https://developer.couchgames.com/docs/game-metadata) and
+[telemetry](https://developer.couchgames.com/docs/telemetry). The mock records
+`complete_campaign()` once (it doesn't know which experience is the campaign),
+answers `flush_saves()` with nothing waiting, and keeps every `track()` call in
+`CouchGames.mock.tracked_events` instead of sending it.
 
 ## Lobby events
 
@@ -198,10 +264,11 @@ Without a target the event reaches **every other client** in the session.
 `{"user_id": ...}` and `{"role": "host"|"guest"}` narrow it, and the two AND
 together when you pass both.
 
-**You never receive your own event back.** That is server semantics, not a
-quirk of the SDK, and it is the one thing to design around: apply the local
-effect at send time rather than waiting for the event to come home. The example
-below does this in `_mark_ready()`.
+**You never receive your own event back,** so apply the local effect when you
+send (the example below does this in `_mark_ready()`). Delivery rules are in
+the [lobby guide](https://developer.couchgames.com/docs/multiplayer#talk-through-the-lobby),
+and what to do after a dropped connection in
+[Recover from dropped connections](https://developer.couchgames.com/docs/multiplayer#recover-from-dropped-connections).
 
 `data` must be JSON-serializable — dictionaries, arrays, strings, numbers,
 bools, null. `Vector2` and friends are not; pack them yourself. Payloads go
@@ -220,7 +287,8 @@ func _on_lobby_event(event: String, data: Variant, sender_user_id: String) -> vo
             _start_match(int(data.get("seed", 0)))
 ```
 
-Event names are yours to choose, with one reservation: `couch-net` belongs to
+Event names are yours to choose, except platform-reserved `couchgames:*` events
+(including `couchgames:experience-changed`) and `couch-net`, which belongs to
 `CouchSession`, which frames its own netcode over the same tunnel. If you are
 sending state at frame rate, use that instead of hand-rolling it on top of
 `send_event` — see [Sessions](#sessions). The tunnel is a relay through the
@@ -238,6 +306,7 @@ final roster.
 var everyone := CouchGames.lobby.get_players()   # Array[CouchLobbyPlayer]
 var host     := CouchGames.lobby.get_host()
 var guests   := CouchGames.lobby.get_guests()
+var sam      := CouchGames.lobby.get_player(user_id)  # null when they aren't here
 var me       := CouchGames.lobby.get_me()        # null when no lobby is active
 if CouchGames.lobby.is_host():
     ...
@@ -495,10 +564,8 @@ lobby. `roster-too-small` now means the guest is gone from the roster as well.
 
 ## Experience files
 
-An experience is a dated content drop — a level pack, a room, a puzzle set —
-uploaded on the platform against your game. Files are addressed by **basename**,
-never by URL: the URL embeds an experience id that rotates, so anything keying
-off it breaks the next day.
+Files uploaded to an experience are addressed by **basename**, never by URL
+([guide](https://developer.couchgames.com/docs/level-files#experience-files)).
 
 ```gdscript
 func _ready() -> void:
@@ -527,12 +594,11 @@ var bytes   := await CouchGames.experience.get_file("layout.bin")
 var text    := await CouchGames.experience.get_file_text("notes.txt")
 var config  := await CouchGames.experience.get_file_json("rules.json")
 var names   := CouchGames.experience.list_files()
+var has_it  := CouchGames.experience.has_file("rules.json")
 ```
 
-There is no event to catch and no readiness handshake to wait for: the platform
-retains the bytes, so an `await` resolves whether the download finished before
-or after you asked. On failure you get an empty result and a pushed error naming
-the cause.
+An `await` resolves whether the download finished before or after you asked.
+On failure you get an empty result and a pushed error naming the cause.
 
 Off-platform, the mock backend serves these from a directory in your project
 (`couch_games/mock/experience_files_dir`, default `res://experience_files`), so
@@ -618,11 +684,9 @@ byte and URL calls are asynchronous. `get_shared_file()` accepts an optional
 no-byte timeout as build-file downloads. Concurrent reads of the same immutable
 file share one transfer; only the caller that starts it receives progress.
 
-Logical paths are decoded text. They may be nested and include spaces, `%`,
-`?`, `#`, and Unicode, but cannot be empty, absolute, URL/scheme-like, contain
-backslashes or control characters, or use empty, `.` or `..` segments. The SDK
-encodes each URL segment exactly once. Empty shared files are valid for raw
-reads; `load_shared_pack()` rejects empty and invalid pack bytes.
+Paths follow the guide's [rules](https://developer.couchgames.com/docs/level-files#shared-game-assets); the SDK encodes
+them. Empty shared files are valid for raw reads; `load_shared_pack()` rejects
+empty and invalid pack bytes.
 
 Shared packs stage below `user://couch_shared/` with the root identity, content
 hash, and logical path. A mounted pack is process-global and idempotent;
@@ -632,11 +696,8 @@ or revisions aliasing each other. They do not isolate the `res://` paths inside
 packs: choose distinct resource paths and load order deliberately when packs can
 overlap.
 
-The Web parent needs `CouchGames.game.getSharedRoot()` and
-`getSharedFileInfo()`. An older parent reports a clear unsupported-feature error
-only when a shared read is requested. A standalone Web export without a Couch
-Games parent keeps the existing mock behaviour for other APIs, while shared
-assets remain unavailable because it has no launch manifest.
+A standalone Web export without a Couch Games page around it keeps the mock for
+other calls, but has no shared assets, since it has no launch manifest.
 
 For editor, native, and local-relay runs, the mock reads ordinary files from
 `couch_games/mock/shared_files_dir` (default `res://shared_files`) and hashes
@@ -709,6 +770,15 @@ The plugin registers these under Project Settings (Advanced), all optional:
 or `--couch-role=guest` pins an instance's role in the loopback lobby.
 
 ## WebRTC connections
+
+Beside the calls in the guide, `CouchGames.webrtc` has helpers of its own:
+
+| Member | What it's for |
+| --- | --- |
+| `room_id_for_code(code)` | The signaling room id for a share code, so host and guest land in the same room; it normalizes with `normalize_room_code(code)` (upper case, no spaces) |
+| `local_peer_id`, `is_signaling_connected()` | Your peer id (the lobby `userId`) after a connect, and whether the socket is open |
+| `get_present_peers()` | The peers in the room right now, never including you |
+| `is_path_probe_available()`, `get_connection_paths()`, `get_connection_state_events()` | Diagnostics: which network path each WebRTC connection took (UDP or TCP, relayed or not) and how its state changed. Web exports only; read them at diagnostics rate, never per frame |
 
 `CouchGames.webrtc` remains the low-level signaling API. Games that want an
 engine `MultiplayerPeer` can use the additive high-level façade:

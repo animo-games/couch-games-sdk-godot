@@ -210,7 +210,45 @@ func gameplay_completed() -> Dictionary:
 	return _not_implemented()
 
 
+## Sends saves already accepted without waiting for the next batch.
+func flush_saves() -> Dictionary:
+	return _not_implemented()
+
+
+## Write-once per player and game; a repeat answers alreadyCompleted: true.
+func complete_campaign() -> Dictionary:
+	return _not_implemented()
+
+
+func delete_game_metadata(_category: String, _key: String) -> Dictionary:
+	return _not_implemented()
+
+
+func clear_game_metadata() -> Dictionary:
+	return _not_implemented()
+
+
+## Telemetry: queue an event (never fails) and send the queue now.
+func track(_event_name: String, _properties: Dictionary) -> void:
+	pass
+
+
+func flush_telemetry() -> void:
+	pass
+
+
 func get_experience_data() -> Dictionary:
+	return _not_implemented()
+
+
+## Openable challenges, oldest first, with the player's own state and each
+## lobby member's (players), plus the player's streak beside the payload.
+func list_experiences() -> Dictionary:
+	return _not_implemented()
+
+
+## Switches experiences; the reserved lobby event precedes a successful answer.
+func open_experience(_experience_id: String) -> Dictionary:
 	return _not_implemented()
 
 

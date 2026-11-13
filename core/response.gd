@@ -4,6 +4,9 @@ class_name CouchGamesSDKResponse
 var success: bool = false
 var error: String = ""
 var payload: Dictionary = {}
+## Array payloads, including list_experiences(). Keeps payload's existing
+## Dictionary type intact for games that infer their own types from it.
+var payload_array: Array = []
 var metadata: Dictionary = {}
 
 ## Save writes only. True only when the platform confirmed the blob was stored.
@@ -37,6 +40,22 @@ var conflict: bool = false
 ## null there — never require it to recover from a conflict.
 var current_revision: Variant = null
 
+## list_experiences() and gameplay_completed() only. The player's current streak
+## in this game as an int, or null when the platform did not send one (an
+## older platform build). 0 for a guest and for a refused completion, and also
+## when the streak could not be read just then: 0 is not proof it broke.
+var streak: Variant = null
+
+## complete_campaign() only: true when this player had already finished the
+## campaign, so this call recorded nothing new.
+var already_completed: bool = false
+
+## unlock_achievement() only: true when the player already had it.
+var already_unlocked: bool = false
+
+## flush_saves() only: how many saves it sent (0 when none were waiting).
+var flushed: int = 0
+
 static func from_dict(response: Dictionary) -> CouchGamesSDKResponse:
 	var res = new()
 	res.success = response.get("success", false)
@@ -53,6 +72,8 @@ static func from_dict(response: Dictionary) -> CouchGamesSDKResponse:
 	var payload: Variant = response.get('payload', {})
 	if payload is Dictionary:
 		res.payload = payload
+	elif payload is Array:
+		res.payload_array = payload
 	elif payload is String and (payload as String).length() > 0:
 		# A save blob that is valid JSON but not an object (an array, a bare
 		# scalar, "null") parses to something unassignable. Degrade rather than
@@ -82,5 +103,13 @@ static func from_dict(response: Dictionary) -> CouchGamesSDKResponse:
 	var revision: Variant = response.get("currentRevision", null)
 	# Numbers cross the JS bridge through JSON, so an int arrives as a float.
 	res.current_revision = int(revision) if (revision is int or revision is float) else null
+	var streak: Variant = response.get("streak", null)
+	res.streak = int(streak) if (streak is int or streak is float) else null
+	var already_completed: Variant = response.get("alreadyCompleted", false)
+	res.already_completed = already_completed if already_completed is bool else false
+	var already_unlocked: Variant = response.get("alreadyUnlocked", false)
+	res.already_unlocked = already_unlocked if already_unlocked is bool else false
+	var flushed: Variant = response.get("flushed", 0)
+	res.flushed = int(flushed) if (flushed is int or flushed is float) else 0
 
 	return res
