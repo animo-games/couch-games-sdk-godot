@@ -20,8 +20,10 @@
 ## - advance(now_ms): the input ticks to stamp NOW (ascending, consecutive, at
 ##   most max_catchup_ticks; a longer gap jumps and counts skipped_ticks). Never
 ##   repeats a tick within a reset() epoch.
-## - render_tick_milli(now_ms): estimate minus render_delay_ticks, monotone
-##   since the last reset().
+## - render_tick_milli(now_ms): estimate minus the render delay in use, monotone
+##   since the last reset(). The delay slews toward a target: render_delay_ticks
+##   in fixed mode, or with policy.render_delay_adaptive a jitter buffer measured
+##   from snapshot arrivals (RENDER DELAY below).
 ## - reset(): new epoch; forgets everything, sync_generation += 1.
 ##
 ## WHY RTT COMES FROM recv_tick + hold_ms, NOT ack_tick. The host buffers an
@@ -31,6 +33,40 @@
 ## forever. The host instead echoes the NEWEST RECEIVED input tick and how long it
 ## held it (CouchNetClockEcho); `now - send(recv_tick) - hold_ms` is the link RTT
 ## alone, and the host reports the arrival margin directly.
+##
+## RENDER DELAY. Interpolation needs a snapshot at or after the render time; when
+## the newest one is older, the world extrapolates. So the delay that matters is
+## how stale the newest snapshot gets just before the next one arrives. On each
+## accepted snapshot, lag = estimate - previous host_tick * 1000: one number that
+## covers one-way delay, the snapshot interval, jitter, a lost snapshot and frame
+## phase alike, with no model of any of them. (A repeat of the same host_tick
+## would be measured again, but CouchReplicatedWorld.ingest rejects
+## ht <= newest_tick() before the clock sees it.) With render_delay_adaptive
+## on, render_target_milli holds the peak need, lag plus
+## render_margin_ticks, between render_delay_ticks (the floor) and
+## render_delay_max_ticks. It grows at once to any higher need. Once per
+## render_shrink_interval_ms it shrinks to the higher peak need of the last two
+## intervals plus render_shrink_hysteresis_ticks, when that is below it: a
+## one-off stall decays in one step once two intervals have passed without it.
+##
+## The delay in use, render_delay_milli, slews toward the target inside
+## render_tick_milli: while it grows render time advances at
+## (1000 - render_slew_grow_permille) permille of the estimate, while it shrinks
+## at (1000 + render_slew_shrink_permille), so moving things briefly slow down or
+## speed up but never freeze or jump.
+##
+## A hard re-sync jumps the timeline anyway, so it snaps the delay to the target.
+## The first lag after a (re-)sync is skipped: it is measured against an estimate
+## that has not settled (at first sync the RTT is still the default), and the
+## first interval after it cannot shrink the target on its own. late_snapshots
+## counts arrivals whose measured lag exceeded the delay in use, in either mode.
+## It does not prove a frame extrapolated: the lag can pass the delay between two
+## render calls.
+##
+## Fixed mode (render_delay_adaptive off) targets render_delay_ticks * 1000 and
+## slews the delay in use toward it like adaptive mode does, so switching the
+## policy live or moving the floor never jumps render time; a clock that starts
+## fixed starts at the floor and stays there.
 ##
 ## Lead and RTT survive a hard re-sync (they describe the link, not the host's
 ## timeline); only reset() forgets them. A tick is never stamped twice within one
@@ -57,6 +93,14 @@ var rate_permille: int = 1000
 var last_margin: int = 0
 ## Ticks dropped by advance() jumps (a gap longer than max_catchup_ticks).
 var skipped_ticks: int = 0
+## Render delay in use, milliticks (slews toward render_target_milli).
+var render_delay_milli: int = 0
+## What render_delay_milli slews toward, milliticks (render_delay_ticks * 1000 in
+## fixed mode).
+var render_target_milli: int = 0
+## Snapshots whose measured arrival lag exceeded render_delay_milli; not proof
+## that a frame extrapolated (see RENDER DELAY).
+var late_snapshots: int = 0
 
 var _policy: CouchNetClockPolicy
 
@@ -79,6 +123,12 @@ var _last_stamped: int = 0
 var _has_stamped: bool = false
 var _last_render: int = 0
 var _has_render: bool = false
+var _lag_ready: bool = false       # false until one snapshot after a (re-)sync
+var _window_start_ms: int = 0      # the current shrink interval began here
+var _window_peak: int = 0          # highest need (milliticks) seen in it
+var _prev_peak: int = 0            # the same for the interval before it
+var _last_estimate: int = 0        # estimate at the previous render_tick_milli
+var _has_last_estimate: bool = false
 
 
 func _init(policy: CouchNetClockPolicy = null) -> void:
@@ -124,6 +174,14 @@ func _clear() -> void:
 	_has_stamped = false
 	_last_render = 0
 	_has_render = false
+	render_target_milli = _policy.render_delay_ticks * 1000
+	render_delay_milli = render_target_milli
+	late_snapshots = 0
+	_lag_ready = false
+	_window_start_ms = 0
+	_window_peak = 0
+	_prev_peak = render_target_milli
+	_has_last_estimate = false
 	_update_target()
 
 
@@ -151,6 +209,9 @@ func on_snapshot(host_tick: int, now_ms: int) -> void:
 		sync_generation += 1
 		resynced.emit("error-over-threshold")
 		return
+	if _lag_ready:
+		_note_lag(estimate - _last_host_tick * 1000, now_ms)
+	_lag_ready = true
 	_last_host_tick = host_tick
 	_smoothed_err += (raw_err - _smoothed_err) * _policy.offset_alpha_numerator / _policy.offset_alpha_denominator
 	_anchor_milli = estimate
@@ -166,6 +227,12 @@ func _snap(observed: int, now_ms: int, host_tick: int) -> void:
 	rate_permille = 1000
 	_last_host_tick = host_tick
 	_have_host_tick = true
+	_lag_ready = false
+	render_delay_milli = render_target_milli
+	_has_last_estimate = false
+	_window_start_ms = now_ms
+	_window_peak = 0
+	_prev_peak = render_target_milli
 
 
 func on_echo(recv_tick: int, hold_ms: int, margin: int, now_ms: int) -> void:
@@ -254,9 +321,45 @@ func host_tick_estimate_milli(now_ms: int) -> int:
 	return _anchor_milli + (now_ms - _anchor_ms) * _policy.tick_hz * rate_permille / 1000
 
 
-## Interpolation time in milliticks.
+## One arrival's lag (RENDER DELAY): count it if the delay in use did not cover
+## it, then steer the target.
+func _note_lag(lag: int, now_ms: int) -> void:
+	if lag > render_delay_milli:
+		late_snapshots += 1
+	if not _policy.render_delay_adaptive:
+		return
+	var need: int = clampi(lag + _policy.render_margin_ticks * 1000,
+			_policy.render_delay_ticks * 1000, _policy.render_delay_max_ticks * 1000)
+	_window_peak = maxi(_window_peak, need)
+	if need > render_target_milli:
+		render_target_milli = need
+	elif now_ms - _window_start_ms >= _policy.render_shrink_interval_ms:
+		var settle: int = maxi(_prev_peak, _window_peak) + _policy.render_shrink_hysteresis_ticks * 1000
+		if settle < render_target_milli:
+			render_target_milli = settle
+		_prev_peak = _window_peak
+		_window_start_ms = now_ms
+		_window_peak = need
+
+
+## Interpolation time in milliticks: the estimate minus render_delay_milli, which
+## first moves toward render_target_milli by a share of the estimate's advance
+## since the previous call (RENDER DELAY).
 func render_tick_milli(now_ms: int) -> int:
-	var value: int = host_tick_estimate_milli(now_ms) - _policy.render_delay_ticks * 1000
+	var estimate: int = host_tick_estimate_milli(now_ms)
+	if not _policy.render_delay_adaptive:
+		render_target_milli = _policy.render_delay_ticks * 1000
+	if _has_last_estimate and estimate > _last_estimate:
+		var step: int = estimate - _last_estimate
+		if render_delay_milli < render_target_milli:
+			render_delay_milli = mini(render_target_milli,
+					render_delay_milli + step * _policy.render_slew_grow_permille / 1000)
+		else:
+			render_delay_milli = maxi(render_target_milli,
+					render_delay_milli - step * _policy.render_slew_shrink_permille / 1000)
+	_last_estimate = estimate
+	_has_last_estimate = true
+	var value: int = estimate - render_delay_milli
 	if _has_render and value < _last_render:
 		value = _last_render
 	_last_render = value

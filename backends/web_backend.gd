@@ -460,11 +460,72 @@ func gameplay_completed() -> Dictionary:
 	return _js_to_dict(await _await_promise(sdk.gameplayComplete()))
 
 
+func flush_saves() -> Dictionary:
+	var sdk = _get_sdk()
+	if not sdk:
+		return {"success": false, "error": "SDK not available", "persisted": false}
+	if sdk.flushSaves == null:
+		return {"success": false, "error": "This platform build does not support flushSaves", "persisted": false}
+	return _js_to_dict(await _await_promise(sdk.flushSaves()))
+
+
+func complete_campaign() -> Dictionary:
+	var sdk = _get_sdk()
+	if not sdk:
+		return {"success": false, "error": "SDK not available"}
+	if sdk.completeCampaign == null:
+		return {"success": false, "error": "This platform build does not support completeCampaign"}
+	return _js_to_dict(await _await_promise(sdk.completeCampaign()))
+
+
+func delete_game_metadata(category: String, key: String) -> Dictionary:
+	var sdk = _get_sdk()
+	if not sdk:
+		return {"success": false, "error": "SDK not available"}
+	return _js_to_dict(await _await_promise(sdk.deleteGameMetadata(category, key)))
+
+
+func clear_game_metadata() -> Dictionary:
+	var sdk = _get_sdk()
+	if not sdk:
+		return {"success": false, "error": "SDK not available"}
+	return _js_to_dict(await _await_promise(sdk.clearGameMetadata()))
+
+
+func track(event_name: String, properties: Dictionary) -> void:
+	var sdk = _get_sdk()
+	if not sdk or sdk.track == null:
+		return
+	# The platform never throws here; an empty Dictionary is "no properties".
+	sdk.track(event_name, _dict_to_js(properties) if not properties.is_empty() else null)
+
+
+func flush_telemetry() -> void:
+	var sdk = _get_sdk()
+	if not sdk or sdk.flush == null:
+		return
+	await _await_promise_settled(sdk.flush())
+
+
 func get_experience_data() -> Dictionary:
 	var sdk = _get_sdk()
 	if not sdk:
 		return {"success": false, "error": "SDK not available"}
 	return _js_to_dict(await _await_promise(sdk.getExperienceData()))
+
+
+func list_experiences() -> Dictionary:
+	var sdk = _get_sdk()
+	if not sdk:
+		return {"success": false, "error": "SDK not available"}
+	return _js_to_dict(await _await_promise(sdk.listExperiences()))
+
+
+func open_experience(experience_id: String) -> Dictionary:
+	var sdk = _get_sdk()
+	if not sdk:
+		return {"success": false, "error": "SDK not available"}
+	return _js_to_dict(await _await_promise(sdk.openExperience(experience_id)))
 
 
 func get_experience_date() -> Variant:
