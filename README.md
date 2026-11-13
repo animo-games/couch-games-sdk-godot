@@ -478,6 +478,21 @@ re-broadcast in the host's hello, and `session.slots` returns a copy of it. A
 host restart is still a new epoch, which every guest sees as `session_stopped`
 then `session_started`. Proven by `netcode/fixtures/run_session_players.gd`.
 
+### Dropped links and restarted players
+
+When a guest's link is rebuilt or replaced on any backend (the transport
+reports `peer-reconnected`, `peer-rejoined`, `link-rebuild` or a `steam:` gap),
+the host holds that guest's intent and input and asks it to hello again. The
+guest's session emits `session_stopped("link-reset")` then `session_started`,
+and sends no gameplay until the next snapshot, so your `hello_received` handler
+must send a complete one. The other players are not affected. This also covers
+a guest whose game restarted while the lobby still held its place: its first
+messages are accepted even though its counters started again from 1. Other gap
+reasons are only diagnostic.
+
+A guest whose host leaves stops with `host-left`, including in a two-player
+lobby. `roster-too-small` now means the guest is gone from the roster as well.
+
 ## Experience files
 
 An experience is a dated content drop — a level pack, a room, a puzzle set —
