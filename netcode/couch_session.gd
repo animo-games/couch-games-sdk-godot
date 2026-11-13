@@ -114,6 +114,14 @@ const SLOT_GUEST := 1   # the first guest slot; multi mode uses 1..max_input_pla
 const SLOT_SPECTATOR := -1
 const HELLO_RETRY_MS := 500
 const HELLO_STATE_REQUEST_MIN_INTERVAL_MS := 250
+## Guest stop reasons for a link that was reset under a running session. The
+## session starts again by itself once the host answers its hello.
+const STOP_STEAM_LINK_GAP := "steam-link-gap"   # the guest's own Steam provider gap
+const STOP_LINK_RESET := "link-reset"           # the host asked for a fresh hello
+## Transport gap reasons meaning the link was rebuilt or replaced, so messages
+## may have been lost: the host resyncs that guest. Steam's "steam:*" gaps are
+## treated the same way. Everything else is diagnostic.
+const LINK_RESET_GAPS := ["peer-reconnected", "peer-rejoined", "link-rebuild"]
 
 var active: bool:
 	get:
@@ -162,8 +170,11 @@ var rejected_count: int:  # for the milestone report
 var _roster: Object
 var _transport: Object
 
-var _steam_baseline_pending := false
-var _steam_peer_handshakes: Dictionary = {}
+## Guest: no gameplay sends until a fresh snapshot after a link reset.
+var _baseline_pending := false
+## Host: guests whose link was reset and who must hello again before their
+## intent/input is accepted (see _on_transport_gap).
+var _peer_handshakes: Dictionary = {}
 var _engaged: bool = false   # true from the moment a role is committed until stop()
 var _active: bool = false
 var _epoch: int = CouchEnvelope.UNKNOWN_EPOCH
@@ -234,7 +245,18 @@ func evaluate(now_ms: int) -> void:
 		# dispatch would leave a roster of [guest-only] failing to stop at all.
 		# Legacy-only: with max_input_players > 1 no single peer is "the" pin,
 		# so a roster that shrinks below two stops as "roster-too-small".
+		# The guest-side mirror: an engaged guest still in the roster whose host
+		# is gone was left by its host, in either mode.
+		var my_id := _field_string(_roster.get_me(), "user_id")
 		if (
+			_engaged
+			and not _is_host
+			and not _host_id.is_empty()
+			and not _has_player(players, _host_id)
+			and _has_player(players, my_id)
+		):
+			stop("host-left")
+		elif (
 			_max_input_players == 1
 			and _engaged
 			and _is_host
@@ -261,9 +283,9 @@ func evaluate(now_ms: int) -> void:
 ## Call every frame; drives the guest hello retry.
 func poll(now_ms: int) -> void:
 	_now_ms = now_ms
-	if _engaged and _is_host and now_ms >= _next_hello_retry_ms and not _steam_peer_handshakes.is_empty():
+	if _engaged and _is_host and now_ms >= _next_hello_retry_ms and not _peer_handshakes.is_empty():
 		_next_hello_retry_ms = now_ms + HELLO_RETRY_MS
-		for peer_id in _steam_peer_handshakes.keys():
+		for peer_id in _peer_handshakes.keys():
 			_send_host_hello(peer_id, true)
 	if _engaged and not _is_host and not _active and now_ms >= _next_hello_retry_ms:
 		_send_guest_hello()
@@ -277,8 +299,8 @@ func stop(reason: String) -> void:
 	# A provider outage can invalidate the link and then clear membership.
 	# Keep its baseline barrier through re-entry so hello alone cannot unblock
 	# gameplay. Ordinary departures and voluntary stops clear the barrier.
-	_steam_baseline_pending = _steam_baseline_pending and reason == "lobby-unavailable"
-	_steam_peer_handshakes.clear()
+	_baseline_pending = _baseline_pending and reason == "lobby-unavailable"
+	_peer_handshakes.clear()
 	_active = false
 	_epoch = CouchEnvelope.UNKNOWN_EPOCH
 	_is_host = false
@@ -550,7 +572,7 @@ func _send_guest_hello() -> void:
 
 
 func _on_hello_at_host(sender_id: String) -> void:
-	_steam_peer_handshakes.erase(sender_id)
+	_peer_handshakes.erase(sender_id)
 	# Rate-limited because each reply costs the host a full-world broadcast.
 	var last := int(_last_hello_state_request_ms.get(sender_id, -HELLO_STATE_REQUEST_MIN_INTERVAL_MS))
 	if _now_ms - last < HELLO_STATE_REQUEST_MIN_INTERVAL_MS:
@@ -562,8 +584,8 @@ func _on_hello_at_host(sender_id: String) -> void:
 
 func _on_hello_at_guest(body: Dictionary) -> void:
 	if body.get("reconnect", false):
-		_steam_baseline_pending = true
-		_restart_as_guest("steam-link-gap")
+		_baseline_pending = true
+		_restart_as_guest("link-reset")
 		_send_guest_hello()
 	var my_id := _field_string(_roster.get_me(), "user_id")
 	var slots: Dictionary = body.get("slots", {})
@@ -585,9 +607,9 @@ func _on_envelope_received(envelope: Dictionary, sender_id: String) -> void:
 	if not _engaged:
 		return
 	var kind := str(envelope.get(CouchEnvelope.KEY_KIND, ""))
-	if not _is_host and _steam_baseline_pending and not _active and kind != CouchEnvelope.KIND_HELLO:
+	if not _is_host and _baseline_pending and not _active and kind != CouchEnvelope.KIND_HELLO:
 		return
-	if _is_host and _steam_peer_handshakes.has(sender_id) and kind in [CouchEnvelope.KIND_INTENT, CouchEnvelope.KIND_INPUT]:
+	if _is_host and _peer_handshakes.has(sender_id) and kind in [CouchEnvelope.KIND_INTENT, CouchEnvelope.KIND_INPUT]:
 		_reject(sender_id, "handshake-required")
 		return
 
@@ -670,6 +692,18 @@ func _on_envelope_received(envelope: Dictionary, sender_id: String) -> void:
 		tracker = CouchEnvelope.ReceiveTracker.new()
 		_trackers[sender_id] = tracker
 
+	# The hello that answers a link-reset handshake starts the sender's
+	# sequence tracking over. Across a reset the guest may be a new process
+	# (a refresh inside the hold window) whose counters restarted at 1, under
+	# the high-water marks its slot's tracker kept, so without this its input
+	# would be dropped as duplicates until the new counters passed the old
+	# ones. rebase() lets each kind continue from the first seq it sees, with
+	# no gap reported: the reset itself was already reported as a
+	# transport_gap. Only a pending handshake does this, and the handshake is
+	# set only by the transport, so a replayed hello is still a duplicate.
+	if _is_host and kind == CouchEnvelope.KIND_HELLO and _peer_handshakes.has(sender_id):
+		tracker.rebase(_epoch)
+
 	var observed_envelope := envelope
 	if _is_host and kind == CouchEnvelope.KIND_HELLO:
 		# A guest's hello always carries UNKNOWN_EPOCH -- it doesn't know the
@@ -729,7 +763,7 @@ func _dispatch(kind: String, envelope: Dictionary, sender_id: String) -> void:
 		CouchEnvelope.KIND_INPUT:
 			input_received.emit(body, sender_id)
 		CouchEnvelope.KIND_SNAPSHOT:
-			_steam_baseline_pending = false
+			_baseline_pending = false
 			snapshot_received.emit(body)
 
 
@@ -751,21 +785,30 @@ func _restart_as_guest(reason: String) -> void:
 	_local_slot = SLOT_SPECTATOR
 	_peer_name = ""
 	_next_hello_retry_ms = 0
-	if was_active or reason != "steam-link-gap":
+	# A link reset stops only a session that was running; one already waiting
+	# for its host stays quiet, so repeated failures report one stop.
+	if was_active or not (reason in [STOP_STEAM_LINK_GAP, STOP_LINK_RESET]):
 		session_stopped.emit(reason)
 
 
 func _on_transport_gap(peer_id: String, reason: String) -> void:
-	# Existing roster/fault gap semantics remain diagnostic. A Steam provider
-	# gap invalidates its physical link and explicitly requires hello + snapshot.
-	if _engaged and reason.begins_with("steam:"):
+	# A link reset can have lost messages on any backend, so the host makes that
+	# guest hello again and gives it a fresh baseline: it sends reconnect hellos
+	# from poll() and holds the guest's intent/input until the hello arrives.
+	# Only the host acts on a non-Steam reset; a guest learns of it from the
+	# reconnect hello, so a link event alone never stops a guest session (a
+	# restarted host is detected by its new epoch instead). Steam guests also
+	# act on their own provider gap, which invalidates the physical link.
+	# Every other reason stays diagnostic.
+	var steam := reason.begins_with("steam:")
+	if _engaged and (steam or reason in LINK_RESET_GAPS):
 		if _is_host and _slots.has(peer_id):
-			_steam_peer_handshakes[peer_id] = true
+			_peer_handshakes[peer_id] = true
 			_last_hello_state_request_ms.erase(peer_id)
 			# Poll retries after a failed send; never recurse from a provider error.
-		elif not _is_host and peer_id == _host_id:
-			_steam_baseline_pending = true
-			_restart_as_guest("steam-link-gap")
+		elif steam and not _is_host and peer_id == _host_id:
+			_baseline_pending = true
+			_restart_as_guest(STOP_STEAM_LINK_GAP)
 	transport_gap.emit(peer_id, reason)
 
 
@@ -803,7 +846,7 @@ func _hello_body_is_valid(body: Variant) -> bool:
 ## host may send this kind (snapshot), false means only a non-host may
 ## (intent/input).
 func _send(kind: String, body: Dictionary, requires_host: bool) -> bool:
-	if not _active or (not _is_host and _steam_baseline_pending):
+	if not _active or (not _is_host and _baseline_pending):
 		return false
 	if requires_host != _is_host:
 		return false
