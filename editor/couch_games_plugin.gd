@@ -17,6 +17,20 @@ const _PresentPathExportPlugin := preload(
 
 # name, default, type, hint, hint_string
 const _SETTINGS := [
+	["couch_games/backend", "auto", TYPE_STRING, PROPERTY_HINT_ENUM, "auto,couch,steam,local,mock"],
+	["couch_games/experience_metadata_timeout_ms", 1000, TYPE_INT, PROPERTY_HINT_RANGE, "0,60000,1"],
+	["couch_games/initialization_timeout_ms", 10000, TYPE_INT, PROPERTY_HINT_RANGE, "1,60000,1"],
+	["couch_games/achievements/catalog", {}, TYPE_DICTIONARY, PROPERTY_HINT_NONE, ""],
+	["couch_games/achievements/timeout_ms", 5000, TYPE_INT, PROPERTY_HINT_RANGE, "1,60000,1"],
+	["couch_games/steam/operation_timeout_ms", 10000, TYPE_INT, PROPERTY_HINT_RANGE, "1,60000,1"],
+	["couch_games/steam/metadata_timeout_ms", 3000, TYPE_INT, PROPERTY_HINT_RANGE, "1,60000,1"],
+	["couch_games/steam/app_id", 0, TYPE_INT, PROPERTY_HINT_NONE, ""],
+	["couch_games/steam/game_id", "", TYPE_STRING, PROPERTY_HINT_NONE, ""],
+	["couch_games/steam/protocol_version", "1", TYPE_STRING, PROPERTY_HINT_NONE, ""],
+	["couch_games/steam/content_version", "1", TYPE_STRING, PROPERTY_HINT_NONE, ""],
+	["couch_games/steam/max_event_bytes", 393216, TYPE_INT, PROPERTY_HINT_RANGE, "1024,524288,1"],
+	["couch_games/steam/receive_budget", 64, TYPE_INT, PROPERTY_HINT_RANGE, "1,256,1"],
+
 	["couch_games/mock/force_mock", false, TYPE_BOOL, PROPERTY_HINT_NONE, ""],
 	["couch_games/mock/enable_debug_overlay", true, TYPE_BOOL, PROPERTY_HINT_NONE, ""],
 	["couch_games/mock/overlay_toggle_key", KEY_F10, TYPE_INT, PROPERTY_HINT_NONE, ""],
@@ -44,6 +58,7 @@ var _result_dialog: AcceptDialog
 var _thread: Thread
 var _running := false
 var _present_path_export_plugin: EditorExportPlugin
+var _steam_export_plugin: EditorExportPlugin
 
 
 func _enter_tree():
@@ -51,6 +66,8 @@ func _enter_tree():
 		_define_setting(setting[0], setting[1], setting[2], setting[3], setting[4])
 	_present_path_export_plugin = _PresentPathExportPlugin.new()
 	add_export_plugin(_present_path_export_plugin)
+	_steam_export_plugin = preload("res://addons/couch-games-sdk/editor/steam_export_plugin.gd").new()
+	add_export_plugin(_steam_export_plugin)
 	add_autoload_singleton("CouchGames", _AUTOLOAD_SCRIPT)
 	_build_dialogs()
 	add_tool_menu_item(_BUILD_MENU_ITEM, _open_build_dialog)
@@ -60,6 +77,9 @@ func _enter_tree():
 func _exit_tree():
 	remove_tool_menu_item(_BUILD_MENU_ITEM)
 	remove_tool_menu_item(_SHARED_MENU_ITEM)
+	if _steam_export_plugin:
+		remove_export_plugin(_steam_export_plugin)
+		_steam_export_plugin = null
 	if _present_path_export_plugin:
 		remove_export_plugin(_present_path_export_plugin)
 		_present_path_export_plugin = null

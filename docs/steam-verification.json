@@ -1,0 +1,499 @@
+{
+  "date": "2026-10-05",
+  "scope": "SDK only, no Steam App ID",
+  "godot": "4.7.stable.official.5b4e0cb0f",
+  "godotsteam": "4.23 GDExtension",
+  "steamworks": "1.65",
+  "webrtc": "1.2.2-stable",
+  "fixture_commit": "bd0ccee615850d98122833c030611aff4d59e175",
+  "contracts": {
+    "checks": 138,
+    "failures": 0
+  },
+  "regressions": {
+    "netcode_cases": 117,
+    "transport_cases": 44,
+    "session_player_checks": 83,
+    "transport_fault_failures": 0,
+    "session_transport": "passed",
+    "signaling_reconnect": "passed",
+    "connection_handler": "passed",
+    "native_webrtc_probe": "passed",
+    "real_loopback_relay": "passed"
+  },
+  "dependency_acquisition": "passed: verified engine archive, templates, Steam and WebRTC archive hashes and offline corpus snapshot/content",
+  "artifacts": [
+    {
+      "artifact": "linux-debug-shared",
+      "inspection": {
+        "resource_count": 70,
+        "steam_resource_count": 6,
+        "native_dependencies": []
+      },
+      "execution": "native host smoke: auto/mock/explicit-steam failure"
+    },
+    {
+      "artifact": "linux-release-shared",
+      "inspection": {
+        "resource_count": 70,
+        "steam_resource_count": 6,
+        "native_dependencies": []
+      },
+      "execution": "native host smoke: auto/mock/explicit-steam failure"
+    },
+    {
+      "artifact": "windows-debug-shared",
+      "inspection": {
+        "resource_count": 70,
+        "steam_resource_count": 6,
+        "native_dependencies": []
+      },
+      "execution": "unexecuted on this host"
+    },
+    {
+      "artifact": "windows-release-shared",
+      "inspection": {
+        "resource_count": 70,
+        "steam_resource_count": 6,
+        "native_dependencies": []
+      },
+      "execution": "unexecuted on this host"
+    },
+    {
+      "artifact": "web-release-shared",
+      "inspection": {
+        "resource_count": 64,
+        "steam_resource_count": 0,
+        "native_dependencies": []
+      },
+      "execution": "requires browser runner; build and pack inspection only"
+    },
+    {
+      "artifact": "linux-debug-steam",
+      "inspection": {
+        "resource_count": 79,
+        "steam_resource_count": 12,
+        "native_dependencies": [
+          "libgodotsteam.linux.template_debug.x86_64.so",
+          "libsteam_api.so"
+        ]
+      },
+      "execution": "native host smoke: auto/mock/explicit-steam failure"
+    },
+    {
+      "artifact": "linux-release-steam",
+      "inspection": {
+        "resource_count": 79,
+        "steam_resource_count": 12,
+        "native_dependencies": [
+          "libgodotsteam.linux.template_release.x86_64.so",
+          "libsteam_api.so"
+        ]
+      },
+      "execution": "native host smoke: auto/mock/explicit-steam failure"
+    },
+    {
+      "artifact": "linux-release-steam-feature",
+      "inspection": {
+        "resource_count": 79,
+        "steam_resource_count": 12,
+        "native_dependencies": [
+          "libgodotsteam.linux.template_release.x86_64.so",
+          "libsteam_api.so"
+        ]
+      },
+      "execution": "native host smoke: auto/mock/explicit-steam failure"
+    },
+    {
+      "artifact": "windows-debug-steam",
+      "inspection": {
+        "resource_count": 79,
+        "steam_resource_count": 12,
+        "native_dependencies": [
+          "libgodotsteam.windows.template_debug.x86_64.dll",
+          "steam_api64.dll"
+        ]
+      },
+      "execution": "unexecuted on this host"
+    },
+    {
+      "artifact": "windows-release-steam",
+      "inspection": {
+        "resource_count": 79,
+        "steam_resource_count": 12,
+        "native_dependencies": [
+          "libgodotsteam.windows.template_release.x86_64.dll",
+          "steam_api64.dll"
+        ]
+      },
+      "execution": "unexecuted on this host"
+    },
+    {
+      "artifact": "windows-release-steam-feature",
+      "inspection": {
+        "resource_count": 79,
+        "steam_resource_count": 12,
+        "native_dependencies": [
+          "libgodotsteam.windows.template_release.x86_64.dll",
+          "steam_api64.dll"
+        ]
+      },
+      "execution": "unexecuted on this host"
+    },
+    {
+      "artifact": "web-release-steam",
+      "inspection": {
+        "resource_count": 65,
+        "steam_resource_count": 0,
+        "native_dependencies": []
+      },
+      "execution": "requires browser runner; build and pack inspection only"
+    }
+  ],
+  "browser": {
+    "runner": "Playwright 1.59.1; local system Chromium",
+    "version": "Chromium 153.0.8010.52 Arch Linux",
+    "results": [
+      {
+        "artifact": "web-release-shared",
+        "backend": "mock",
+        "error": "",
+        "extension_installed": false,
+        "failures": 0,
+        "mode": "mock",
+        "state": "ready",
+        "web": true
+      },
+      {
+        "artifact": "web-release-shared",
+        "backend": "steam",
+        "error": "Unsupported backend/platform selection: steam",
+        "extension_installed": false,
+        "failures": 0,
+        "mode": "steam",
+        "state": "failed",
+        "web": true
+      },
+      {
+        "artifact": "web-release-shared",
+        "backend": "couch",
+        "error": "",
+        "extension_installed": false,
+        "failures": 0,
+        "mode": "couch",
+        "state": "ready",
+        "web": true,
+        "couch_provider": "simulated JavaScript parent API"
+      },
+      {
+        "artifact": "web-release-steam",
+        "backend": "mock",
+        "error": "",
+        "extension_installed": false,
+        "failures": 0,
+        "mode": "mock",
+        "state": "ready",
+        "web": true
+      },
+      {
+        "artifact": "web-release-steam",
+        "backend": "steam",
+        "error": "Unsupported backend/platform selection: steam",
+        "extension_installed": false,
+        "failures": 0,
+        "mode": "steam",
+        "state": "failed",
+        "web": true
+      },
+      {
+        "artifact": "web-release-steam",
+        "backend": "couch",
+        "error": "",
+        "extension_installed": false,
+        "failures": 0,
+        "mode": "couch",
+        "state": "ready",
+        "web": true,
+        "couch_provider": "simulated JavaScript parent API"
+      }
+    ]
+  },
+  "ci": "Local evidence captured before workflow publication; remote CI is not included. No pre-existing workflows were available during this review.",
+  "windows_native_execution": "unexecuted; Windows packages built and inspected only",
+  "live_steam": "unexecuted; requires App ID and authorized accounts",
+  "initial_failed_attempts": [
+    "Native editor extension discovery/hot-load aborted with exit -6; fixture startup descriptor registration resolved the observed failure. All final required checks reran and passed.",
+    "Initial browser fixture server missing-resource error corrected before final browser runs.",
+    "Supplemental Wine smoke produced no SDK result and was stopped in its task-specific prefix; Windows execution is not claimed."
+  ],
+  "linux_native_results": [
+    {
+      "check": "absent/editor-auto.log",
+      "result": {
+        "backend": "local",
+        "error": "",
+        "extension_installed": false,
+        "failures": 0,
+        "mode": "auto",
+        "state": "ready",
+        "web": false
+      }
+    },
+    {
+      "check": "absent/editor-mock.log",
+      "result": {
+        "backend": "mock",
+        "error": "",
+        "extension_installed": false,
+        "failures": 0,
+        "mode": "mock",
+        "state": "ready",
+        "web": false
+      }
+    },
+    {
+      "check": "absent/editor-steam.log",
+      "result": {
+        "backend": "steam",
+        "error": "GodotSteam is not installed on this platform",
+        "extension_installed": false,
+        "failures": 0,
+        "mode": "steam",
+        "state": "failed",
+        "web": false
+      }
+    },
+    {
+      "check": "absent/linux-debug-shared-auto.log",
+      "result": {
+        "backend": "local",
+        "error": "",
+        "extension_installed": false,
+        "failures": 0,
+        "mode": "auto",
+        "state": "ready",
+        "web": false
+      }
+    },
+    {
+      "check": "absent/linux-debug-shared-mock.log",
+      "result": {
+        "backend": "mock",
+        "error": "",
+        "extension_installed": false,
+        "failures": 0,
+        "mode": "mock",
+        "state": "ready",
+        "web": false
+      }
+    },
+    {
+      "check": "absent/linux-debug-shared-steam.log",
+      "result": {
+        "backend": "steam",
+        "error": "GodotSteam is not installed on this platform",
+        "extension_installed": false,
+        "failures": 0,
+        "mode": "steam",
+        "state": "failed",
+        "web": false
+      }
+    },
+    {
+      "check": "absent/linux-release-shared-auto.log",
+      "result": {
+        "backend": "mock",
+        "error": "",
+        "extension_installed": false,
+        "failures": 0,
+        "mode": "auto",
+        "state": "ready",
+        "web": false
+      }
+    },
+    {
+      "check": "absent/linux-release-shared-mock.log",
+      "result": {
+        "backend": "mock",
+        "error": "",
+        "extension_installed": false,
+        "failures": 0,
+        "mode": "mock",
+        "state": "ready",
+        "web": false
+      }
+    },
+    {
+      "check": "absent/linux-release-shared-steam.log",
+      "result": {
+        "backend": "steam",
+        "error": "GodotSteam is not installed on this platform",
+        "extension_installed": false,
+        "failures": 0,
+        "mode": "steam",
+        "state": "failed",
+        "web": false
+      }
+    },
+    {
+      "check": "installed/editor-auto.log",
+      "result": {
+        "backend": "local",
+        "error": "",
+        "extension_installed": true,
+        "failures": 0,
+        "mode": "auto",
+        "state": "ready",
+        "web": false
+      }
+    },
+    {
+      "check": "installed/editor-mock.log",
+      "result": {
+        "backend": "mock",
+        "error": "",
+        "extension_installed": true,
+        "failures": 0,
+        "mode": "mock",
+        "state": "ready",
+        "web": false
+      }
+    },
+    {
+      "check": "installed/editor-steam.log",
+      "result": {
+        "backend": "steam",
+        "error": "Cannot create IPC pipe to Steam client process.  Steam is probably not running.",
+        "extension_installed": true,
+        "failures": 0,
+        "mode": "steam",
+        "state": "failed",
+        "web": false
+      }
+    },
+    {
+      "check": "installed/linux-debug-steam-auto.log",
+      "result": {
+        "backend": "local",
+        "error": "",
+        "extension_installed": true,
+        "failures": 0,
+        "mode": "auto",
+        "state": "ready",
+        "web": false
+      }
+    },
+    {
+      "check": "installed/linux-debug-steam-mock.log",
+      "result": {
+        "backend": "mock",
+        "error": "",
+        "extension_installed": true,
+        "failures": 0,
+        "mode": "mock",
+        "state": "ready",
+        "web": false
+      }
+    },
+    {
+      "check": "installed/linux-debug-steam-steam.log",
+      "result": {
+        "backend": "steam",
+        "error": "Cannot create IPC pipe to Steam client process.  Steam is probably not running.",
+        "extension_installed": true,
+        "failures": 0,
+        "mode": "steam",
+        "state": "failed",
+        "web": false
+      }
+    },
+    {
+      "check": "installed/linux-release-steam-auto.log",
+      "result": {
+        "backend": "mock",
+        "error": "",
+        "extension_installed": true,
+        "failures": 0,
+        "mode": "auto",
+        "state": "ready",
+        "web": false
+      }
+    },
+    {
+      "check": "installed/linux-release-steam-feature-auto.log",
+      "result": {
+        "backend": "steam",
+        "error": "Cannot create IPC pipe to Steam client process.  Steam is probably not running.",
+        "extension_installed": true,
+        "failures": 0,
+        "mode": "auto",
+        "state": "failed",
+        "web": false
+      }
+    },
+    {
+      "check": "installed/linux-release-steam-feature-mock.log",
+      "result": {
+        "backend": "mock",
+        "error": "",
+        "extension_installed": true,
+        "failures": 0,
+        "mode": "mock",
+        "state": "ready",
+        "web": false
+      }
+    },
+    {
+      "check": "installed/linux-release-steam-feature-steam.log",
+      "result": {
+        "backend": "steam",
+        "error": "Cannot create IPC pipe to Steam client process.  Steam is probably not running.",
+        "extension_installed": true,
+        "failures": 0,
+        "mode": "steam",
+        "state": "failed",
+        "web": false
+      }
+    },
+    {
+      "check": "installed/linux-release-steam-mock.log",
+      "result": {
+        "backend": "mock",
+        "error": "",
+        "extension_installed": true,
+        "failures": 0,
+        "mode": "mock",
+        "state": "ready",
+        "web": false
+      }
+    },
+    {
+      "check": "installed/linux-release-steam-steam.log",
+      "result": {
+        "backend": "steam",
+        "error": "Cannot create IPC pipe to Steam client process.  Steam is probably not running.",
+        "extension_installed": true,
+        "failures": 0,
+        "mode": "steam",
+        "state": "failed",
+        "web": false
+      }
+    }
+  ],
+  "artifact_source_sha256": {
+    "backends/steam_backend.gd": "aae2b6197009676af21738e51c39a1a9687d8c3f0be5b2ce6a08ec99487a747c",
+    "steam/steam_bridge.gd": "ef267e5bd542e78b6f4f28b55ad8c5d309665d151b58817f111cb8aadb164a88",
+    "steam/steam_achievements.gd": "8ad7cf490e0fde57037bd24488eac07697832cc175f5fbfca6d8b38a0952a721",
+    "netcode/lobby_transport.gd": "60b261cbf3044cc84d67997673044c5f9ed6742e5a73d5ae570ff37bcc749b73",
+    "core/couch_games_sdk.gd": "86f6cf72ebe1f4ccf41a7d8d14b49379de85d2bae7c2309e601cbe345578a034"
+  },
+  "local_tooling": {
+    "python": "3.14.7",
+    "node": "v26.10.0"
+  },
+  "ci_tooling": {
+    "python": "3.12.10",
+    "node": "22.16.0",
+    "execution": "not run for this local report"
+  }
+}

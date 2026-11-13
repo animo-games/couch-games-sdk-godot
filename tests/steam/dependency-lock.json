@@ -1,0 +1,25 @@
+{
+  "linux": {
+    "url": "https://github.com/godotengine/godot-builds/releases/download/4.7-stable/Godot_v4.7-stable_linux.x86_64.zip",
+    "sha512": "b639ca9c1ddea39bb3df89bd5283a51ca6047467abe6b25e9436566f2b2082ede633025073989ecf39c7d5d3c2493d80ea13e3af6dd5e261bbf89e462d6d2214"
+  },
+  "windows": {
+    "url": "https://github.com/godotengine/godot-builds/releases/download/4.7-stable/Godot_v4.7-stable_win64.exe.zip",
+    "sha512": "41645a908eb3181d6f2d1201ed7b6d6f095f6a23aaed8903d5d255277cc8d142814f3e6817f865b3cac142c39b8aff99280091d3bbdaa301517730b3ba0522b9"
+  },
+  "templates": {
+    "url": "https://github.com/godotengine/godot-builds/releases/download/4.7-stable/Godot_v4.7-stable_export_templates.tpz",
+    "sha512": "1035dfde4edcc2472bb0c0b9610ce3ee9302642c2b9957e9066372f9f6bb759ab250c8887551a66f0bc5f51bbd9a58bb45e33a0f29844e97615a9b1138c1120e"
+  },
+  "webrtc": {
+    "url": "https://github.com/godotengine/webrtc-native/releases/download/1.2.2-stable/godot-extension-webrtc_native.zip",
+    "sha256": "98e9446921740d995bd9ca1be48798dc3c2ceed51e044a25ce18b3cff11f56e5"
+  },
+  "fixtures": {
+    "url": "https://api.github.com/repos/animo-games/couch-netcode-fixtures/zipball/bd0ccee615850d98122833c030611aff4d59e175",
+    "commit": "bd0ccee615850d98122833c030611aff4d59e175",
+    "content_sha256": "bc9caef3cae0f7eabe87297adca52f10f9ffff7e07852341b7d6826b28bac73d",
+    "snapshot": "tests/steam/corpus.zip",
+    "sha256": "7fbd32ec0da6081450c55b2fa09d4a460ca07e51295d6f589e319474c28b2fc1"
+  }
+}
