@@ -108,6 +108,26 @@ var _session_stats: Dictionary = {"cumulativeGameplayTimeMs": 0.0, "gameplayComp
 var _metadata: Dictionary = {}
 var _achievements: Dictionary = {}  # key -> {"unlockedAt": iso}
 var _campaign_completed := false
+## The platform's fullscreen, as the play bar or Esc would leave it. The calls
+## flip it; set it yourself to rehearse the player changing it, which emits
+## fullscreen_changed as the platform's onFullscreenChange would.
+var fullscreen := false:
+	set(value):
+		if value == fullscreen:
+			return
+		fullscreen = value
+		fullscreen_changed.emit(value)
+## False rehearses a phone, which always plays fullscreen: the calls change
+## nothing and can_toggle_fullscreen() is false.
+var fullscreen_toggleable := true
+## The platform's mute setting. Setting it emits settings_changed, as the
+## platform's own control would.
+var mute_audio := false:
+	set(value):
+		if value == mute_audio:
+			return
+		mute_audio = value
+		settings_changed.emit(get_settings())
 ## Every track() call since the run started, oldest first, as
 ## {"name": String, "properties": Dictionary}: what the platform would have
 ## queued. The mock sends nothing anywhere.
@@ -449,6 +469,40 @@ func open_experience(experience_id: String) -> Dictionary:
 		_opening_experience = false
 		return {"success": false, "error": error}
 	return {"success": true}
+
+
+# --- Fullscreen and settings ---
+
+func request_fullscreen() -> Dictionary:
+	await _tick()
+	if not fullscreen_toggleable:
+		return {
+			"success": fullscreen,
+			"message": "" if fullscreen else "A phone always plays fullscreen",
+			"fullscreen": fullscreen,
+		}
+	fullscreen = true
+	return {"success": true, "message": "", "fullscreen": true}
+
+
+func exit_fullscreen() -> Dictionary:
+	await _tick()
+	if not fullscreen_toggleable:
+		return {"success": false, "message": "A phone always plays fullscreen", "fullscreen": fullscreen}
+	fullscreen = false
+	return {"success": true, "message": "", "fullscreen": false}
+
+
+func is_fullscreen() -> bool:
+	return fullscreen
+
+
+func can_toggle_fullscreen() -> bool:
+	return fullscreen_toggleable
+
+
+func get_settings() -> Dictionary:
+	return {"muteAudio": mute_audio}
 
 
 func get_experience_date() -> Variant:

@@ -224,6 +224,56 @@ What each one does is in the guide:
 answers `flush_saves()` with nothing waiting, and keeps every `track()` call in
 `CouchGames.mock.tracked_events` instead of sending it.
 
+## Fullscreen and mute
+
+A fullscreen button in your own UI asks for the platform's fullscreen, the play
+bar's own view (the game with the bar under it), not the engine's window mode:
+
+```gdscript
+func _ready() -> void:
+    fullscreen_button.visible = CouchGames.can_toggle_fullscreen()
+    show_fullscreen_icon(CouchGames.is_fullscreen())
+    CouchGames.fullscreen_changed.connect(show_fullscreen_icon)
+    fullscreen_button.pressed.connect(_on_fullscreen_pressed)
+
+func _on_fullscreen_pressed() -> void:
+    if CouchGames.is_fullscreen():
+        await CouchGames.exit_fullscreen()
+    else:
+        var result := await CouchGames.request_fullscreen()
+        if not result.success:
+            print(result.error)  # result.fullscreen is the state now
+```
+
+Call it from the player's input, as a button's `pressed` signal is: the browser
+allows fullscreen only for a few seconds after a tap, click or key press.
+`fullscreen_changed` reports every change, the player's too (the bar, Esc), but
+not on connect.
+
+`CouchGames.game.settings` is `{"muteAudio": bool}`, and
+`CouchGames.game.settings_changed` reports each change. While `muteAudio` is
+true, play no sound whatever your own sound setting says:
+
+```gdscript
+func _ready() -> void:
+    _apply_mute(CouchGames.game.settings)
+    CouchGames.game.settings_changed.connect(_apply_mute)
+
+func _apply_mute(settings: Dictionary) -> void:
+    var bus := AudioServer.get_bus_index("Master")
+    # sound_on is your own sound setting; the platform's mute wins over it.
+    AudioServer.set_bus_mute(bus, settings.muteAudio or not sound_on)
+```
+
+The rules are in the guide:
+[fullscreen and mute](https://developer.couchgames.com/docs/fullscreen-and-mute).
+The mock starts toggleable, not fullscreen and not muted. Set
+`CouchGames.mock.fullscreen` to rehearse the player leaving fullscreen,
+`CouchGames.mock.fullscreen_toggleable = false` to rehearse a phone, and
+`CouchGames.mock.mute_audio` to rehearse the platform's mute; each change emits
+its signal. On a platform build without these calls, both requests answer
+`success: false`, "Not available", and every read is false.
+
 ## Lobby events
 
 `CouchGames.lobby` is the session: the roster of everyone in it, and a tunnel

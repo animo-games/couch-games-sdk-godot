@@ -8,6 +8,9 @@
 class_name CouchGameFiles
 extends Node
 
+## The platform's settings for the game changed (decision 0083).
+signal settings_changed(settings: Dictionary)
+
 ## Where build packs are staged before mounting. Kept as-is for compatibility.
 const MOUNT_DIR := "user://couch_game/"
 
@@ -32,8 +35,18 @@ var _shared_in_flight: Dictionary = {}
 var _shared_resolutions: Dictionary = {}
 
 
+## The platform's settings for the game, {"muteAudio": bool}, a fresh copy on
+## each read. While muteAudio is true, play no sound whatever your own sound
+## setting says, and don't let that setting turn sound back on; when it goes
+## back to false, your own setting applies again.
+var settings: Dictionary:
+	get:
+		return _backend.get_settings() if _backend != null else {"muteAudio": false}
+
+
 func setup(backend: CouchGamesBackend) -> void:
 	_backend = backend
+	backend.settings_changed.connect(settings_changed.emit)
 
 
 # --- Build files (existing public API) ---
