@@ -5,7 +5,8 @@
 #
 # Classic verbs return raw response Dictionaries in the platform's shape
 # ({success, error?, payload?, metadata?}); the autoload wraps them into
-# CouchGamesSDKResponse. Lobby data keeps the platform's key style (userId,
+# CouchGamesSDKResponse, or the subclass that reads a verb's own fields
+# (CouchGamesSaveWriteResult, CouchGamesFullscreenResult, ...). Lobby data keeps the platform's key style (userId,
 # username, role, status, experienceId, controllerSlot, ping); converting it to
 # typed CouchLobbyPlayer objects is CouchLobby's job.
 class_name CouchGamesBackend

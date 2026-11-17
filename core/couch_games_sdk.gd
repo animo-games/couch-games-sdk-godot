@@ -166,7 +166,7 @@ func save_game(
 	progress: float = 0.0,
 	expected_revision: Variant = null,
 	on_conflict: String = "",
-) -> CouchGamesSDKResponse:
+) -> CouchGamesSaveWriteResult:
 	if expected_revision != null \
 			and not (expected_revision is int or expected_revision is float):
 		# The platform compares this with a strict ===, so a stringified
@@ -177,7 +177,7 @@ func save_game(
 			"CouchGames: expected_revision must be the number from "
 			+ "load_save_result().revision. The platform will refuse this write."
 		)
-	return CouchGamesSDKResponse.from_dict(
+	return CouchGamesSaveWriteResult.from_dict(
 		await _backend.save_game(save_data, progress, expected_revision, on_conflict)
 	)
 
@@ -209,8 +209,8 @@ func load_save_result() -> CouchGamesSaveLoadResult:
 ## most one every 5 seconds). Await it before a moment that matters, such as the
 ## end of a level. It can't send state you never passed to save_game().
 ## Branch on `persisted`; `flushed` is how many saves it sent.
-func flush_saves() -> CouchGamesSDKResponse:
-	return CouchGamesSDKResponse.from_dict(await _backend.flush_saves())
+func flush_saves() -> CouchGamesFlushResult:
+	return CouchGamesFlushResult.from_dict(await _backend.flush_saves())
 
 
 func gameplay_start() -> void:
@@ -222,16 +222,16 @@ func gameplay_end() -> void:
 
 
 ## The answer's streak counts this completion. Ignoring the result is fine.
-func gameplay_completed() -> CouchGamesSDKResponse:
-	return CouchGamesSDKResponse.from_dict(await _backend.gameplay_completed())
+func gameplay_completed() -> CouchGamesStreakResult:
+	return CouchGamesStreakResult.from_dict(await _backend.gameplay_completed())
 
 
 ## For games with a campaign and challenges: call once, when the player finishes
 ## the campaign (its last level or its ending), not per level. Recorded once per
 ## player; a repeat succeeds with `already_completed` true. Only a campaign
 ## session can record it ("Not a campaign session" otherwise).
-func complete_campaign() -> CouchGamesSDKResponse:
-	return CouchGamesSDKResponse.from_dict(await _backend.complete_campaign())
+func complete_campaign() -> CouchGamesCampaignResult:
+	return CouchGamesCampaignResult.from_dict(await _backend.complete_campaign())
 
 
 func get_experience_date() -> Variant:
@@ -245,8 +245,8 @@ func get_experience_data() -> CouchGamesSDKResponse:
 ## Openable challenges, oldest first. Call when opening the archive, not per frame.
 ## Rows are in response.payload_array; response.payload stays a Dictionary.
 ## The player's streak is in response.streak.
-func list_experiences() -> CouchGamesSDKResponse:
-	return CouchGamesSDKResponse.from_dict(await _backend.list_experiences())
+func list_experiences() -> CouchGamesStreakResult:
+	return CouchGamesStreakResult.from_dict(await _backend.list_experiences())
 
 
 ## Switches to an id from list_experiences(). In a lobby, every member switches.
@@ -291,8 +291,8 @@ func flush_telemetry() -> void:
 	await _backend.flush_telemetry()
 
 
-func unlock_achievement(key: String) -> CouchGamesSDKResponse:
-	return CouchGamesSDKResponse.from_dict(await _backend.unlock_achievement(key))
+func unlock_achievement(key: String) -> CouchGamesAchievementResult:
+	return CouchGamesAchievementResult.from_dict(await _backend.unlock_achievement(key))
 
 
 func get_achievements() -> CouchGamesSDKResponse:
@@ -311,12 +311,12 @@ func get_session_stats() -> CouchGamesSDKResponse:
 ## can_toggle_fullscreen() is true.
 ## `success` means the game is now in the state it asked for; `fullscreen` is
 ## the state after the call.
-func request_fullscreen() -> CouchGamesSDKResponse:
-	return CouchGamesSDKResponse.from_dict(await _backend.request_fullscreen())
+func request_fullscreen() -> CouchGamesFullscreenResult:
+	return CouchGamesFullscreenResult.from_dict(await _backend.request_fullscreen())
 
 
-func exit_fullscreen() -> CouchGamesSDKResponse:
-	return CouchGamesSDKResponse.from_dict(await _backend.exit_fullscreen())
+func exit_fullscreen() -> CouchGamesFullscreenResult:
+	return CouchGamesFullscreenResult.from_dict(await _backend.exit_fullscreen())
 
 
 ## Pick your fullscreen button's icon from this, then follow fullscreen_changed.

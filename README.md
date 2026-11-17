@@ -124,8 +124,8 @@ through again, as on the platform.
 
 ## Experience archive API
 
-`await CouchGames.list_experiences()` returns a `CouchGamesSDKResponse` with
-openable challenges in `payload_array`, oldest first. The existing `payload`
+`await CouchGames.list_experiences()` returns a `CouchGamesStreakResult` (a
+`CouchGamesSDKResponse` with `streak`) with openable challenges in `payload_array`, oldest first. The existing `payload`
 field remains a Dictionary for compatibility. Call when the archive screen
 opens, not every frame: each platform call is a server round trip. Listing
 works before a session starts; the campaign-first lock returns an empty list.
@@ -149,7 +149,7 @@ The rows' fields, and what `players` and `streak` mean, are in the guide's
 check for null before converting to int. `result.streak` is null when the
 answer carries none (a failed call).
 
-`await CouchGames.gameplay_completed()` returns a `CouchGamesSDKResponse` too,
+`await CouchGames.gameplay_completed()` returns a `CouchGamesStreakResult` too,
 with the [streak](https://developer.couchgames.com/docs/gameplay#gameplay-complete) counting this completion. Games that
 ignore the result keep working. `get_experience_data()`'s payload carries
 `number` (null when unnumbered): show it to the player, not `experienceIndex`.
