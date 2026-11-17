@@ -36,6 +36,10 @@ signal webrtc_ice_servers_updated(ice_servers: Array)
 ## Play-mode selection made on the parent platform page ("1-device",
 ## "2-devices"); empty when none has been made (or not on the platform).
 signal play_mode_selected(mode: String, code: String)
+## The platform's fullscreen changed, whoever changed it (decision 0083).
+signal fullscreen_changed(fullscreen: bool)
+## The platform's settings for the game changed: {"muteAudio": bool}.
+signal settings_changed(settings: Dictionary)
 
 
 func is_available() -> bool:
@@ -290,6 +294,44 @@ func webrtc_request_peers() -> void:
 
 func webrtc_disconnect() -> void:
 	pass
+
+
+# --- Fullscreen and settings ---
+#
+# The platform's own fullscreen view, the play bar's (decision 0083). Both
+# verbs answer {success, message, fullscreen}; a backend or platform build
+# without them answers "Not available", with every read false.
+
+func request_fullscreen() -> Dictionary:
+	return _fullscreen_not_available()
+
+
+func exit_fullscreen() -> Dictionary:
+	return _fullscreen_not_available()
+
+
+func is_fullscreen() -> bool:
+	return false
+
+
+func can_toggle_fullscreen() -> bool:
+	return false
+
+
+## {"muteAudio": bool}, a fresh copy on each call.
+func get_settings() -> Dictionary:
+	return {"muteAudio": false}
+
+
+func _fullscreen_not_available() -> Dictionary:
+	return {"success": false, "message": "Not available", "fullscreen": false}
+
+
+## The settings in the platform's shape, whatever arrived: anything but a
+## boolean muteAudio reads as false.
+static func _settings_from(value: Variant) -> Dictionary:
+	var mute: Variant = value.get("muteAudio", false) if value is Dictionary else false
+	return {"muteAudio": mute if mute is bool else false}
 
 
 # --- Play mode ---

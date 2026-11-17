@@ -13,6 +13,10 @@ extends Node
 ## "2-devices"); empty when none has been made (or not on the platform).
 signal play_mode_selected(mode: String, code: String)
 
+## The platform's fullscreen changed, whoever changed it: the game, the play
+## bar or Esc. Not emitted on connect: read is_fullscreen() once, then listen.
+signal fullscreen_changed(fullscreen: bool)
+
 ## Delivered through lobby.event_received, including in solo games.
 const EXPERIENCE_CHANGED_EVENT := "couchgames:experience-changed"
 
@@ -78,6 +82,7 @@ func _ready() -> void:
 	_backend.name = "Backend"
 	add_child(_backend)
 	_backend.play_mode_selected.connect(play_mode_selected.emit)
+	_backend.fullscreen_changed.connect(fullscreen_changed.emit)
 	lobby = _Lobby.new()
 	lobby.name = "Lobby"
 	lobby.setup(_backend)
@@ -296,6 +301,33 @@ func get_achievements() -> CouchGamesSDKResponse:
 
 func get_session_stats() -> CouchGamesSDKResponse:
 	return CouchGamesSDKResponse.from_dict(await _backend.get_session_stats())
+
+
+## Asks for the platform's fullscreen: the play bar's own view, the game with
+## the bar under it, never the engine's window mode. Call it from the player's
+## input (a button's pressed signal, _input): the browser allows fullscreen only
+## for a few seconds after a tap, click or key press, so not from a timer or a
+## network reply. Show your own fullscreen button only when
+## can_toggle_fullscreen() is true.
+## `success` means the game is now in the state it asked for; `fullscreen` is
+## the state after the call.
+func request_fullscreen() -> CouchGamesSDKResponse:
+	return CouchGamesSDKResponse.from_dict(await _backend.request_fullscreen())
+
+
+func exit_fullscreen() -> CouchGamesSDKResponse:
+	return CouchGamesSDKResponse.from_dict(await _backend.exit_fullscreen())
+
+
+## Pick your fullscreen button's icon from this, then follow fullscreen_changed.
+func is_fullscreen() -> bool:
+	return _backend != null and _backend.is_fullscreen()
+
+
+## False on a phone, which always plays fullscreen, and wherever the platform
+## has no fullscreen view. Holds for the whole run.
+func can_toggle_fullscreen() -> bool:
+	return _backend != null and _backend.can_toggle_fullscreen()
 
 
 func get_url(_experience_id: String = "") -> String:

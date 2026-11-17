@@ -17,6 +17,8 @@
 # shared roster and visible to real guest instances too.
 # Archive listing and switching also inherit the mock implementation, like
 # get_experience_data(). Switching refuses while other players share the roster.
+# Fullscreen and the mute setting inherit the mock's too, one per instance: on
+# the platform each player's own page holds them.
 class_name CouchGamesLocalBackend
 extends CouchGamesMockBackend
 
