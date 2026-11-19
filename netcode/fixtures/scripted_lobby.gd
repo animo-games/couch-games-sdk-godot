@@ -66,6 +66,12 @@ func is_host() -> bool:
 	return is_host_role
 
 
+## The local player, as CouchLobby.get_me() answers it: the transport reads
+## it so a roster or reconnect fact about this endpoint itself is ignored.
+func get_me() -> Variant:
+	return {"user_id": user_id}
+
+
 func send_event(event: String, data: Variant, target: Dictionary) -> void:
 	if _other == null or not is_available:
 		return
