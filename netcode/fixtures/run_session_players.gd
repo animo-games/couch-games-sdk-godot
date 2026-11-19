@@ -24,6 +24,19 @@
 ## (unsorted departures, no tracker pre-seed on a mid-session grant, an
 ## unconditional re-seed that erases a spectator's hello history).
 ##
+## Cases R1-R3 are the reconnect foundations of the standard connection plan
+## (docs/plans/standard-connection-design.md, step 2), in both modes. R1: a
+## guest whose host leaves a two-player lobby stops "host-left", not the
+## generic "roster-too-small". R2: a guest whose PROCESS restarts while the
+## roster still holds it (a refresh inside the platform's hold window) is
+## heard from its first message, although its counters restart at 1 below the
+## host's high-water marks. The host learns of the restart the way a real
+## transport reports it, a link-reset gap ("peer-rejoined"), which may land
+## before or after the new process's first hello. R3: a link-reset gap at the host (peer-reconnected,
+## peer-rejoined, link-rebuild) makes the host demand a fresh hello and
+## baseline from that guest, on every backend rather than only Steam; a
+## diagnostic gap, and any gap seen only by a guest, changes nothing.
+##
 ## HARNESS. Entirely synchronous: no WebRTC, no await, no real clock. Each
 ## participant (`_Side`) is a CouchScriptedRoster + CouchScriptedTransport + a
 ## real CouchSession, with every signal recorded in order. `_Net` wires them
@@ -161,6 +174,7 @@ class _Net extends RefCounted:
 	var policy_n: int
 	var now: int = 1000
 	var wire: Array = []          # {from, to, env}
+	var players: Array = []       # the roster every side currently sees
 	var _inject_seq: Dictionary = {}
 	var _check_cb: Callable
 
@@ -176,7 +190,8 @@ class _Net extends RefCounted:
 
 	## Build one side per player (host first so it evaluates first), evaluate
 	## everyone, and pump the handshake to quiescence.
-	func boot(players: Array) -> void:
+	func boot(p_players: Array) -> void:
+		players = p_players
 		for player in players:
 			if player["role"] == "host":
 				host_id = player["userId"]
@@ -190,7 +205,8 @@ class _Net extends RefCounted:
 	## Like boot(), but every GUEST evaluates (and sends its first hello) and the
 	## hellos are pumped to the not-yet-engaged host BEFORE the host evaluates.
 	## The host session drops envelopes while unengaged, so those hellos are lost.
-	func boot_guests_first(players: Array) -> void:
+	func boot_guests_first(p_players: Array) -> void:
+		players = p_players
 		for player in players:
 			if player["role"] == "host":
 				host_id = player["userId"]
@@ -206,21 +222,35 @@ class _Net extends RefCounted:
 		pump("boot_guests_first/host")
 
 	## Set every remaining side's roster, evaluate each, pump.
-	func set_roster(players: Array) -> void:
+	func set_roster(p_players: Array) -> void:
+		players = p_players
 		for id in sides.keys():
 			(sides[id] as _Side).roster.set_players(players)
 		_evaluate_all()
 		pump("set_roster")
 
 	## A newcomer is a fresh side (fresh session, seqs from 1).
-	func join(id: String, players: Array) -> void:
-		sides[id] = _Side.new(id, players, policy_n)
-		set_roster(players)
+	func join(id: String, p_players: Array) -> void:
+		sides[id] = _Side.new(id, p_players, policy_n)
+		set_roster(p_players)
 
 	## A leaver is dropped from routing; its session is just discarded.
 	func leave(id: String, remaining_players: Array) -> void:
 		sides.erase(id)
 		set_roster(remaining_players)
+
+	## The process behind `id` restarts while the roster keeps it (a refresh
+	## inside the hold window): a fresh side replaces the old one, its counters
+	## restart at 1, and nobody else sees a roster change.
+	func restart(id: String) -> void:
+		sides[id] = _Side.new(id, players, policy_n)
+		(sides[id] as _Side).session.evaluate(now)
+		pump("restart")
+
+	## Fire a transport_gap on `at`'s transport about `peer`, without pumping:
+	## the session must act on the gap itself, not on traffic.
+	func gap(at: String, peer: String, reason: String) -> void:
+		(sides[at] as _Side).transport.emit_transport_gap(peer, reason)
 
 	func advance(ms: int) -> void:
 		now += ms
@@ -300,6 +330,9 @@ func _run() -> void:
 	_case_m11()
 	_case_m12()
 	_case_m13()
+	_case_r1()
+	_case_r2()
+	_case_r3()
 
 	print("")
 	if failures > 0:
@@ -748,3 +781,133 @@ func _case_m13() -> void:
 	net.pump("m13 redeliver")
 	_check(host.rejects_of("g3", "duplicate") == dup_before + 1, "M13: re-delivering the captured hello is rejected as duplicate")
 	_check(host.hellos.count("g3") == hellos_before, "M13: no new hello_received for g3")
+
+
+# --- R1: host leaves a two-player lobby ---------------------------------------------------
+
+
+func _case_r1() -> void:
+	print("R1: a guest whose host leaves a two-player lobby stops host-left")
+	for n in [0, 3]:
+		var mode := "legacy" if n == 0 else "multi"
+		var g1p := _p("g1", "guest", 1)
+		var net := _net(n)
+		net.boot([_p("h", "host", 0), g1p])
+		net.advance(1000)
+		var g1 := net.side("g1")
+		_check(g1.session.active, "R1 %s: (setup) g1 active" % mode)
+		net.leave("h", [g1p])
+		_check(g1.stopped == ["host-left"], "R1 %s: g1 stops exactly once with host-left (got %s)" % [mode, str(g1.stopped)])
+
+		# A teardown that loses the guest too still reports the generic reason.
+		var net2 := _net(n)
+		net2.boot([_p("h", "host", 0), g1p])
+		net2.advance(1000)
+		var g1b := net2.side("g1")
+		net2.leave("h", [])
+		_check(g1b.stopped == ["roster-too-small"], "R1 %s: a roster that lost g1 as well stops roster-too-small (got %s)" % [mode, str(g1b.stopped)])
+
+
+# --- R2: guest restarts while the roster holds it ------------------------------------------
+
+
+func _case_r2() -> void:
+	print("R2: a restarted guest is heard from its first message")
+	for n in [0, 3]:
+		for order in ["gap-first", "hello-first"]:
+			var mode := "%s %s" % ["legacy" if n == 0 else "multi", order]
+			var net := _net(n)
+			net.boot([_p("h", "host", 0), _p("g1", "guest", 1), _p("g2", "guest", 2)])
+			net.advance(1000)
+			var host := net.host()
+			for i in 5:
+				net.guest_input("g1", "old%d" % i)
+			_check(host.inputs_from("g1") == 5, "R2 %s: (setup) five inputs from the first g1 process" % mode)
+			var old_hello: Dictionary = {}
+			for w in net.wire:
+				if w["from"] == "g1" and w["to"] == "authority" and w["env"]["kind"] == CouchEnvelope.KIND_HELLO:
+					old_hello = w["env"]
+			var epoch := host.session.epoch
+			var host_mark := host.events.size()
+			var gaps_before := host.session.gap_count
+
+			if order == "gap-first":
+				net.gap("h", "g1", "peer-rejoined")
+				net.restart("g1")
+			else:
+				net.restart("g1")
+				net.gap("h", "g1", "peer-rejoined")
+			net.advance(1000)
+			var g1 := net.side("g1")
+			_check(g1.session.active and g1.session.local_slot == 1, "R2 %s: the restarted g1 is active at slot 1" % mode)
+			_check(g1.stopped.is_empty() and g1.started.size() == 1, "R2 %s: the new process starts once and reports no stop (it had nothing to stop)" % mode)
+			_check(g1.session.epoch == epoch and host.session.epoch == epoch, "R2 %s: the epoch did not change" % mode)
+			_check(_slice(host.events, host_mark).is_empty(), "R2 %s: the host saw no stop, join or leave" % mode)
+			host.session.broadcast_snapshot({"tick": 1})
+			net.pump("r2 baseline")
+			var reject_mark := host.rejects.size()
+			for i in 3:
+				net.guest_input("g1", "new%d" % i)
+			_check(host.inputs_from("g1") == 8, "R2 %s: all three inputs from the restarted process arrive (got %d of 8)" % [mode, host.inputs_from("g1")])
+			_check(host.rejects.size() == reject_mark, "R2 %s: the host rejected none of them" % mode)
+			_check(host.session.gap_count == gaps_before, "R2 %s: the restarted counters report no sequence gap" % mode)
+
+			# A stale hello from the dead process, now the handshake is done, is
+			# an ordinary duplicate and does not rewind the new process.
+			host.transport.deliver(old_hello, "g1")
+			net.pump("r2 stale hello")
+			net.guest_input("g1", "after-stale")
+			_check(host.inputs_from("g1") == 9, "R2 %s: a stale hello from the old process does not reopen its tracker" % mode)
+
+
+# --- R3: link-reset gaps resync on every backend -------------------------------------------
+
+
+func _case_r3() -> void:
+	print("R3: a link-reset gap makes the host demand a fresh hello and baseline")
+	for reason in ["peer-reconnected", "peer-rejoined", "link-rebuild"]:
+		for n in [0, 3]:
+			var mode := "%s %s" % [reason, "legacy" if n == 0 else "multi"]
+			var net := _net(n)
+			net.boot([_p("h", "host", 0), _p("g1", "guest", 1), _p("g2", "guest", 2)])
+			net.advance(1000)
+			var host := net.host()
+			var g1 := net.side("g1")
+			var g2 := net.side("g2")
+			var hellos_before := host.hellos.count("g1")
+			var g2_mark := g2.events.size()
+			for i in 4:
+				net.guest_input("g1", "pre%d" % i)
+			var gaps_before := host.session.gap_count
+
+			net.gap("h", "g1", reason)
+			net.inject(CouchEnvelope.KIND_INPUT, "g1", {"t": "stale"})
+			_check(host.rejects_of("g1", "handshake-required") == 1, "R3 %s: input over the reset link is held until g1 re-hellos" % mode)
+
+			net.advance(1000)
+			_check(g1.stopped == ["link-reset"], "R3 %s: g1 stops once with link-reset (got %s)" % [mode, str(g1.stopped)])
+			_check(g1.started.size() == 2 and g1.session.active, "R3 %s: g1 starts again" % mode)
+			_check(host.hellos.count("g1") == hellos_before + 1, "R3 %s: the host heard a fresh hello from g1" % mode)
+			_check(not g1.session.send_input({"t": "early"}), "R3 %s: g1 sends no input before a fresh baseline" % mode)
+			host.session.broadcast_snapshot({"tick": 1})
+			net.pump("r3 baseline")
+			var before := host.inputs_from("g1")
+			net.guest_input("g1", "after")
+			_check(host.inputs_from("g1") == before + 1, "R3 %s: g1's input arrives after the baseline" % mode)
+			_check(host.session.gap_count == gaps_before, "R3 %s: g1's continuing counters report no phantom sequence gap" % mode)
+			_check(_slice(g2.events, g2_mark).is_empty(), "R3 %s: g2 is untouched" % mode)
+
+	# A diagnostic gap, and a gap seen only by the guest, change nothing.
+	for case in [["h", "g1", "peer-muted"], ["g1", "h", "peer-rejoined"], ["g1", "h", "peer-reconnected"]]:
+		var label := "%s at %s" % [case[2], case[0]]
+		var net := _net(3)
+		net.boot([_p("h", "host", 0), _p("g1", "guest", 1)])
+		net.advance(1000)
+		var host := net.host()
+		var g1 := net.side("g1")
+		net.gap(case[0], case[1], case[2])
+		net.advance(1000)
+		_check(g1.stopped.is_empty() and g1.started.size() == 1, "R3 %s: g1's session is untouched" % label)
+		var before := host.inputs_from("g1")
+		net.guest_input("g1", "x")
+		_check(host.inputs_from("g1") == before + 1 and host.rejects_of("g1") == 0, "R3 %s: g1's input still arrives" % label)

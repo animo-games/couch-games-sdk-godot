@@ -219,6 +219,10 @@ Steam provider gaps discard delayed accepted gameplay before requiring a fresh
 existing session hello and snapshot. Guests
 block gameplay sends until that baseline; host `hello_received` handlers must
 send a complete snapshot. There is no second Steam authority or snapshot system.
+The host side of this handshake is not Steam-specific: WebRTC and tunnel link
+resets use it too (see the README's "Dropped links and restarted players"). A
+Steam guest also restarts on its own provider gap (`steam-link-gap`); other
+guests wait for the host's request (`link-reset`).
 
 When an already joined guest loses its Steam connection, the backend enters
 `reconnecting`, clears its unusable membership, and remembers the original lobby,

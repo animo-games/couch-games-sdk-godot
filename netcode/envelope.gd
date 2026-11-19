@@ -373,16 +373,29 @@ static func _is_number(value: Variant) -> bool:
 class ReceiveTracker extends RefCounted:
 	var epoch: int = CouchEnvelope.UNKNOWN_EPOCH
 	var _last_seq: Dictionary = {}   # kind -> int
+	var _rebased: bool = false       # true after rebase(): unseen kinds anchor at their first seq
 
 
 	func reset(new_epoch: int) -> void:
 		epoch = new_epoch
 		_last_seq.clear()
+		_rebased = false
+
+
+	## Like reset(), but the sender's counters are not assumed to start at 1:
+	## the first frame of each kind after this is accepted with gap 0 and sets
+	## that kind's high-water mark. For a sender whose link was reset and who
+	## may be a new process (see CouchSession's link-reset handshake).
+	func rebase(new_epoch: int) -> void:
+		epoch = new_epoch
+		_last_seq.clear()
+		_rebased = true
 
 
 	func forget() -> void:
 		epoch = CouchEnvelope.UNKNOWN_EPOCH
 		_last_seq.clear()
+		_rebased = false
 
 
 	## Classify one decoded envelope.
@@ -410,6 +423,10 @@ class ReceiveTracker extends RefCounted:
 				_last_seq[kind] = seq
 				return {"accept": true, "reset": true, "duplicate": false, "gap": 0, "reason": ""}
 			return {"accept": false, "reset": false, "duplicate": false, "gap": 0, "reason": "epoch-mismatch"}
+
+		if _rebased and not _last_seq.has(kind):
+			_last_seq[kind] = seq
+			return {"accept": true, "reset": false, "duplicate": false, "gap": 0, "reason": ""}
 
 		var last: int = int(_last_seq.get(kind, 0))
 		if seq <= last:
