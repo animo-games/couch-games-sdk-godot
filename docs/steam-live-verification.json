@@ -1,0 +1,40 @@
+{
+  "date": "2026-10-08",
+  "platform": "Linux x86_64",
+  "execution": "real signed-in Steam account; source fixture; one account",
+  "godot": "4.7.stable.official.5b4e0cb0f",
+  "godotsteam": "4.23",
+  "steamworks": "1.65",
+  "native_archive_sha256": "c1728b4bf330da851a00eaf64dab2e99c506018b1d9f529511b25d7fe7649e97",
+  "runtime_source_revision": "53df61b1a99cc3cce087e3cd0e9a9d3d9c37f2d4",
+  "fixture_and_adapter_sha256": {
+    "fixtures/steam/prepare.py": "7f53ac1cc95cad54994d9d2b2b492d72bde6a1809b1ff4c3f71e9fdd40466220",
+    "fixtures/steam/probe.gd": "4fc457c7c2fb9f25becdbb6354cb7475619e7b2319432bbd8409209be96a0986",
+    "backends/steam_backend.gd": "aae2b6197009676af21738e51c39a1a9687d8c3f0be5b2ce6a08ec99487a747c",
+    "steam/steam_bridge.gd": "ef267e5bd542e78b6f4f28b55ad8c5d309665d151b58817f111cb8aadb164a88"
+  },
+  "result": {
+    "actual_app_id": "5310050",
+    "backend": "steam",
+    "failures": 0,
+    "host_success": true,
+    "initialization_ms": 13,
+    "initialization_state": "ready",
+    "requested_app_id": 5310050,
+    "state_after_host": "joined",
+    "state_after_leave": "idle"
+  },
+  "negative_checks": {
+    "missing_app_id": "exited 1 before SDK initialization",
+    "absent_native_extension": "exited 1 with failed initialization and visible not-installed error"
+  },
+  "not_executed": [
+    "two-account peer messaging and session snapshots",
+    "friend invitations",
+    "link failure and host departure with a guest",
+    "achievement read/store callbacks and restart persistence",
+    "live Windows Steam execution",
+    "live packaged artifacts"
+  ],
+  "consumer_game_changes": "None; App ID remains runtime input in SDK fixture, with isolated user data."
+}
