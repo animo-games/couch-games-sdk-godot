@@ -27,6 +27,8 @@ var _on_webrtc_closed_cb: JavaScriptObject
 var _on_webrtc_ice_servers_cb: JavaScriptObject
 var _on_webrtc_peers_cb: JavaScriptObject
 var _on_play_mode_selected_cb: JavaScriptObject
+var _on_fullscreen_change_cb: JavaScriptObject
+var _on_settings_change_cb: JavaScriptObject
 ## Private cancellation generation for the awaited connect promise. The SDK
 ## coordinator still owns cross-request serialization; this prevents backend
 ## post-await state from reviving a request canceled by webrtc_disconnect().
@@ -56,6 +58,9 @@ func initialize() -> void:
 	_window = JavaScriptBridge.get_interface("window")
 	if _window:
 		_sdk = _window.CouchGames
+	# Before the lobby's checks, which return early: a solo game needs these too.
+	_setup_fullscreen_bridge()
+	_setup_settings_bridge()
 	if _sdk:
 		_lobby = _sdk.lobby
 	if _lobby == null:
@@ -118,6 +123,22 @@ func _setup_play_mode_bridge() -> void:
 		return
 	_on_play_mode_selected_cb = JavaScriptBridge.create_callback(_on_play_mode_selected)
 	_sdk.onPlayModeSelected(_on_play_mode_selected_cb)
+
+
+# Both optional: a platform build without them never calls, and the reads
+# answer false.
+func _setup_fullscreen_bridge() -> void:
+	if _sdk == null or _sdk.onFullscreenChange == null:
+		return
+	_on_fullscreen_change_cb = JavaScriptBridge.create_callback(_on_fullscreen_change)
+	_sdk.onFullscreenChange(_on_fullscreen_change_cb)
+
+
+func _setup_settings_bridge() -> void:
+	if _sdk == null or _sdk.game == null or _sdk.game.addSettingsChangeListener == null:
+		return
+	_on_settings_change_cb = JavaScriptBridge.create_callback(_on_settings_change)
+	_sdk.game.addSettingsChangeListener(_on_settings_change_cb)
 
 
 # --- Experience files ---
@@ -729,6 +750,55 @@ func _on_webrtc_peers(args: Array) -> void:
 	var peers = _js_to_variant(args[0])
 	if peers is Array:
 		webrtc_peers_updated.emit(peers)
+
+
+# --- Fullscreen and settings ---
+
+func request_fullscreen() -> Dictionary:
+	var sdk = _get_sdk()
+	if sdk == null or sdk.requestFullscreen == null:
+		return _fullscreen_not_available()
+	# The call reaches the browser before this awaits, inside the player's
+	# input, which is all the browser allows fullscreen in (decision 0083).
+	return _js_to_dict(await _await_promise(sdk.requestFullscreen()))
+
+
+func exit_fullscreen() -> Dictionary:
+	var sdk = _get_sdk()
+	if sdk == null or sdk.exitFullscreen == null:
+		return _fullscreen_not_available()
+	return _js_to_dict(await _await_promise(sdk.exitFullscreen()))
+
+
+func is_fullscreen() -> bool:
+	var sdk = _get_sdk()
+	if sdk == null or sdk.isFullscreen == null:
+		return false
+	var answer: Variant = sdk.isFullscreen()
+	return answer is bool and answer
+
+
+func can_toggle_fullscreen() -> bool:
+	var sdk = _get_sdk()
+	if sdk == null or sdk.canToggleFullscreen == null:
+		return false
+	var answer: Variant = sdk.canToggleFullscreen()
+	return answer is bool and answer
+
+
+func get_settings() -> Dictionary:
+	var sdk = _get_sdk()
+	if sdk == null or sdk.game == null:
+		return _settings_from(null)
+	return _settings_from(_js_to_variant(sdk.game.settings))
+
+
+func _on_fullscreen_change(args: Array) -> void:
+	fullscreen_changed.emit(args.size() > 0 and args[0] is bool and args[0])
+
+
+func _on_settings_change(args: Array) -> void:
+	settings_changed.emit(_settings_from(_js_to_variant(args[0]) if args.size() > 0 else null))
 
 
 # --- Play mode ---
