@@ -53,6 +53,7 @@ renderer/rendering_method="gl_compatibility"
             ('netcode/fixtures/run_fixtures.gd', '117 passed, 0 failed, 0 awaiting port', ['--fixtures=' + str(args.fixtures.resolve() / 'data')]),
             ('netcode/fixtures/run_transport_fixtures.gd', '44 passed, 0 failed', ['--fixtures=' + str(args.fixtures.resolve() / 'transport/data')]),
             ('netcode/fixtures/run_session_players.gd', 'COUCH_SESSION_PLAYERS_OK:', []),
+            ('netcode/fixtures/run_lobby_away.gd', 'COUCH_LOBBY_AWAY_OK:', []),
             ('netcode/fixtures/run_transport_faults.gd', 'total assertions: 0 failed', []),
             ('tests/session_transport_test.gd', 'SESSION_TRANSPORT_TEST_OK', []),
             ('tests/webrtc_signaling_reconnect_test.gd', 'WEBRTC_SIGNALING_RECONNECT_TEST: PASS', []),

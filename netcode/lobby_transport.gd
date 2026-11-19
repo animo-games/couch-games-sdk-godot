@@ -37,6 +37,26 @@ const DEFAULT_EVENT_NAME := "couch-net"
 ## transport_gap, is what protects continuity.
 const MAX_RECENTLY_LOST := 64
 
+## Couch's away flow (platform decision 0078). A dropped or reloaded player is
+## "away": a guest stays in the roster as a `disconnected` row (a host is left
+## out of it until back), and the platform raises these reserved lobby events
+## when someone comes back, after every event held for the drop has arrived.
+## Each reconnect becomes ONE `peer-reconnected` link-reset gap per peer, so the
+## host resyncs that guest and hears it even if its game restarted with its
+## roster row (and slot) unchanged:
+##   PEER_RECONNECTED_EVENT {userId, role, downtimeMs}, on the clients that
+##     stayed -> a gap for userId.
+##   RECONNECTED_EVENT {downtimeMs}, on the client that dropped -> a gap for
+##     every other known peer (the link to each of them was down).
+##   A row going `disconnected` and back, for a backend that does not send the
+##     events -> a gap for that peer.
+## When both the event and the row report one reconnect, whichever comes first
+## raises the gap and the other is absorbed (`_reset_this_away`).
+const PEER_RECONNECTED_EVENT := "couchgames:peer-reconnected"
+const RECONNECTED_EVENT := "couchgames:reconnected"
+const STATUS_DISCONNECTED := "disconnected"
+const GAP_PEER_RECONNECTED := "peer-reconnected"
+
 signal envelope_received(envelope: Dictionary, sender_peer_id: String)
 signal peer_ready(peer_id: String)
 signal peer_lost(peer_id: String)
@@ -99,6 +119,8 @@ var _closed: bool = false
 
 var _known_peer_ids: Dictionary = {}      # user_id -> true
 var _recently_lost: Dictionary = {}       # user_id -> true
+var _away: Dictionary = {}                # user_id -> true while its row reads `disconnected`
+var _reset_this_away: Dictionary = {}     # user_id -> true: this reconnect's gap is already raised
 
 var _seen_reject_errors: Dictionary = {}  # error string -> true, flood control
 var _reject_count: int = 0
@@ -281,6 +303,12 @@ func _set_fault_seed(value: int) -> void:
 
 
 func _on_lobby_event(event: String, data: Variant, sender_user_id: String) -> void:
+	if event == PEER_RECONNECTED_EVENT:
+		_on_peer_reconnected(data)
+		return
+	if event == RECONNECTED_EVENT:
+		_on_self_reconnected()
+		return
 	if event != _event_name:
 		return
 	var result := CouchEnvelope.from_json_frame(data)
@@ -305,19 +333,42 @@ func _on_lobby_event(event: String, data: Variant, sender_user_id: String) -> vo
 
 ## Roster-derived link liveness. A rejoin (an id that was lost reappearing) is
 ## exactly the case where messages were lost across a boundary the sequence
-## numbers cannot see, so it fires peer_ready AND transport_gap.
+## numbers cannot see, so it fires peer_ready AND transport_gap. A row coming
+## back from `disconnected` is the away flow's reconnect (see
+## PEER_RECONNECTED_EVENT) and fires a `peer-reconnected` gap.
 func _on_players_changed(players: Array) -> void:
 	var current_ids: Dictionary = {}
+	var statuses: Dictionary = {}
 	for player in players:
 		var user_id := _player_user_id(player)
 		if user_id.is_empty():
 			continue
 		current_ids[user_id] = true
+		statuses[user_id] = _player_status(player)
+	var my_id := _local_user_id()
 
 	for user_id in _known_peer_ids:
 		if not current_ids.has(user_id):
+			_away.erase(user_id)
+			_reset_this_away.erase(user_id)
 			_remember_lost(user_id)
 			peer_lost.emit(user_id)
+
+	for user_id in current_ids:
+		if user_id == my_id:
+			continue
+		var away: bool = statuses.get(user_id, "") == STATUS_DISCONNECTED
+		if away and not _away.has(user_id):
+			_away[user_id] = true
+			_reset_this_away.erase(user_id)
+		elif not away and _away.has(user_id):
+			_away.erase(user_id)
+			if _reset_this_away.has(user_id):
+				_reset_this_away.erase(user_id)
+			else:
+				# Absorbs the event if it follows this roster for the same reconnect.
+				_reset_this_away[user_id] = true
+				transport_gap.emit(user_id, GAP_PEER_RECONNECTED)
 
 	for user_id in current_ids:
 		if not _known_peer_ids.has(user_id):
@@ -327,6 +378,38 @@ func _on_players_changed(players: Array) -> void:
 				transport_gap.emit(user_id, "peer-rejoined")
 
 	_known_peer_ids = current_ids
+
+
+func _on_peer_reconnected(data: Variant) -> void:
+	if not (data is Dictionary):
+		return
+	var raw_id: Variant = (data as Dictionary).get("userId")
+	if not (raw_id is String) or (raw_id as String).is_empty():
+		return
+	var user_id: String = raw_id
+	if user_id == _local_user_id():
+		return
+	if _reset_this_away.has(user_id):
+		# The roster already raised this reconnect's gap.
+		_reset_this_away.erase(user_id)
+		return
+	if _away.has(user_id):
+		# The row still reads disconnected: absorb its coming back.
+		_reset_this_away[user_id] = true
+	transport_gap.emit(user_id, GAP_PEER_RECONNECTED)
+
+
+func _on_self_reconnected() -> void:
+	var my_id := _local_user_id()
+	for user_id in _known_peer_ids.keys():
+		if user_id != my_id:
+			transport_gap.emit(user_id, GAP_PEER_RECONNECTED)
+
+
+func _local_user_id() -> String:
+	if _lobby == null or not _lobby.has_method("get_me"):
+		return ""
+	return _player_user_id(_lobby.get_me())
 
 
 func _remember_lost(user_id: String) -> void:
@@ -350,6 +433,15 @@ static func _player_user_id(player: Variant) -> String:
 		if uid != null:
 			return str(uid)
 		return ""
+	return ""
+
+
+static func _player_status(player: Variant) -> String:
+	if player is Dictionary:
+		return str((player as Dictionary).get("status", ""))
+	if player is Object:
+		var status: Variant = player.get("status")
+		return "" if status == null else str(status)
 	return ""
 
 

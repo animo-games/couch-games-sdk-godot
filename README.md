@@ -609,6 +609,15 @@ a guest whose game restarted while the lobby still held its place: its first
 messages are accepted even though its counters started again from 1. Other gap
 reasons are only diagnostic.
 
+On Couch, the lobby transport reports `peer-reconnected` from the platform's
+away flow: the reserved events `couchgames:peer-reconnected` (a player who
+dropped or reloaded is back) and `couchgames:reconnected` (your own connection
+is back, which counts for every other player), and from a roster row coming
+back from `disconnected` on a backend that doesn't send those events. One
+reconnect raises one gap, even when both the event and the roster report it.
+The slot is held while the platform holds the player (60 s away); after that
+the player has left.
+
 A guest whose host leaves stops with `host-left`, including in a two-player
 lobby. `roster-too-small` now means the guest is gone from the roster as well.
 
