@@ -618,6 +618,9 @@ reconnect raises one gap, even when both the event and the roster report it.
 The slot is held while the platform holds the player (60 s away); after that
 the player has left.
 
+What this means for your game, step by step, with the editor commands to try
+it: [docs/connections.md](docs/connections.md).
+
 A guest whose host leaves stops with `host-left`, including in a two-player
 lobby. `roster-too-small` now means the guest is gone from the roster as well.
 
