@@ -1,7 +1,9 @@
 ## Headless test for the calls that mirror window.CouchGames verbs added after
 ## the first release: flush_saves, complete_campaign, delete_game_metadata,
-## clear_game_metadata, track / flush_telemetry, and the response fields they
-## answer with (already_completed, already_unlocked, flushed).
+## clear_game_metadata, track / flush_telemetry, request_fullscreen /
+## exit_fullscreen / is_fullscreen / can_toggle_fullscreen, game settings, and
+## the response fields they answer with (already_completed, already_unlocked,
+## flushed, fullscreen).
 ##
 ##   godot --headless --path Project -s res://addons/couch-games-sdk/tests/platform_calls_test.gd
 ##
@@ -11,6 +13,8 @@ extends SceneTree
 
 const MockBackend := preload("res://addons/couch-games-sdk/backends/mock_backend.gd")
 const Response := preload("res://addons/couch-games-sdk/core/response.gd")
+const Backend := preload("res://addons/couch-games-sdk/backends/backend.gd")
+const GameFiles := preload("res://addons/couch-games-sdk/game/couch_game_files.gd")
 
 var _failed := false
 
@@ -64,7 +68,52 @@ func _run() -> void:
 	var achievements := Response.from_dict(await mock.get_achievements())
 	_check(achievements.payload_array.size() == 1 and achievements.payload_array[0].key == "first_win" and achievements.payload_array[0].earned == true, "get_achievements answers an array, as the platform does")
 
+	# Fullscreen (decision 0083): the mock flips its flag and reports every change.
+	var changes: Array = []
+	mock.fullscreen_changed.connect(func(fullscreen: bool) -> void: changes.append(fullscreen))
+	_check(mock.can_toggle_fullscreen() and not mock.is_fullscreen(), "the mock starts toggleable, not fullscreen")
+	var entered := Response.from_dict(await mock.request_fullscreen())
+	_check(entered.success and entered.fullscreen and mock.is_fullscreen(), "request_fullscreen goes fullscreen")
+	var still := Response.from_dict(await mock.request_fullscreen())
+	_check(still.success and still.fullscreen, "asking for the state it is in succeeds")
+	mock.fullscreen = false
+	_check(changes == [true, false], "fullscreen_changed reports the game's change and the player's, once each")
+	mock.fullscreen_toggleable = false
+	mock.fullscreen = true
+	var phone_exit := Response.from_dict(await mock.exit_fullscreen())
+	_check(not phone_exit.success and phone_exit.fullscreen and phone_exit.error == "A phone always plays fullscreen", "a phone refuses exit_fullscreen")
+	var phone_request := Response.from_dict(await mock.request_fullscreen())
+	_check(phone_request.success and not mock.can_toggle_fullscreen(), "a phone answers a request with its state")
+	mock.fullscreen_toggleable = true
+	mock.fullscreen = false
+
+	# Settings: the mute toggle, and CouchGames.game relaying it.
+	var files: Node = GameFiles.new()
+	files.setup(mock)
+	var seen: Array = []
+	files.settings_changed.connect(func(settings: Dictionary) -> void: seen.append(settings))
+	_check(files.settings == {"muteAudio": false}, "muteAudio starts false")
+	mock.mute_audio = true
+	mock.mute_audio = true
+	_check(seen == [{"muteAudio": true}] and files.settings == {"muteAudio": true}, "settings_changed reports each change once, through CouchGames.game")
+	var copy: Dictionary = files.settings
+	copy["muteAudio"] = false
+	_check(files.settings.muteAudio == true, "settings is a fresh copy on each read")
+	mock.mute_audio = false
+	files.free()
+
+	# A platform build without the calls.
+	var bare: Node = Backend.new()
+	var unavailable := Response.from_dict(bare.request_fullscreen())
+	_check(not unavailable.success and unavailable.error == "Not available" and not unavailable.fullscreen, "a backend without the calls answers Not available")
+	_check(not bare.is_fullscreen() and not bare.can_toggle_fullscreen() and bare.get_settings() == {"muteAudio": false}, "and reads false")
+	bare.free()
+	_check(Backend._settings_from({"muteAudio": "yes"}) == {"muteAudio": false}, "a muteAudio that isn't a bool reads false")
+
 	# The platform's own shapes, as they cross the JS bridge (numbers as floats).
+	var refused := Response.from_dict({"success": false, "message": "Fullscreen needs the player's tap or click", "fullscreen": false})
+	_check(not refused.success and refused.error == "Fullscreen needs the player's tap or click", "a refused request carries the platform's message")
+	_check(Response.from_dict({"success": true, "message": "", "fullscreen": true}).fullscreen, "fullscreen reads the platform's fullscreen")
 	var platform := Response.from_dict({"success": true, "message": "", "alreadyCompleted": true})
 	_check(platform.already_completed, "already_completed reads the platform's alreadyCompleted")
 	var platform_flush := Response.from_dict({"success": true, "persisted": true, "flushed": 2.0, "message": ""})

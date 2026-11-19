@@ -56,6 +56,10 @@ var already_unlocked: bool = false
 ## flush_saves() only: how many saves it sent (0 when none were waiting).
 var flushed: int = 0
 
+## request_fullscreen() and exit_fullscreen() only: whether the game is
+## fullscreen after the call.
+var fullscreen: bool = false
+
 static func from_dict(response: Dictionary) -> CouchGamesSDKResponse:
 	var res = new()
 	res.success = response.get("success", false)
@@ -111,5 +115,7 @@ static func from_dict(response: Dictionary) -> CouchGamesSDKResponse:
 	res.already_unlocked = already_unlocked if already_unlocked is bool else false
 	var flushed: Variant = response.get("flushed", 0)
 	res.flushed = int(flushed) if (flushed is int or flushed is float) else 0
+	var fullscreen: Variant = response.get("fullscreen", false)
+	res.fullscreen = fullscreen if fullscreen is bool else false
 
 	return res
