@@ -316,7 +316,11 @@ func _membership_events() -> void:
 	guest_provider.peer_failed.emit(provider.user_id, "broken")
 	guest_provider.peer_failed.emit(provider.user_id, "still-broken")
 	check(gap_stops == ["steam-link-gap"], "repeated link failures emit one inactive guest stop")
-	check(not guest_session.send_intent({"action": "stale"}), "broken link blocks stale guest gameplay")
+	# A short break: the intent is held (CouchSessionPolicy.intent_hold_ms) and
+	# sent after the fresh baseline, never before it.
+	check(guest_session.send_intent({"action": "held"}), "intent during a short link break is held")
+	host.poll(Time.get_ticks_msec())
+	check(intents.size() == 1, "held intent is not sent over the broken link")
 	for step in range(6):
 		host.poll(Time.get_ticks_msec())
 		guest.poll(Time.get_ticks_msec())
@@ -325,7 +329,7 @@ func _membership_events() -> void:
 	check(hellos.size() > hellos_before and snapshots.size() > 1, "peer gap requires fresh hello and baseline")
 	check(guest_session.send_intent({"action": "fresh"}), "guest resumes after recovered baseline")
 	host.poll(Time.get_ticks_msec())
-	check(intents.size() == 2 and intents[1][0].action == "fresh", "stale action never replayed after recovery")
+	check(intents.size() == 3 and intents[1][0].action == "held" and intents[2][0].action == "fresh", "held intent arrives after the baseline, before later ones")
 	session.hello_received.disconnect(on_hello)
 	picked.transport.envelope_received.disconnect(session._on_envelope_received)
 	picked.transport.transport_gap.disconnect(session._on_transport_gap)

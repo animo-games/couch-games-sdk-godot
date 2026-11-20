@@ -91,6 +91,28 @@
 ##
 ## Every `send_*` return means "accepted for send", never "delivered". There is
 ## no acknowledgement anywhere in this layer; see netcode/transport.gd.
+##
+## Held intents (guest side, step 5b of docs/plans/standard-connection-design.md).
+## The room holds lobby events through a drop; the star does not, so an intent
+## sent while a guest's link is down used to be lost, and so did one sent while
+## the session waited for the snapshot after a link reset. A guest holding an
+## input slot now holds those intents (CouchSessionPolicy.intent_hold_limit,
+## in order) and sends them right after the next snapshot it accepts. Not
+## earlier: the host drops a reset guest's intents until its resync hello
+## (handshake-required), and the snapshot that answers that hello is the first
+## proof the host will take them. Only for a short blip: an intent held longer
+## than CouchSessionPolicy.intent_hold_ms (3 s by default, 0 = off) is dropped
+## as "expired", since an action from a long outage would land in a world that
+## has moved on. A held intent counts as accepted for send, so
+## send_intent returns true; a full hold returns false. While anything is held
+## a new intent queues behind it, so nothing is reordered. A transport refusal
+## costs no sequence number, so the replay opens no gap at the host. The hold
+## is dropped, and `held_intents_dropped` says so, when it expires, when the session stops, when
+## the host's epoch changes (the intents were for a world the host no longer
+## has) and when the guest comes back without a slot. Inputs are never held:
+## the next input supersedes them. Not covered: an intent the transport took
+## (put_packet before the engine noticed the dead link) and lost, and one sent
+## in the round trip between the host noticing a reset and the guest hearing it.
 class_name CouchSession
 extends RefCounted
 
@@ -108,6 +130,7 @@ signal rejected(reason: String, sender_id: String)  # observability for malforme
 signal player_joined(peer_id: String, slot: int)    # host side, multi-player mode: a guest took an input slot
 signal player_left(peer_id: String, slot: int)      # host side, multi-player mode: a slotted guest left
 signal local_slot_changed(old_slot: int, new_slot: int)  # guest side: host moved my slot mid-session
+signal held_intents_dropped(count: int, reason: String)  # guest side: held intents that will never be sent
 
 const SLOT_HOST := 0
 const SLOT_GUEST := 1   # the first guest slot; multi mode uses 1..max_input_players
@@ -167,6 +190,11 @@ var rejected_count: int:  # for the milestone report
 	get:
 		return _rejected_count
 
+## Guest side: intents waiting for the link or the resync snapshot.
+var held_intent_count: int:
+	get:
+		return _held_intents.size()
+
 ## True once a CouchConnection (or a standard driver) reports this session's
 ## connection. A session started without one warns once per run, in a game
 ## (the CouchGames autoload is present), never in a headless fixture.
@@ -204,6 +232,12 @@ var _next_hello_retry_ms: int = 0
 var _last_hello_state_request_ms: Dictionary = {}   # sender_id -> int, host-side rate limit
 var _warned_reserved_kind: bool = false             # at most one push_warning per session
 var _connection_bound: bool = false
+var _intent_hold_limit: int = 256
+var _intent_hold_ms: int = 3000
+var _held_intents: Array = []                       # guest: [{body, at_ms}], oldest first
+## Guest: this session had a slot when its link was reset, so intents sent
+## before the session is live again are held rather than refused.
+var _hold_ok: bool = false
 static var _warned_hand_wired: bool = false         # once per run, across sessions
 
 
@@ -213,6 +247,8 @@ func _init(roster: Object, transport: Object, policy: CouchSessionPolicy = null)
 	if policy == null:
 		policy = CouchSessionPolicy.default_policy()
 	_max_input_players = maxi(1, policy.max_input_players)
+	_intent_hold_limit = maxi(0, policy.intent_hold_limit)
+	_intent_hold_ms = maxi(0, policy.intent_hold_ms)
 	if not _implements_roster(roster):
 		push_error("CouchSession: roster does not satisfy the required duck contract")
 		return
@@ -307,6 +343,7 @@ func evaluate(now_ms: int) -> void:
 ## Call every frame; drives the guest hello retry.
 func poll(now_ms: int) -> void:
 	_now_ms = now_ms
+	_expire_held_intents()
 	if _engaged and _is_host and now_ms >= _next_hello_retry_ms and not _peer_handshakes.is_empty():
 		_next_hello_retry_ms = now_ms + HELLO_RETRY_MS
 		for peer_id in _peer_handshakes.keys():
@@ -338,10 +375,20 @@ func stop(reason: String) -> void:
 	_next_hello_retry_ms = 0
 	_last_hello_state_request_ms.clear()
 	_warned_reserved_kind = false
+	_drop_held_intents(reason)
 	session_stopped.emit(reason)
 
 
 func send_intent(body: Dictionary) -> bool:
+	if _is_host or not _engaged:
+		return _send(CouchEnvelope.KIND_INTENT, body, false)
+	var live := _active and not _baseline_pending and _local_slot >= SLOT_GUEST
+	if live and _held_intents.is_empty():
+		if _send_intent_now(body):
+			return true
+		return _hold_intent(body)
+	if live or (_hold_ok and (not _active or _baseline_pending)):
+		return _hold_intent(body)
 	return _send(CouchEnvelope.KIND_INTENT, body, false)
 
 
@@ -620,6 +667,8 @@ func _on_hello_at_guest(body: Dictionary) -> void:
 	_peer_name = str(body.get("name", ""))
 	if _active and new_slot != old_slot:
 		local_slot_changed.emit(old_slot, new_slot)
+	if new_slot < SLOT_GUEST:
+		_drop_held_intents("slot-lost")
 	if not _active:
 		_active = true
 		_warn_if_hand_wired()
@@ -791,6 +840,7 @@ func _dispatch(kind: String, envelope: Dictionary, sender_id: String) -> void:
 		CouchEnvelope.KIND_SNAPSHOT:
 			_baseline_pending = false
 			snapshot_received.emit(body)
+			_flush_held_intents()
 
 
 ## Guest-only. Ends the current session WITHOUT disengaging, so the very next
@@ -807,6 +857,11 @@ func _dispatch(kind: String, envelope: Dictionary, sender_id: String) -> void:
 ## restarting at 1 against a receiver already at N wedges on epoch churn.
 func _restart_as_guest(reason: String) -> void:
 	var was_active := _active
+	if reason in [STOP_STEAM_LINK_GAP, STOP_LINK_RESET]:
+		if was_active and _local_slot >= SLOT_GUEST:
+			_hold_ok = true
+	else:
+		_drop_held_intents(reason)
 	_active = false
 	_local_slot = SLOT_SPECTATOR
 	_peer_name = ""
@@ -895,6 +950,63 @@ func _send(kind: String, body: Dictionary, requires_host: bool) -> bool:
 	if _is_host:
 		return _transport.broadcast(envelope)
 	return _transport.send_to_authority(envelope)
+
+
+## Guest: one intent straight to the host. The sequence number is spent only
+## if the transport takes the frame, so a refused send that is held and sent
+## later leaves no gap behind it.
+func _send_intent_now(body: Dictionary) -> bool:
+	var seq := int(_out_seq.get(CouchEnvelope.KIND_INTENT, 0)) + 1
+	var envelope := CouchEnvelope.make(CouchEnvelope.KIND_INTENT, _epoch, seq, body)
+	if not _transport.send_to_authority(envelope):
+		return false
+	_out_seq[CouchEnvelope.KIND_INTENT] = seq
+	return true
+
+
+func _hold_intent(body: Dictionary) -> bool:
+	if _intent_hold_ms <= 0 or _held_intents.size() >= _intent_hold_limit:
+		return false
+	_held_intents.append({"body": body.duplicate(true), "at_ms": _now_ms})
+	_hold_ok = true
+	return true
+
+
+## Guest: send what is held, oldest first, once the session is live with a
+## fresh baseline. Stops at the first refusal and keeps the rest.
+func _flush_held_intents() -> void:
+	if _held_intents.is_empty() or _is_host or not _engaged:
+		return
+	# Called only from a snapshot, which has just cleared the baseline. A slot
+	# is only ever lost in a hello, which drops the hold itself. An inactive
+	# guest has no hold today (a new epoch drops it, a link reset keeps the
+	# session active); the check keeps it that way if that ever changes.
+	if not _active:
+		return
+	while not _held_intents.is_empty():
+		if not _send_intent_now(_held_intents[0]["body"]):
+			return
+		_held_intents.pop_front()
+
+
+## Drop held intents older than intent_hold_ms. The hold stays armed: the
+## guest may still be inside the same outage.
+func _expire_held_intents() -> void:
+	var expired := 0
+	while not _held_intents.is_empty() and _now_ms - int(_held_intents[0]["at_ms"]) > _intent_hold_ms:
+		_held_intents.pop_front()
+		expired += 1
+	if expired > 0:
+		held_intents_dropped.emit(expired, "expired")
+
+
+func _drop_held_intents(reason: String) -> void:
+	_hold_ok = false
+	if _held_intents.is_empty():
+		return
+	var count := _held_intents.size()
+	_held_intents.clear()
+	held_intents_dropped.emit(count, reason)
 
 
 # --- Duck-typed roster field access ----------------------------------------------

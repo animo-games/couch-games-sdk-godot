@@ -31,7 +31,9 @@ Lobby events (everything sent with `CouchGames.lobby.send_event`, including the
 `CouchLobbyTransport` session traffic) are held through a drop and delivered in
 order when the player is back. Two exceptions: a reload loses the reloading
 tab's own unsent events, and a queue past 256 events or about 48,000 characters
-is dropped. Messages over your own WebRTC connection are not held.
+is dropped. The platform doesn't hold messages over WebRTC. For a guest's
+intents the SDK does that itself (see
+[Intents sent during a drop](#intents-sent-during-a-drop)).
 
 ## Your game's settings
 
@@ -62,6 +64,10 @@ With `CouchSession` (see [Sessions](../README.md#sessions)):
   again and sends it a fresh baseline. The guest's session emits
   `session_stopped("link-reset")`, then `session_started`, and sends no gameplay
   until the next snapshot arrives. Other players are not affected.
+- **A guest's intents survive a short drop.** An intent your guest sends while
+  its link is down, or while it waits for the resync snapshot, is held for up to
+  3 seconds and sent in order right after that snapshot. See
+  [Intents sent during a drop](#intents-sent-during-a-drop).
 - **A restarted guest is heard.** A guest whose game reloaded comes back with its
   message counters at 1. The resync makes the host accept them instead of
   rejecting them as duplicates.
@@ -265,9 +271,72 @@ join one guest from a browser with WebRTC switched off (Firefox:
    already acts on the reasons that matter. Log gaps if you want to compare
    connections, but don't stop or restart anything on one.
 
-5. **Don't draw your own reconnecting or away notices on the web.** The built-in
+5. **Apply a guest's intents against the world as it is now.** A held intent
+   arrives after the resync snapshot, up to `intent_hold_ms` late. One sent over
+   the lobby tunnel can arrive up to the platform's 60 seconds late, because the
+   room holds tunnel messages itself.
+   Check it against the current world the way you check any intent ("is that
+   tile still free?"), and drop it when it no longer makes sense.
+
+6. **Don't draw your own reconnecting or away notices on the web.** The built-in
    overlay already stands back there. If you draw your own, check
    `connection.platform_ui` and do the same.
+
+### Intents sent during a drop
+
+Some messages are lost while a guest's link is down. The room holds the lobby
+tunnel's messages, but a WebRTC link that died loses everything sent over it.
+The host also ignores a reset guest's intents until that guest's resync hello.
+So a guest's `CouchSession` holds the intents it can't send, for a short blip
+only. An action from a long outage would land in a world that has moved on and
+surprise everyone, so it is dropped instead.
+
+- **What is held:** an intent from a guest with an input slot, when the
+  transport refuses it (the link is down) or when the session is waiting for
+  the snapshot after a link reset. `send_intent` returns `true`: the intent is
+  accepted and will be sent.
+- **When it's sent:** right after the next snapshot the guest accepts, oldest
+  first, before anything sent later. A guest with something held queues new
+  intents behind it, so nothing is reordered. The replay costs no sequence
+  numbers, so the host sees no gap.
+- **How long:** `CouchSessionPolicy.intent_hold_ms`, 3000 by default. An intent
+  held longer is dropped as `expired` and never sent. Set it to `0` to turn
+  holding off completely.
+- **How many:** `CouchSessionPolicy.intent_hold_limit`, 256 by default. When
+  the hold is full, `send_intent` returns `false` and that intent is lost.
+- **When it's dropped:** `held_intents_dropped(count, reason)` fires and those
+  intents are never sent. The reason is `expired` when they were held too long,
+  the session's stop reason when the session stops,
+  `host-restarted` when the host comes back with a new epoch (those intents
+  were for a world the host no longer has), or `slot-lost` when the guest comes
+  back without an input slot. Show the player that their last actions didn't go
+  through if that matters in your game.
+- **Inputs are not held.** `send_input` still returns `false` on a dead link.
+  Input is state, and the next input replaces it, so send what the player is
+  doing now, not what they did during the drop.
+- **Not covered:** an intent the transport accepted just before it noticed the
+  link was dead, and one sent in the moment between the host noticing a reset
+  and the guest hearing about it. Both are lost, as before. Make an intent that
+  must not be lost idempotent and re-send it until the world shows it applied.
+
+```gdscript
+var policy := CouchSessionPolicy.new()
+policy.intent_hold_ms = 1000               # a fast game: only replay a 1 s blip
+# policy.intent_hold_ms = 0                # or turn holding off
+_session = CouchSession.new(CouchGames.lobby, _transport, policy)
+_session.held_intents_dropped.connect(func(count: int, reason: String) -> void:
+    _hud.toast("%d action(s) didn't reach the host (%s)" % [count, reason]))
+```
+
+`session.held_intent_count` tells you how many are waiting, for a HUD hint
+while the player is reconnecting.
+
+To try it: there's little to see in the editor. Every guest there is on the
+tunnel, which doesn't refuse sends, and the resync window after a reconnect
+lasts about one round trip. To see a dead WebRTC link,
+play a web export on the platform and cut the guest's network for a few
+seconds while it keeps sending. Every case is played headless by
+`netcode/fixtures/run_intent_hold.gd`.
 
 ### Drop-in, drop-out
 
@@ -346,6 +415,15 @@ The lobby's own states (Steam) count too: `reconnecting` is `reconnecting`
 | `roster-too-small` | Fewer than two players are left | Drop-in: keep the world and wait; otherwise end the match |
 | `role-changed` | This client's host/guest role changed | Rebuild from the new session |
 | `lobby-unavailable` | The lobby went away | End the match |
+
+### Held intents dropped (`held_intents_dropped(count, reason)`)
+
+| Reason | Meaning |
+|---|---|
+| `expired` | Held longer than `intent_hold_ms` |
+| A stop reason (`left`, `host-left`, `role-changed`, ...) | The guest's session stopped |
+| `host-restarted` | The host came back with a new epoch |
+| `slot-lost` | The guest came back without an input slot |
 
 ### Link gaps (`transport_gap(peer_id, reason)`)
 
