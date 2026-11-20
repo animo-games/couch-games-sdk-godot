@@ -59,8 +59,9 @@ const OVERLAY_DELAY_MS := 1000
 
 ## Guest session stops that mean "the session is being rebuilt", not "over".
 const RESYNC_STOPS := ["link-reset", "host-restarted", "steam-link-gap", "role-changed"]
-## Host session stops that leave a host's world running.
-const HOST_STAYS_LIVE_STOPS := ["roster-too-small", "authorized-peer-left"]
+## Host session stops that leave a host's world running. "reroute" is the
+## driver's stop before CouchRoutedTransport.apply_pending_reroutes().
+const HOST_STAYS_LIVE_STOPS := ["roster-too-small", "authorized-peer-left", "reroute"]
 
 ## The backend this runs on: "web", "steam", "local", "mock" or "". Read from
 ## the CouchGames autoload at bind() when empty. "web" means the platform draws

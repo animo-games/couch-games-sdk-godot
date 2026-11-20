@@ -65,6 +65,7 @@ func _run() -> void:
 	await _check_star_blocked(available)
 	await _check_star_probe_disabled(available)
 	await _check_auto(available)
+	await _check_routed(available)
 
 	print("")
 	if _failed:
@@ -257,6 +258,54 @@ func _check_auto(available: bool) -> void:
 
 
 # ---------------------------------------------------------------------------
+
+
+## PREFER_ROUTED never refuses for WebRTC: every failure gives a routed
+## transport without a star, which the host puts on the tunnel. Only
+## require_datagram refuses. In a build without WebRTC every case is the
+## tunnel-only one, which is exactly what such a build must get.
+func _check_routed(available: bool) -> void:
+	_expect(CouchSessionTransport.resolve_kind(CouchSessionTransport.PREFER_ROUTED), CouchSessionTransport.KIND_ROUTED, "resolve_kind(routed) == routed in every build")
+
+	var ok := _new_pair({"userId": "host", "username": "Host", "role": "host"})
+	ok.backend.connect_result = {"success": true, "payload": {"peerId": "host", "roomId": "room", "iceServers": []}}
+	var picked: Dictionary = await CouchSessionTransport.pick(ok.lobby, ok.webrtc, CouchSessionTransport.PREFER_ROUTED)
+	_expect(picked.kind, CouchSessionTransport.KIND_ROUTED, "routed: kind == routed")
+	_expect(picked.transport is CouchRoutedTransport, true, "routed: transport is a CouchRoutedTransport")
+	_expect(CouchTransport.implements(picked.transport), true, "routed: the transport satisfies CouchTransport")
+	_expect(picked.transport.has_star, available, "routed: a star exactly when this build has WebRTC")
+	_expect(picked.transport.probe_reason, "" if available else CouchSessionTransport.ERROR_NO_WEBRTC, "routed: no-star reason names the build")
+	picked.transport.close()
+	_expect(ok.webrtc.is_signaling_connected, false, "routed: close() releases signaling")
+	_free_pair(ok)
+
+	var bad := _new_pair({"userId": "host", "username": "Host", "role": "host"})
+	bad.backend.connect_result = {"success": false, "error": "injected connect failure"}
+	picked = await CouchSessionTransport.pick(bad.lobby, bad.webrtc, CouchSessionTransport.PREFER_ROUTED)
+	_expect(picked.kind, CouchSessionTransport.KIND_ROUTED, "routed, connect fails: still routed, never refused")
+	_expect(picked.transport.has_star, false, "routed, connect fails: no star")
+	_expect(picked.transport.probe_reason, "injected connect failure" if available else CouchSessionTransport.ERROR_NO_WEBRTC, "routed, connect fails: the reason rides along")
+	_expect(bad.webrtc.is_signaling_connected, false, "routed, connect fails: signaling is not left connected")
+	picked.transport.close()
+	_free_pair(bad)
+
+	var blocked := _new_pair({"userId": "host", "username": "Host", "role": "host"})
+	blocked.backend.connect_result = {"success": true, "payload": {"peerId": "host", "roomId": "room", "iceServers": UNREACHABLE_ICE}}
+	picked = await CouchSessionTransport.pick(blocked.lobby, blocked.webrtc, CouchSessionTransport.PREFER_ROUTED, 1500)
+	_expect(picked.kind, CouchSessionTransport.KIND_ROUTED, "routed, probe blocked: still routed")
+	_expect(picked.transport.has_star, false, "routed, probe blocked: no star")
+	_expect(picked.transport.probe_reason, "webrtc-blocked:no-route" if available else CouchSessionTransport.ERROR_NO_WEBRTC, "routed, probe blocked: webrtc-blocked:<reason>")
+	_expect(blocked.webrtc.is_signaling_connected, false, "routed, probe blocked: signaling was released")
+	picked.transport.close()
+	_free_pair(blocked)
+
+	var strict := _new_pair({"userId": "host", "username": "Host", "role": "host"})
+	strict.backend.connect_result = {"success": true, "payload": {"peerId": "host", "roomId": "room", "iceServers": UNREACHABLE_ICE}}
+	picked = await CouchSessionTransport.pick(strict.lobby, strict.webrtc, CouchSessionTransport.PREFER_ROUTED, 1500, true)
+	_expect(picked.kind, CouchSessionTransport.KIND_NONE, "routed + require_datagram, no star: refused")
+	_expect(picked.transport, null, "routed + require_datagram, no star: no transport")
+	_expect(picked.error, "webrtc-blocked:no-route" if available else CouchSessionTransport.ERROR_NO_WEBRTC, "routed + require_datagram: the reason is the refusal")
+	_free_pair(strict)
 
 
 class _Pair extends RefCounted:

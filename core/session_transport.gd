@@ -57,9 +57,16 @@ extends RefCounted
 const PREFER_AUTO := "auto"
 const PREFER_STAR := "star"
 const PREFER_LOBBY := "lobby"
+## WebRTC per guest where it works, the lobby tunnel where it does not, assigned
+## by the host (CouchRoutedTransport). The one preference where a per-machine
+## fact (a blocked probe, a failed signaling join) is allowed to differ between
+## peers, because the host assigns each guest's wire before that guest's traffic
+## flows and never changes it in place. See docs/connections.md.
+const PREFER_ROUTED := "routed"
 
 const KIND_STAR := "star"
 const KIND_LOBBY := "lobby"
+const KIND_ROUTED := "routed"
 const KIND_NONE := "none"
 
 ## Refusal reasons this file mints itself. A star whose start() fails is refused
@@ -83,6 +90,8 @@ static func resolve_kind(prefer: String = PREFER_AUTO) -> String:
 	match prefer:
 		PREFER_LOBBY:
 			return KIND_LOBBY
+		PREFER_ROUTED:
+			return KIND_ROUTED
 		PREFER_STAR:
 			return KIND_STAR if CouchStarTransport.is_webrtc_available() else KIND_NONE
 		PREFER_AUTO:
@@ -110,7 +119,14 @@ static func resolve_kind(prefer: String = PREFER_AUTO) -> String:
 ## signaling node (CouchGames.webrtc); it is only touched on the star path.
 ##
 ## `probe_timeout_ms` bounds the star's preflight probe; <= 0 skips it.
-static func pick(lobby: Object, webrtc: CouchWebRTC, prefer: String = PREFER_AUTO, probe_timeout_ms: int = CouchWebRTCProbe.DEFAULT_TIMEOUT_MS) -> Dictionary:
+##
+## PREFER_ROUTED never refuses for WebRTC: a build without it, a backend
+## without signaling, a failed join or a blocked probe all give a
+## CouchRoutedTransport with no star, and the host puts this player on the
+## tunnel. `require_datagram` (a game that cannot live with the tunnel's
+## latency) turns those back into refusals, and makes the host refuse a guest
+## that cannot use WebRTC.
+static func pick(lobby: Object, webrtc: CouchWebRTC, prefer: String = PREFER_AUTO, probe_timeout_ms: int = CouchWebRTCProbe.DEFAULT_TIMEOUT_MS, require_datagram: bool = false) -> Dictionary:
 	# Steam's backend contract fixes the session wire to lobby events, even when
 	# unrelated WebRTC extensions happen to be installed in the same project.
 	var kind: String
@@ -121,6 +137,8 @@ static func pick(lobby: Object, webrtc: CouchWebRTC, prefer: String = PREFER_AUT
 	match kind:
 		KIND_LOBBY:
 			return _picked(CouchLobbyTransport.new(lobby), KIND_LOBBY)
+		KIND_ROUTED:
+			return await _pick_routed(lobby, webrtc, probe_timeout_ms, require_datagram)
 		KIND_STAR:
 			if webrtc == null or not webrtc.is_available:
 				# Environment, not build: the backend has no signaling. Every
@@ -155,6 +173,37 @@ static func pick(lobby: Object, webrtc: CouchWebRTC, prefer: String = PREFER_AUT
 			if prefer == PREFER_STAR:
 				return _refuse(ERROR_NO_WEBRTC)
 			return _refuse("%s:%s" % [ERROR_UNKNOWN_PREFERENCE, prefer])
+
+
+static func _pick_routed(lobby: Object, webrtc: CouchWebRTC, probe_timeout_ms: int, require_datagram: bool) -> Dictionary:
+	var star: CouchStarTransport = null
+	var probe: Dictionary = {}
+	var reason := ""
+	if not CouchStarTransport.is_webrtc_available():
+		reason = ERROR_NO_WEBRTC
+	elif webrtc == null or not webrtc.is_available:
+		reason = ERROR_SIGNALING_UNAVAILABLE
+	else:
+		star = CouchStarTransport.new(CouchWebRTCSignalingSource.new(webrtc), lobby)
+		var res: Dictionary = await star.start()
+		if not bool(res.get("success", false)):
+			reason = str(res.get("error", "start-failed"))
+			star.close()
+			star = null
+		elif probe_timeout_ms > 0:
+			probe = await CouchWebRTCProbe.probe(webrtc.ice_servers, probe_timeout_ms)
+			if not bool(probe.get("ok", false)):
+				reason = "%s:%s" % [ERROR_WEBRTC_BLOCKED, probe.get("reason", "")]
+				star.close()
+				star = null
+	if star == null and require_datagram:
+		return _refuse(reason, probe)
+	var routed := CouchRoutedTransport.new(lobby, CouchLobbyTransport.new(lobby), star, {
+		"probe_ok": star != null,
+		"probe_reason": reason,
+		"require_datagram": require_datagram,
+	})
+	return _picked(routed, KIND_ROUTED, probe)
 
 
 static func _picked(transport: Object, kind: String, probe: Dictionary = {}) -> Dictionary:
