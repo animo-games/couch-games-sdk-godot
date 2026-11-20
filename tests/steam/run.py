@@ -63,6 +63,7 @@ renderer/rendering_method="gl_compatibility"
             ('tests/webrtc_signaling_reconnect_test.gd', 'WEBRTC_SIGNALING_RECONNECT_TEST: PASS', []),
             ('tests/webrtc_connection_handler_test.gd', 'WEBRTC_CONNECTION_HANDLER_TEST: PASS', []),
             ('tests/webrtc_probe_test.gd', 'WEBRTC_PROBE_TEST_OK', []),
+            ('tests/verbose_logging_test.gd', 'VERBOSE_LOGGING_TEST_OK', []),
             ('tests/local_lobby_smoke.gd', 'LOCAL_LOBBY_SMOKE: PASS', []),
         ]
         for script, marker, extra in checks:

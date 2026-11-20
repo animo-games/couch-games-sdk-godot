@@ -30,6 +30,11 @@ signal transport_failed(reason: String)
 @export var udp_first := false
 @export var udp_first_timeout_sec := 4.0
 
+## Console logging of connection lifecycle (the gen/ice-policy line) is off by
+## default so release builds stay silent; the game turns it on through
+## `CouchGames.set_verbose_logging`.
+static var verbose_logging := false
+
 const MAX_GEN := 1
 const MAX_PENDING_ICE := 64
 const RESTART_ANNOUNCE_INTERVAL_SEC := 1.0
@@ -314,8 +319,9 @@ func _create_peer_connection(pid: String, gen: int) -> bool:
 	var policy := "full"
 	if udp_first and gen == 0:
 		policy = "udp-only" if servers != _ice_servers else "udp-only(no-op)"
-	print("WebRTCMultiplayerConnection: %s gen=%d ice=%s (%d/%d servers)" % [
-		pid, gen, policy, servers.size(), _ice_servers.size()])
+	if verbose_logging:
+		print("WebRTCMultiplayerConnection: %s gen=%d ice=%s (%d/%d servers)" % [
+			pid, gen, policy, servers.size(), _ice_servers.size()])
 	if local_peer_id < pid:
 		pc.create_offer()
 	_start_connect_timeout(pid)
