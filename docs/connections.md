@@ -355,11 +355,61 @@ export on the platform exercises WebRTC routes. To see a mixed lobby there,
 join one guest from a browser with WebRTC switched off (Firefox:
 `media.peerconnection.enabled` set to `false` in `about:config`).
 
+## Rollback games: CouchRollbackAdapter
+
+A rollback game (two peers simulating the same world over WebRTC, like
+BiProduct) doesn't run a `CouchSession`, so the driver above doesn't apply.
+`CouchRollbackAdapter` gives it the same `CouchConnection` instead. It reads
+the rollback addon's `RollbackSessionController` and the
+`CouchWebRTCConnection` it runs on, and needs nothing else:
+
+```gdscript
+_controller.begin(_connection)              # your existing rollback setup
+
+_adapter = CouchRollbackAdapter.new()
+add_child(_adapter)
+_adapter.bind(_controller, _connection, CouchGames.lobby)
+_adapter.connection.state_changed.connect(_on_connection_state)
+```
+
+What players see, through `connection`:
+
+| The rollback stack | CouchConnection |
+|---|---|
+| The first segment starts | `live`, on both peers. There is no snapshot to wait for |
+| A later segment (a level transition) | Nothing changes |
+| The link drops and the addon rebuilds it (`peer_recovery_started`) | `reconnecting`, reason `link-rebuild`. The overlay shows "Reconnecting…" after a second |
+| The link is back (`peer_recovered`) | `live` |
+| The controller's `segment_failed`, or the link's `transport_failed` | `ended`: `host-left` if the other player was the host and has left the lobby, otherwise `connection-lost`. On the web, a host who left reads as away, as for every game |
+
+`failure_reason` keeps the rollback stack's own words for the failure (for
+example `session_failed: peer lost: <id>`), for your logs. Player states
+(`connected`, `away`, `gone`) come from the lobby as for any game. Set
+`platform`, `hold_ms`, `overlay_enabled` or `log_enabled` on the adapter
+before `bind()`; they're passed to its connection. Call `close()` when the
+local player leaves: the connection ends `left`. The adapter keeps running
+while the tree is paused.
+
+The connection only reports. Rollback itself still stalls, rebuilds the link
+(its own 15 s `recovery_timeout_sec`) and fails, exactly as before.
+
+Not covered yet:
+
+- **A player who reloads mid-match** comes back to a session that has
+  already failed. Putting them back in the match is the rejoin hook, a later
+  step.
+- **A link that lands on a TCP relay** (UDP blocked, TURN over TCP) isn't
+  reported. Rollback works there, but with in-order stalls.
+
+To try it, run your game's two-instance setup and watch the output: each
+peer prints `CouchConnection: connecting -> live` at the first segment.
+Every case is played headless by `netcode/fixtures/run_rollback_adapter.gd`.
+
 ## What your game must do
 
-1. **Use `CouchLobbySession`, or bind a `CouchConnection`** to your own
-   session, as above, and drive your match from its states instead of from
-   session stop reasons.
+1. **Use `CouchLobbySession`, `CouchRollbackAdapter`, or bind a
+   `CouchConnection`** to your own session, as above, and drive your match
+   from its states instead of from session stop reasons.
 
 2. **Answer every `hello_received` with a complete snapshot.** This is what a
    reconnecting or restarted guest waits for. A partial or delta snapshot leaves
@@ -505,6 +555,7 @@ These tables are for games that read the session directly. With a
 | Session stop | CouchConnection |
 |---|---|
 | `link-reset`, `host-restarted`, `steam-link-gap`, `role-changed` (guest) | `reconnecting` with that reason |
+| `link-rebuild` (`CouchRollbackAdapter`, both peers) | `reconnecting` with that reason |
 | `host-left` (guest) | Web: `reconnecting` (`host-away`). Elsewhere: `ended` (`host-left`) |
 | `roster-too-small` (guest) | Web: `reconnecting`. Elsewhere: `ended` (`connection-lost`) |
 | `roster-too-small`, `authorized-peer-left`, `reroute` (host) | Stays `live` |

@@ -57,8 +57,10 @@ const AWAY_QUIET_MS := 10_000
 ## A resync shorter than this never reaches the overlay.
 const OVERLAY_DELAY_MS := 1000
 
-## Guest session stops that mean "the session is being rebuilt", not "over".
-const RESYNC_STOPS := ["link-reset", "host-restarted", "steam-link-gap", "role-changed"]
+## Session stops that mean "the session is being rebuilt", not "over".
+## "link-rebuild" is CouchRollbackAdapter's: the rollback addon is rebuilding
+## the WebRTC link, and both peers stall until it is back.
+const RESYNC_STOPS := ["link-reset", "host-restarted", "steam-link-gap", "role-changed", "link-rebuild"]
 ## Host session stops that leave a host's world running. "reroute" is the
 ## driver's stop before CouchRoutedTransport.apply_pending_reroutes().
 const HOST_STAYS_LIVE_STOPS := ["roster-too-small", "authorized-peer-left", "reroute"]
@@ -151,6 +153,13 @@ func bind(session: Object, lobby: Object = null) -> void:
 	_log("bound (%s, hold %d ms)" % [platform if not platform.is_empty() else "no backend", hold_ms])
 
 
+## Ends now with connection-lost, for a driver that learns the connection is
+## over before any session started (a session stop is ignored while
+## connecting). Keeps the session and lobby.
+func fail() -> void:
+	_end(END_CONNECTION_LOST)
+
+
 ## Ends with `left`: the local player is done. Lets go of the session and lobby.
 func close() -> void:
 	_end(END_LEFT)
@@ -223,7 +232,9 @@ func _on_session_started(_epoch: int, is_host_role: bool, _slot: int, peer_id: S
 			_host_id = peer_id
 		if not peer_name.is_empty():
 			_host_name = peer_name
-		_has_baseline = false
+		# A session that says it has no baseline (CouchRollbackAdapter) is
+		# playing from its start; every other guest waits for a snapshot.
+		_has_baseline = _session != null and _session.get("baseline_required") == false
 	_settle()
 
 
