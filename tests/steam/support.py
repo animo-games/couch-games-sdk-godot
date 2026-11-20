@@ -88,6 +88,18 @@ def run(command, project, marker=None, timeout=90, log=None):
     return output
 
 
+def missing_uids():
+    """Tracked scripts with no tracked .uid beside them. Godot 4.4+ writes a
+    missing one on import, so a consumer that carries this repo as a submodule
+    (BiProduct) would show it dirty after every import. A folder that is its
+    own Godot project is not scanned by the parent, so it is skipped."""
+    tracked = subprocess.run(['git', 'ls-files'], cwd=SDK, capture_output=True, text=True, check=True).stdout.splitlines()
+    files = set(tracked)
+    nested = [str(Path(f).parent) + '/' for f in tracked if f.endswith('/project.godot')]
+    return sorted(f for f in tracked if f.endswith('.gd') and f + '.uid' not in files
+                  and not any(f.startswith(n) for n in nested))
+
+
 def check_engine(godot):
     output = subprocess.check_output([str(godot), '--version'], text=True).strip()
     if output != STEAM_LOCK['godot']:

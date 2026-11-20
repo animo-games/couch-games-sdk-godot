@@ -4,7 +4,7 @@ import argparse
 from pathlib import Path
 import shutil
 import tempfile
-from support import LOCK, SDK, check_engine, extract, fixture_digest, run, stage_sdk, verify, register_extensions
+from support import LOCK, SDK, check_engine, extract, fixture_digest, missing_uids, run, stage_sdk, verify, register_extensions
 
 
 def main():
@@ -15,6 +15,9 @@ def main():
     parser.add_argument('--webrtc-zip', type=Path)
     parser.add_argument('--logs', type=Path)
     args = parser.parse_args()
+    missing = missing_uids()
+    if missing:
+        raise RuntimeError('Scripts without a tracked .uid (import the project and commit the generated files): ' + ', '.join(missing))
     check_engine(args.godot)
     if args.regressions:
         if not args.fixtures or not args.webrtc_zip:
