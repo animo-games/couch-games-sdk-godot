@@ -129,8 +129,9 @@ static func resolve_kind(prefer: String = PREFER_AUTO) -> String:
 static func pick(lobby: Object, webrtc: CouchWebRTC, prefer: String = PREFER_AUTO, probe_timeout_ms: int = CouchWebRTCProbe.DEFAULT_TIMEOUT_MS, require_datagram: bool = false) -> Dictionary:
 	# Steam's backend contract fixes the session wire to lobby events, even when
 	# unrelated WebRTC extensions happen to be installed in the same project.
+	# Routing is for Couch's web players; on Steam it is the same lobby wire.
 	var kind: String
-	if prefer == PREFER_AUTO and lobby.has_method("get_backend_name") and lobby.get_backend_name() == "steam":
+	if prefer in [PREFER_AUTO, PREFER_ROUTED] and lobby.has_method("get_backend_name") and lobby.get_backend_name() == "steam":
 		kind = KIND_LOBBY
 	else:
 		kind = resolve_kind(prefer)

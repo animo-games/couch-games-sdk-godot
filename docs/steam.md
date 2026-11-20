@@ -259,11 +259,14 @@ procedure in `fixtures/steam/README.md` exercises the retained-local-match case.
 
 ### Session helper: `CouchLobbySession`
 
-`CouchLobbySession` is an opt-in node for the common host/guest game. It owns the
-lobby transport and `CouchSession`, polls them, re-evaluates on lobby and roster
-changes, and applies the baseline rules: the host answers each guest hello with
-a snapshot and publishes one when its own session starts. Games that need
-finer control keep using `CouchSession` directly.
+`CouchLobbySession` is the standard driver for host/guest games
+([docs/connections.md](connections.md#couchlobbysession-the-standard-driver)).
+It picks the transport, owns `CouchSession` and a `CouchConnection`, polls
+them, re-evaluates on lobby and roster changes, and applies the baseline
+rules: the host answers each guest hello with a snapshot and publishes one
+when its own session starts. On Steam it always uses the lobby wire (Steam's
+own networking), even though its default preference is routed. Games that
+need finer control keep using `CouchSession` directly.
 
 ```gdscript
 var net := CouchLobbySession.new()
@@ -276,9 +279,8 @@ net.start(CouchGames.lobby)               # or net.start() with the CouchGames a
 
 Host: call `net.send_snapshot(state)` after each accepted change. Guest: call
 `net.send_intent(action)`; the host alone decides shared changes. `is_host()`,
-`is_active()`, and `session` (the underlying `CouchSession`) are available.
-`session_started`, `session_stopped(reason)`, `rejected`, and `transport_gap`
-are forwarded. `stop()` also runs on exit.
+`is_active()`, `session` (the underlying `CouchSession`) and `connection` are
+available, and the session's signals are forwarded. `stop()` also runs on exit.
 
 ### Steam project settings
 

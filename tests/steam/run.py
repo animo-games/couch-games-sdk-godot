@@ -57,6 +57,7 @@ renderer/rendering_method="gl_compatibility"
             ('netcode/fixtures/run_connection.gd', 'COUCH_CONNECTION_OK:', []),
             ('netcode/fixtures/run_routed_session.gd', 'COUCH_ROUTED_SESSION_OK:', []),
             ('netcode/fixtures/run_intent_hold.gd', 'COUCH_INTENT_HOLD_OK:', []),
+            ('netcode/fixtures/run_lobby_driver.gd', 'COUCH_LOBBY_DRIVER_OK:', []),
             ('netcode/fixtures/run_transport_faults.gd', 'total assertions: 0 failed', []),
             ('tests/session_transport_test.gd', 'SESSION_TRANSPORT_TEST_OK', []),
             ('tests/webrtc_signaling_reconnect_test.gd', 'WEBRTC_SIGNALING_RECONNECT_TEST: PASS', []),
