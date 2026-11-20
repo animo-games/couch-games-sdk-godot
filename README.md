@@ -528,10 +528,10 @@ func _process(_delta: float) -> void:
     _session.poll(now)
 ```
 
-`pick(lobby, webrtc, prefer, probe_timeout_ms)` returns `{transport, kind, error, probe}`. `prefer` is
-one of `CouchSessionTransport.PREFER_AUTO` (the default), `PREFER_STAR` or
-`PREFER_LOBBY`; `kind` reports what was built (`"star"`, `"lobby"`, or `"none"`
-on a refusal). `resolve_kind(prefer)` answers the same question without
+`pick(lobby, webrtc, prefer, probe_timeout_ms, require_datagram)` returns `{transport, kind, error, probe}`. `prefer` is
+one of `CouchSessionTransport.PREFER_AUTO` (the default), `PREFER_STAR`,
+`PREFER_LOBBY` or `PREFER_ROUTED`; `kind` reports what was built (`"star"`,
+`"lobby"`, `"routed"`, or `"none"` on a refusal). `resolve_kind(prefer)` answers the same question without
 building anything.
 
 **The choice is a function of the build, never of the moment.** `PREFER_AUTO`
@@ -551,6 +551,16 @@ reason, ship every export of a game with the same addons — a web build and a
 
 There is no switching mid-session. A different transport means a new session,
 constructed the same way.
+
+**`PREFER_ROUTED`** is the exception, and the way to keep a WebRTC-blocked
+player in the game. It builds a `CouchRoutedTransport`: the host assigns each
+guest its own wire before that guest's traffic flows, WebRTC where it works and
+the lobby tunnel where it doesn't, and never changes it in place. So a blocked
+probe or a failed signaling join is not a refusal there; that player gets the
+tunnel. Pass `require_datagram = true` for a game that can't live with the
+tunnel's latency, and those players are refused instead. How it works, how a
+dead link moves to the tunnel and what the tunnel costs:
+[docs/connections.md](docs/connections.md#routing-webrtc-where-it-works-the-tunnel-where-it-doesnt).
 
 **Preflight probe.** Starting a star only joins signaling, so a player whose
 browser or network blocks WebRTC so thoroughly that even TURN fails would get a

@@ -160,6 +160,88 @@ Each state change prints one line, such as
 `CouchConnection: live -> reconnecting (link-reset)`, and so does each player
 state change. Set `log_enabled = false` to silence it.
 
+## Routing: WebRTC where it works, the tunnel where it doesn't
+
+Some players can't use WebRTC at all: it's switched off in their browser, or
+their school or office network blocks it even through TURN. With
+`PREFER_STAR` they are refused. With `PREFER_ROUTED` they play over the lobby
+tunnel, and everyone else keeps WebRTC:
+
+```gdscript
+var picked: Dictionary = await CouchSessionTransport.pick(
+    CouchGames.lobby, CouchGames.webrtc, CouchSessionTransport.PREFER_ROUTED)
+_transport = picked.transport          # a CouchRoutedTransport; never refused for WebRTC
+_session = CouchSession.new(CouchGames.lobby, _transport)
+```
+
+Every player in a lobby must use the same preference, so ship it in the build.
+
+How it works:
+
+- Each guest tells the host whether WebRTC works on its machine. The host
+  assigns that guest a route: `star` (WebRTC) once its link is up, or `lobby`
+  (the tunnel) when the guest or the host can't use WebRTC, or when the link
+  hasn't come up 12 seconds after the guest's report.
+- The route is fixed. A guest's frames travel only on its route, and a frame
+  that arrives on the other wire is dropped and reported as a
+  `transport_gap(peer, "wrong-wire")`.
+- Until a guest has its route its session waits, then starts as usual.
+  `is_ready()` is true once every guest in the roster has acknowledged its
+  route. If you want a clean start, wait for it before your first `evaluate()`.
+- A guest that restarts, or a host that restarts, routes again on its own.
+
+**`require_datagram`.** Pass `true` as `pick()`'s fifth argument for a game that
+can't live with the tunnel's latency. That's typically a fast action game, and
+always a rollback one. A player who can't use WebRTC is then refused at
+`pick()`, or by the host, which emits `route_refused(reason)` on that guest's
+transport. Nobody is put on the tunnel.
+
+**A WebRTC link that dies for good.** When a star guest's link can't be rebuilt
+(`transport_gap(peer, "rebuild-exhausted")`), the transport doesn't move it in
+place, because changing a wire under a running session is what breaks it. It
+emits `reroute_pending(peer)` instead, and the move happens between sessions:
+
+```gdscript
+_transport.reroute_pending.connect(func(_peer: String) -> void:
+    _session.stop("reroute")               # ends this epoch
+    _transport.apply_pending_reroutes()    # the guest moves to the tunnel
+    _session.evaluate(Time.get_ticks_msec()))   # a new epoch on the new routes
+```
+
+Every guest then resyncs once (`syncing`, then `live` in `CouchConnection`).
+Under `require_datagram` the guest is refused instead.
+
+> Coming: `CouchLobbySession` will use the routed transport and do this for you.
+
+### What the tunnel costs
+
+Every frame to or from a tunnel guest goes through the platform's room, a
+Cloudflare Durable Object. There's no per-message limit there today, so the
+cost is volume. Each frame is one incoming WebSocket message to the room:
+per tunnel guest, that's your snapshot rate (the host sends that guest its own
+copy) plus the guest's input or intent rate. A 20 Hz snapshot with 20 Hz input
+is about 40 messages a second per tunnel guest. WebRTC guests cost the room
+nothing per frame. Check current Durable Objects pricing for what that volume
+bills at.
+
+`stats()` on the host's transport counts it for real:
+`{star: {sent, received}, lobby: {sent, received, bytes_sent}, dropped}`.
+Log it at the end of a match to see what your game actually sends. If tunnel
+volume matters, send tunnel guests fewer snapshots: `route_for(peer)` tells you
+which wire each guest is on.
+
+Latency is the other cost. A tunnel guest's frames travel through the room
+in order, so one slow frame holds up the ones behind it. That's fine for
+turn-based and slower games, and noticeable in fast ones.
+
+### Trying routing in the editor
+
+The local relay has no WebRTC, so in the editor every guest is routed to the
+tunnel. That's the path to test, and it's the one a blocked player gets. A web
+export on the platform exercises WebRTC routes. To see a mixed lobby there,
+join one guest from a browser with WebRTC switched off (Firefox:
+`media.peerconnection.enabled` set to `false` in `about:config`).
+
 ## What your game must do
 
 1. **Bind a `CouchConnection`** to your session, as above, and drive your
@@ -245,7 +327,7 @@ These tables are for games that read the session directly. With a
 | `link-reset`, `host-restarted`, `steam-link-gap`, `role-changed` (guest) | `reconnecting` with that reason |
 | `host-left` (guest) | Web: `reconnecting` (`host-away`). Elsewhere: `ended` (`host-left`) |
 | `roster-too-small` (guest) | Web: `reconnecting`. Elsewhere: `ended` (`connection-lost`) |
-| `roster-too-small`, `authorized-peer-left` (host) | Stays `live` |
+| `roster-too-small`, `authorized-peer-left`, `reroute` (host) | Stays `live` |
 | `stopped` (the driver's own stop) | `ended` (`left`) |
 | `lobby-unavailable`, anything else | `ended` (`connection-lost`) |
 
@@ -265,7 +347,7 @@ The lobby's own states (Steam) count too: `reconnecting` is `reconnecting`
 | `role-changed` | This client's host/guest role changed | Rebuild from the new session |
 | `lobby-unavailable` | The lobby went away | End the match |
 
-### Link gaps the session acts on (`transport_gap(peer_id, reason)`)
+### Link gaps (`transport_gap(peer_id, reason)`)
 
 | Reason | Raised by | Meaning |
 |---|---|---|
@@ -273,5 +355,9 @@ The lobby's own states (Steam) count too: `reconnecting` is `reconnecting`
 | `peer-rejoined` | Lobby and WebRTC transports | That peer left the roster and came back |
 | `link-rebuild` | WebRTC transport | The host rebuilt the peer's WebRTC link |
 | `steam:*` | Steam backend | A Steam link fact |
+| `rebuild-exhausted` | WebRTC transport | The host gave up rebuilding that peer's link. On the routed transport it also queues a re-route (`reroute_pending`) |
+| `wrong-wire`, `unrouted` | Routed transport | A frame arrived on a wire that isn't that peer's route, or from a peer with no route. Dropped, reported once per peer |
 
-Every other reason is diagnostic only.
+The session resyncs that guest on `peer-reconnected`, `peer-rejoined`,
+`link-rebuild` and `steam:*`. Every other reason, including the last two rows,
+is information only.

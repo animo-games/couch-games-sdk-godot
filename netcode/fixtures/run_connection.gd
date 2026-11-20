@@ -102,7 +102,7 @@ func _case_c1_host() -> void:
 	(u["s"] as _Session).session_started.emit(7, true, 0, "g1", "Gus")
 	_check(c.state == CouchConnection.STATE_LIVE, "C1 the host is live as soon as its session starts (got %s)" % c.state)
 	_check(c.is_host, "C1 the connection knows it hosts")
-	for reason in ["roster-too-small", "authorized-peer-left"]:
+	for reason in ["roster-too-small", "authorized-peer-left", "reroute"]:
 		(u["s"] as _Session).session_stopped.emit(reason)
 		_check(c.state == CouchConnection.STATE_LIVE, "C1 a host stays live through %s: its world runs on (got %s)" % [reason, c.state])
 	(u["s"] as _Session).session_started.emit(8, true, 0, "g2", "Gia")
