@@ -254,6 +254,15 @@ static func select_backend(requested: String, force_mock: bool, couch_detected: 
 	if not web and debug and local_enabled: return "local"
 	return "none"
 
+## Developer-facing console logging for the WebRTC layer (connection
+## lifecycle lines, NETPATH state transitions). Off by default so a release
+## build never writes to a player's console; games turn it on from their own
+## diagnostics flag. Recording/diagnostic APIs are unaffected.
+func set_verbose_logging(enabled: bool) -> void:
+	WebRTCMultiplayerConnection.verbose_logging = enabled
+	_PathProbe.set_console_logging(enabled)
+
+
 func _create_backend() -> CouchGamesBackend:
 	backend_name = select_backend(str(ProjectSettings.get_setting("couch_games/backend", "auto")), ProjectSettings.get_setting(_FORCE_MOCK_SETTING, false) or OS.get_cmdline_user_args().has("--couch-mock"), _WebBackend.detect(), OS.has_feature("web"), OS.has_feature("steam"), OS.is_debug_build(), ProjectSettings.get_setting(_LOCAL_ENABLED_SETTING, true))
 	match backend_name:
