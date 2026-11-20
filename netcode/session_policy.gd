@@ -22,6 +22,14 @@ var intent_hold_ms: int = 3000
 ## How many intents a guest holds at most. A full hold refuses the next intent
 ## (send_intent returns false). 0 also turns holding off.
 var intent_hold_limit: int = 256
+## Drop-in, drop-out: the game turned on both "Handles a guest leaving" and
+## "Takes mid-game arrivals" in the developer portal (docs/connections.md). With
+## max_input_players > 1, a host whose last guest leaves keeps its session up
+## and waiting instead of stopping "roster-too-small": the epoch and the world
+## carry on, the leaver's slot is freed (player_left), and the next arrival takes
+## a free slot (player_joined) under the same epoch. Ignored with one input slot,
+## where a pinned guest leaving still stops "authorized-peer-left".
+var drop_in: bool = false
 
 
 static func default_policy() -> CouchSessionPolicy:

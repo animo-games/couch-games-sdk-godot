@@ -76,19 +76,127 @@ With `CouchSession` (see [Sessions](../README.md#sessions)):
   roster row coming back from `"disconnected"`. One reconnect raises one
   `transport_gap(peer_id, "peer-reconnected")`, even when both report it.
 
+## CouchLobbySession: the standard driver
+
+For a host-authoritative game (the host runs the world, guests send intents or
+input and get snapshots), `CouchLobbySession` does all of the wiring in this
+guide for you. It picks the transport, runs the session, binds a
+`CouchConnection`, re-routes a guest whose WebRTC link dies, and can keep a
+drop-in host's world or pause the game while a player is missing.
+
+```gdscript
+var _net := CouchLobbySession.new()
+
+
+func _ready() -> void:
+    await CouchGames.init()
+    _net.snapshot_provider = func() -> Dictionary: return _world.to_snapshot()
+    _net.policy = CouchSessionPolicy.new()
+    _net.policy.max_input_players = 3          # more than one guest plays
+    _net.drop_in = true                        # only if both portal settings are on
+    add_child(_net)
+    _net.snapshot_received.connect(_world.apply_snapshot)
+    _net.intent_received.connect(_on_intent)   # host: check, apply, then send_snapshot
+    _net.transport_refused.connect(_on_refused)
+    await _net.start()                         # CouchGames.lobby by default
+    _net.connection.state_changed.connect(_on_connection_state)
+```
+
+What it does for you:
+
+- **Picks the transport once, at start.** `prefer` is
+  `CouchSessionTransport.PREFER_ROUTED` by default: WebRTC per guest, and the
+  lobby tunnel for a guest who can't use it (see
+  [Routing](#routing-webrtc-where-it-works-the-tunnel-where-it-doesnt)). On
+  Steam it is always the lobby wire, Steam's own networking. `transport` and
+  `transport_kind` tell you what it picked.
+- **Waits for routes before the session starts.** The first `evaluate()` is
+  held until every guest has its route, or `ready_timeout_ms` (5 s), because a
+  guest that misses the start still gets in through its hello retry.
+- **Answers every guest hello with a full snapshot** from `snapshot_provider`,
+  and publishes one when the host's session starts.
+- **Re-routes a dead WebRTC link.** When a guest's link can't be rebuilt, the
+  host ends the session with `"reroute"`, moves that guest to the tunnel and
+  starts a new epoch in its next frame. Every guest resyncs once, and the
+  host's connection stays `live`.
+- **Binds a `CouchConnection`**, as `connection`, and polls it. Read states
+  and player states from it as in the next section. Its overlay runs too.
+- **Forwards the session's signals**: `session_started`, `session_stopped`,
+  `snapshot_received`, `intent_received`, `input_received`, `hello_received`,
+  `player_joined`, `player_left`, `local_slot_changed`,
+  `held_intents_dropped`, `rejected`, `transport_gap`. `session` is the
+  `CouchSession` underneath if you need more.
+
+Set these before `start()`:
+
+| Setting | Default | What it does |
+|---|---|---|
+| `prefer` | `PREFER_ROUTED` | The transport preference. Every player in a lobby must use the same one |
+| `require_datagram` | `false` | Never use the tunnel: a player who can't use WebRTC gets `transport_refused` instead. For fast action games |
+| `drop_in` | `false` | A host whose last guest leaves keeps its session and world. See [Drop-in, drop-out](#drop-in-drop-out) |
+| `pause_on_drop` | `false` | Emit `pause_changed` while a needed player is missing. See below |
+| `policy` | defaults | A `CouchSessionPolicy`: `max_input_players`, `intent_hold_ms`, ... |
+| `ready_timeout_ms` | `5000` | How long the first `evaluate()` waits for routes |
+
+**`transport_refused(error)`** means this player can't play: `require_datagram`
+is on and WebRTC doesn't work here, either found at `start()` or by the host.
+For an error that starts with `webrtc-blocked:`,
+`CouchWebRTCProbe.describe(<the rest>)` is a line you can show the player.
+
+`stop()` ends the session and closes the transport. The connection ends with
+`left` and stays readable until the next `start()`. Leaving the tree calls
+`stop()` for you.
+
+### Pausing when a player drops
+
+By default the host keeps playing when a guest is away, the way the platform
+expects. A game that can't go on without every player sets
+`pause_on_drop = true` and applies `pause_changed(paused, reason)` itself:
+
+```gdscript
+_net.pause_on_drop = true
+_net.pause_changed.connect(func(paused: bool, _reason: String) -> void:
+    get_tree().paused = paused)
+```
+
+- **The host** pauses while a guest with an input slot is `away`, which
+  happens after the platform's 10 quiet seconds, or while its own connection
+  is `reconnecting`. The reason is `player-away` or `reconnecting`.
+- **A guest** pauses while its own connection is `reconnecting`, which
+  includes the host being away. It doesn't pause for other guests: the host's
+  world is paused, so the snapshots stop changing anyway.
+- `paused` and `pause_reason` give the current value. `stop()` and the end of
+  the connection lift the pause.
+
+Spectators don't count, and a player who is `gone` frees their slot, which
+lifts the pause too. Pausing the tree is fine: the driver and its connection
+run with `PROCESS_MODE_ALWAYS`, so they see the player come back.
+
+### Trying the driver in the editor
+
+The local relay has no WebRTC, so every guest is routed to the tunnel, which
+is the path a blocked player takes. To see `pause_on_drop`, run the mock
+commands in [Trying it in the editor](#trying-it-in-the-editor) and wait
+10 seconds after marking the guest `"disconnected"`. Every case is played
+headless by `netcode/fixtures/run_lobby_driver.gd`.
+
+`PREFER_AUTO` hasn't changed: a game wired by hand keeps its wire until it
+moves to the driver.
+
 ## CouchConnection: one state for the whole connection
 
 `CouchConnection` reads your session and the lobby and tells you, in one place,
 what is happening to the connection and to each player. It never sends anything,
-so it works over the lobby tunnel, WebRTC and Steam alike. Add one next to your
-session and bind it:
+so it works over the lobby tunnel, WebRTC and Steam alike. `CouchLobbySession`
+makes one for you (`connection`). With a `CouchSession` you wired yourself,
+add one next to it and bind it:
 
 ```gdscript
 var _connection := CouchConnection.new()
 
 
 func _start_session() -> void:
-    # ... create _session (a CouchSession or a CouchLobbySession) as usual ...
+    # ... create _session (a CouchSession) as usual ...
     add_child(_connection)
     _connection.bind(_session, CouchGames.lobby)
     _connection.state_changed.connect(_on_connection_state)
@@ -216,8 +324,7 @@ _transport.reroute_pending.connect(func(_peer: String) -> void:
 
 Every guest then resyncs once (`syncing`, then `live` in `CouchConnection`).
 Under `require_datagram` the guest is refused instead.
-
-> Coming: `CouchLobbySession` will use the routed transport and do this for you.
+`CouchLobbySession` uses the routed transport and does this for you.
 
 ### What the tunnel costs
 
@@ -250,8 +357,9 @@ join one guest from a browser with WebRTC switched off (Firefox:
 
 ## What your game must do
 
-1. **Bind a `CouchConnection`** to your session, as above, and drive your
-   match from its states instead of from session stop reasons.
+1. **Use `CouchLobbySession`, or bind a `CouchConnection`** to your own
+   session, as above, and drive your match from its states instead of from
+   session stop reasons.
 
 2. **Answer every `hello_received` with a complete snapshot.** This is what a
    reconnecting or restarted guest waits for. A partial or delta snapshot leaves
@@ -346,14 +454,17 @@ If both settings are on:
   [Multiple input players](../README.md#multiple-input-players)). An arrival
   then takes a free slot without restarting the session (`player_joined`), and
   a departure frees it (`player_left`).
-- **The host keeps its world when it's left alone.** The session underneath
-  still stops with `"roster-too-small"` and starts a new one with a new epoch
-  when the next guest arrives, but `CouchConnection` keeps the host `live`
-  throughout. On the next `hello_received`, send the newcomer the full snapshot
-  as usual.
-
-  > Coming: a `drop_in` setting on the session driver, so the session itself
-  > stays up and waits instead of stopping.
+- **Set `drop_in = true` on `CouchLobbySession`** (or
+  `CouchSessionPolicy.drop_in` on a session you wired yourself). A host whose
+  last guest leaves then keeps its session, epoch and world: the leaver's slot
+  is freed (`player_left`), the host stays `live` and waits, and the next
+  arrival takes a free slot (`player_joined`) and gets the full snapshot on
+  its hello. Without it, the session stops with `"roster-too-small"` and the
+  next arrival starts a new epoch, though `CouchConnection` still keeps the
+  host `live`. `drop_in` needs more than one input slot. With one, a pinned
+  guest leaving still stops the session (`"authorized-peer-left"`).
+- **The host's first session still needs a guest.** A host alone at start
+  waits for the first arrival before its session starts.
 
 - Handshakes is the one game with both settings on today.
 

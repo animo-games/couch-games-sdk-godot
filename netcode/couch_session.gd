@@ -76,7 +76,9 @@
 ## slot first (`player_joined`); the host re-broadcasts its hello whenever the
 ## map changed, and a guest whose slot changed mid-session reports it through
 ## `local_slot_changed`. A roster below two players still stops the session
-## ("roster-too-small"), with no `player_left`. N is fixed per session object and
+## ("roster-too-small"), with no `player_left`, unless CouchSessionPolicy.drop_in
+## is on: then a host left alone frees the leavers' slots and stays up under the
+## same epoch, waiting for the next arrival. N is fixed per session object and
 ## a guest never needs to know it: it only reads its own slot from the hello.
 ##
 ## Reserved kinds (`resync-request` / `resync-response`) are accepted
@@ -238,6 +240,7 @@ var _held_intents: Array = []                       # guest: [{body, at_ms}], ol
 ## Guest: this session had a slot when its link was reset, so intents sent
 ## before the session is live again are held rather than refused.
 var _hold_ok: bool = false
+var _drop_in: bool = false                          # CouchSessionPolicy.drop_in, multi mode only
 static var _warned_hand_wired: bool = false         # once per run, across sessions
 
 
@@ -249,6 +252,7 @@ func _init(roster: Object, transport: Object, policy: CouchSessionPolicy = null)
 	_max_input_players = maxi(1, policy.max_input_players)
 	_intent_hold_limit = maxi(0, policy.intent_hold_limit)
 	_intent_hold_ms = maxi(0, policy.intent_hold_ms)
+	_drop_in = policy.drop_in and _max_input_players > 1
 	if not _implements_roster(roster):
 		push_error("CouchSession: roster does not satisfy the required duck contract")
 		return
@@ -308,6 +312,11 @@ func evaluate(now_ms: int) -> void:
 		# The guest-side mirror: an engaged guest still in the roster whose host
 		# is gone was left by its host, in either mode.
 		var my_id := _field_string(_roster.get_me(), "user_id")
+		if _drop_in and _engaged and _is_host and _has_player(players, _host_id):
+			# Drop-in host left alone: free the leavers' slots and wait, under
+			# the same epoch, for the next arrival (CouchSessionPolicy.drop_in).
+			_reconcile_slots(players)
+			return
 		if (
 			_engaged
 			and not _is_host

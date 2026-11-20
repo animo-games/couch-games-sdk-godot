@@ -486,6 +486,11 @@ the roster or simulate events; the others will warn if you try.
 
 ## Sessions
 
+> Most host-authoritative games don't wire a session by hand: `CouchLobbySession`
+> picks the transport, runs the session and binds a `CouchConnection` for you.
+> See [the standard driver](docs/connections.md#couchlobbysession-the-standard-driver).
+> This section is what it does underneath.
+
 `CouchSession` is a host-authoritative session on top of the lobby: the host is
 the only machine that advances the game, one guest is pinned as the player that
 sends `input` and `intent`, everyone else spectates, and the host broadcasts
