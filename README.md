@@ -617,7 +617,10 @@ reports `peer-reconnected`, `peer-rejoined`, `link-rebuild` or a `steam:` gap),
 the host holds that guest's intent and input and asks it to hello again. The
 guest's session emits `session_stopped("link-reset")` then `session_started`,
 and sends no gameplay until the next snapshot, so your `hello_received` handler
-must send a complete one. The other players are not affected. This also covers
+must send a complete one. Intents the guest's game sends in that window, or
+while its link is down, are held for up to 3 seconds and sent in order right after that snapshot
+(see [Intents sent during a drop](docs/connections.md#intents-sent-during-a-drop)).
+The other players are not affected. This also covers
 a guest whose game restarted while the lobby still held its place: its first
 messages are accepted even though its counters started again from 1. Other gap
 reasons are only diagnostic.

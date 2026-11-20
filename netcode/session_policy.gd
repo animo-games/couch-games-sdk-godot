@@ -12,6 +12,16 @@ var no_baseline_ms: int = 1000
 ## and is not counted; 1 = today's single pinned guest (legacy behaviour).
 ## CouchSession reads this once at construction (floored at 1).
 var max_input_players: int = 1
+## How long a guest holds an intent it cannot send: its link is down, or it is
+## waiting for the snapshot that follows a link reset. Held intents go out in
+## order right after that snapshot; one held longer than this is dropped
+## instead (held_intents_dropped, "expired"), because an action from a long
+## outage would surprise everyone when it finally lands. Covers a short blip,
+## not an away player. 0 turns holding off completely.
+var intent_hold_ms: int = 3000
+## How many intents a guest holds at most. A full hold refuses the next intent
+## (send_intent returns false). 0 also turns holding off.
+var intent_hold_limit: int = 256
 
 
 static func default_policy() -> CouchSessionPolicy:
