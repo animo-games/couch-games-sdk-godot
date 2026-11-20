@@ -897,7 +897,10 @@ because the backend exposes one physical signaling socket. Low-level
 
 `CouchWebRTCSignalingSource` replaces the consumer-specific adapter name.
 `CouchRollbackSignalingAdapter` remains as a compatibility subclass for one
-migration release.
+migration release. It is about signaling only. For a rollback game's
+connection states (reconnecting, away players, the end of a match), bind a
+`CouchRollbackAdapter` (netcode/); see
+[Rollback games](docs/connections.md#rollback-games-couchrollbackadapter).
 
 ### Verbose logging
 
