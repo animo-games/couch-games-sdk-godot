@@ -167,6 +167,13 @@ var rejected_count: int:  # for the milestone report
 	get:
 		return _rejected_count
 
+## True once a CouchConnection (or a standard driver) reports this session's
+## connection. A session started without one warns once per run, in a game
+## (the CouchGames autoload is present), never in a headless fixture.
+var connection_bound: bool:
+	get:
+		return _connection_bound
+
 var _roster: Object
 var _transport: Object
 
@@ -196,6 +203,8 @@ var _now_ms: int = 0                                # cached from the last evalu
 var _next_hello_retry_ms: int = 0
 var _last_hello_state_request_ms: Dictionary = {}   # sender_id -> int, host-side rate limit
 var _warned_reserved_kind: bool = false             # at most one push_warning per session
+var _connection_bound: bool = false
+static var _warned_hand_wired: bool = false         # once per run, across sessions
 
 
 func _init(roster: Object, transport: Object, policy: CouchSessionPolicy = null) -> void:
@@ -211,6 +220,21 @@ func _init(roster: Object, transport: Object, policy: CouchSessionPolicy = null)
 		return
 	_transport.envelope_received.connect(_on_envelope_received)
 	_transport.transport_gap.connect(_on_transport_gap)
+
+
+## Called by CouchConnection.bind() and the standard drivers.
+func mark_connection_bound() -> void:
+	_connection_bound = true
+
+
+func _warn_if_hand_wired() -> void:
+	if _connection_bound or _warned_hand_wired:
+		return
+	var tree := Engine.get_main_loop() as SceneTree
+	if tree == null or tree.root.get_node_or_null("CouchGames") == null:
+		return
+	_warned_hand_wired = true
+	push_warning("CouchSession: started without a CouchConnection, so drops, away players and reconnects are not reported the standard way. Bind one: see docs/connections.md")
 
 
 static func _implements_roster(candidate: Object) -> bool:
@@ -401,6 +425,7 @@ func _evaluate_as_host(players: Array) -> void:
 	_send_host_hello("")   # broadcast
 
 	_active = true
+	_warn_if_hand_wired()
 	session_started.emit(_epoch, true, SLOT_HOST, _authorized_peer_id, _peer_name)
 
 	if _max_input_players > 1:
@@ -597,6 +622,7 @@ func _on_hello_at_guest(body: Dictionary) -> void:
 		local_slot_changed.emit(old_slot, new_slot)
 	if not _active:
 		_active = true
+		_warn_if_hand_wired()
 		session_started.emit(_epoch, false, _local_slot, _host_id, _peer_name)
 
 
