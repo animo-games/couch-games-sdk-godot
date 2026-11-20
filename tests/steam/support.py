@@ -95,7 +95,8 @@ def missing_uids():
     own Godot project is not scanned by the parent, so it is skipped."""
     tracked = subprocess.run(['git', 'ls-files'], cwd=SDK, capture_output=True, text=True, check=True).stdout.splitlines()
     files = set(tracked)
-    nested = [str(Path(f).parent) + '/' for f in tracked if f.endswith('/project.godot')]
+    # git prints '/' on every platform; Path would turn it into '\\' on Windows.
+    nested = [f[:-len('project.godot')] for f in tracked if f.endswith('/project.godot')]
     return sorted(f for f in tracked if f.endswith('.gd') and f + '.uid' not in files
                   and not any(f.startswith(n) for n in nested))
 
