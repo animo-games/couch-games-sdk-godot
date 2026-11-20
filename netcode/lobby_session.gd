@@ -49,6 +49,8 @@ func start(lobby: Object = null) -> void:
 	_lobby = lobby
 	_transport = CouchLobbyTransport.new(lobby)
 	_session = CouchSession.new(lobby, _transport)
+	# The standard driver: no hand-wired warning (docs/connections.md).
+	_session.mark_connection_bound()
 	_session.hello_received.connect(func(_sender): _send_snapshot())
 	_session.session_started.connect(_on_session_started)
 	_session.session_stopped.connect(func(reason): session_stopped.emit(reason))

@@ -70,46 +70,122 @@ With `CouchSession` (see [Sessions](../README.md#sessions)):
   roster row coming back from `"disconnected"`. One reconnect raises one
   `transport_gap(peer_id, "peer-reconnected")`, even when both report it.
 
+## CouchConnection: one state for the whole connection
+
+`CouchConnection` reads your session and the lobby and tells you, in one place,
+what is happening to the connection and to each player. It never sends anything,
+so it works over the lobby tunnel, WebRTC and Steam alike. Add one next to your
+session and bind it:
+
+```gdscript
+var _connection := CouchConnection.new()
+
+
+func _start_session() -> void:
+    # ... create _session (a CouchSession or a CouchLobbySession) as usual ...
+    add_child(_connection)
+    _connection.bind(_session, CouchGames.lobby)
+    _connection.state_changed.connect(_on_connection_state)
+    _connection.player_state_changed.connect(_on_player_state)
+
+
+func _on_connection_state(state: String, reason: String) -> void:
+    match state:
+        CouchConnection.STATE_SYNCING:
+            _world.discard_prediction()     # a snapshot is on its way
+        CouchConnection.STATE_LIVE:
+            _hud.show_playing()
+        CouchConnection.STATE_RECONNECTING:
+            pass                            # keep the world; see the reason below
+        CouchConnection.STATE_ENDED:
+            _end_match(CouchConnection.describe_end(_connection.end_reason, _host_name))
+
+
+func _on_player_state(user_id: String, state: String) -> void:
+    _hud.set_player_marker(user_id, state)  # connected, away or gone
+```
+
+A `CouchSession` started without a `CouchConnection` logs one warning per run,
+pointing here. `CouchLobbySession` doesn't warn, because it's already a
+standard driver.
+
+### Connection states
+
+| State | Meaning |
+|---|---|
+| `connecting` | Bound, no session yet |
+| `syncing` | Guest: the session started and is waiting for the host's snapshot |
+| `live` | Playing. A host is live from its session start and stays live while guests come and go, because its world runs on |
+| `reconnecting` | The link or the session is being rebuilt. `reason` says why: a session stop reason (`link-reset`, `host-restarted`, `steam-link-gap`, `role-changed`), `host-away`, or `own-connection` |
+| `ended` | Over. `end_reason` is one of `host-left`, `connection-lost`, `reconnect-timed-out`, `left` |
+
+`reconnecting` lasts at most `hold_ms`, then ends with `reconnect-timed-out`.
+The default follows the platform: 65 s on the web (the 60 s away limit, plus time
+for the platform's own end to arrive), 120 s on Steam (its recovery window),
+60 s elsewhere. Set `hold_ms` before `bind()` to change it.
+
+### Player states
+
+For every other player: `connected`, `away` or `gone`. Like the platform,
+`away` only shows after 10 quiet seconds (`AWAY_QUIET_MS`), so a short drop
+reports nothing. The local player is never reported. Read them at any time
+with `get_player_state(user_id)` or `get_players_state()`.
+
+### The host away on the web
+
+While the host is away, the platform leaves it out of the roster, and a guest's
+session stops with `"host-left"`. On the web a host who really left ends the
+room, and the platform unloads your game, so a game still running was left by
+a host who is only away. `CouchConnection` reports that as `reconnecting` with
+reason `host-away`, and the host's player state as `away` after the quiet
+stretch. Keep the world. When the host is back, the session starts again:
+`syncing`, then `live`. Off the web, `"host-left"` ends with `host-left`.
+
+### The overlay
+
+Off the web, `CouchConnection` shows a small notice at the top of the screen.
+It shows "Reconnecting…" once a resync has lasted a second, "<name>'s away"
+for an away player, and the end text when the connection ends. It runs while
+the game is paused. On the web it draws nothing, because the platform draws
+these notices itself.
+
+To draw your own, set `overlay_enabled = false` before adding the connection
+to the tree, and use the same pieces the built-in overlay uses:
+`overlay_lines()` (the lines to show now), `describe_end(reason, host_name)`
+and the two signals.
+
+### Logging
+
+Each state change prints one line, such as
+`CouchConnection: live -> reconnecting (link-reset)`, and so does each player
+state change. Set `log_enabled = false` to silence it.
+
 ## What your game must do
 
-1. **Answer every `hello_received` with a complete snapshot.** This is what a
+1. **Bind a `CouchConnection`** to your session, as above, and drive your
+   match from its states instead of from session stop reasons.
+
+2. **Answer every `hello_received` with a complete snapshot.** This is what a
    reconnecting or restarted guest waits for. A partial or delta snapshot leaves
-   that guest stuck or wrong.
+   that guest stuck or wrong. `CouchLobbySession` does this for you from its
+   `snapshot_provider`.
 
    ```gdscript
    _session.hello_received.connect(func(_guest_id: String) -> void:
        _session.broadcast_snapshot(_world.to_snapshot()))
    ```
 
-2. **Don't tear down the world on a guest's `session_stopped("link-reset")`.**
-   It's followed by `session_started` and a snapshot. Keep the scene, drop any
-   predicted state, and apply the snapshot when it comes.
+3. **Keep the world through `reconnecting` and `syncing`.** Both are followed
+   by `live` or `ended`. Drop any predicted state and apply the snapshot when
+   it comes. Only tear the match down on `ended`.
 
-   ```gdscript
-   func _on_session_stopped(reason: String) -> void:
-       if reason == "link-reset":
-           _world.discard_prediction()
-           return            # session_started and a snapshot follow
-       _world.stop()
-   ```
-
-3. **Treat `transport_gap` as information, not as a command.** The session
+4. **Treat `transport_gap` as information, not as a command.** The session
    already acts on the reasons that matter. Log gaps if you want to compare
    connections, but don't stop or restart anything on one.
 
-4. **Don't show your own "reconnecting" or "host left" screen on the web.** The
-   platform already covers the game while the host is away and shows the leave
-   notices. Steam and local play have no platform UI, so show your own there.
-
-5. **While the host is away, a guest's session stops with `"host-left"`.** The
-   platform leaves an away host out of the roster, so the guest can't tell
-   "away" from "left" by the roster alone. On the web a host who really left
-   ends the room, and the platform unloads your game. So if your game is still
-   running after `"host-left"` on the web, the host is away: keep the world, and
-   the session starts again when the host is back.
-
-   > Coming: `CouchConnection` will read this for you and report the host as
-   > away instead.
+5. **Don't draw your own reconnecting or away notices on the web.** The built-in
+   overlay already stands back there. If you draw your own, check
+   `connection.platform_ui` and do the same.
 
 ### Drop-in, drop-out
 
@@ -119,13 +195,14 @@ If both settings are on:
   [Multiple input players](../README.md#multiple-input-players)). An arrival
   then takes a free slot without restarting the session (`player_joined`), and
   a departure frees it (`player_left`).
-- **The host must keep its world when it's left alone.** Today, a roster below
-  two players stops the session with `"roster-too-small"`, and the next arrival
-  starts a new one with a new epoch. Keep your world through that stop. On the
-  next `hello_received`, send the newcomer the full snapshot as usual.
+- **The host keeps its world when it's left alone.** The session underneath
+  still stops with `"roster-too-small"` and starts a new one with a new epoch
+  when the next guest arrives, but `CouchConnection` keeps the host `live`
+  throughout. On the next `hello_received`, send the newcomer the full snapshot
+  as usual.
 
-  > Coming: a `drop_in` setting on the session driver, so a host left alone
-  > stays live and waiting instead of stopping.
+  > Coming: a `drop_in` setting on the session driver, so the session itself
+  > stays up and waits instead of stopping.
 
 - Handshakes is the one game with both settings on today.
 
@@ -149,10 +226,31 @@ CouchGames.mock.simulate_event("couchgames:peer-reconnected",
 CouchGames.mock.remove_player(guest_id)
 ```
 
+Off the web the built-in overlay shows the result: about 10 seconds after
+`set_player_status(guest_id, "disconnected")` the host's screen reads
+"Tester's away", and it clears when the guest is back.
+
 To test a restarted guest for real, run two instances (Debug > Run Multiple
 Instances), then close and reopen the guest instance while the host keeps running.
 
 ## Reference
+
+These tables are for games that read the session directly. With a
+`CouchConnection`, the mapping below is already applied.
+
+### Session stop reasons and the connection state they lead to
+
+| Session stop | CouchConnection |
+|---|---|
+| `link-reset`, `host-restarted`, `steam-link-gap`, `role-changed` (guest) | `reconnecting` with that reason |
+| `host-left` (guest) | Web: `reconnecting` (`host-away`). Elsewhere: `ended` (`host-left`) |
+| `roster-too-small` (guest) | Web: `reconnecting`. Elsewhere: `ended` (`connection-lost`) |
+| `roster-too-small`, `authorized-peer-left` (host) | Stays `live` |
+| `stopped` (the driver's own stop) | `ended` (`left`) |
+| `lobby-unavailable`, anything else | `ended` (`connection-lost`) |
+
+The lobby's own states (Steam) count too: `reconnecting` is `reconnecting`
+(`own-connection`), `failed` ends `connection-lost`, and `leaving` ends `left`.
 
 ### Why a session stopped (`session_stopped(reason)`)
 

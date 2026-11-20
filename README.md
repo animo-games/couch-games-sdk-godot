@@ -499,6 +499,7 @@ game makes **once, at boot**, and `CouchSessionTransport` is where it is made:
 ```gdscript
 var _transport: Object
 var _session: CouchSession
+var _connection := CouchConnection.new()
 
 
 func _ready() -> void:
@@ -511,6 +512,8 @@ func _ready() -> void:
         return
     _transport = picked.transport
     _session = CouchSession.new(CouchGames.lobby, _transport)
+    add_child(_connection)
+    _connection.bind(_session, CouchGames.lobby)   # drops, away and reconnects; see below
     _session.session_started.connect(_on_session_started)
     _session.session_stopped.connect(_on_session_stopped)
     _session.input_received.connect(_on_input)
@@ -623,6 +626,15 @@ it: [docs/connections.md](docs/connections.md).
 
 A guest whose host leaves stops with `host-left`, including in a two-player
 lobby. `roster-too-small` now means the guest is gone from the roster as well.
+
+### Connection state
+
+`CouchConnection` turns all of the above into one state for the local player
+(`connecting`, `syncing`, `live`, `reconnecting`, `ended`) and one for each other
+player (`connected`, `away`, `gone`). It also shows a notice off the web, where
+the platform doesn't draw its own. Bind one to every session. A `CouchSession`
+without one logs a single warning per run. The states, the end reasons and how
+to replace the notice are in [docs/connections.md](docs/connections.md#couchconnection-one-state-for-the-whole-connection).
 
 ## Experience files
 
